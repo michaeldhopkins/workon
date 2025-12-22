@@ -1,0 +1,20 @@
+layout {
+    pane size=1 borderless=true {
+        plugin location="tab-bar"
+    }
+    pane split_direction="vertical" {
+        pane split_direction="horizontal" size="50%" {
+            pane size="70%" {
+                command "claude"
+            }
+            pane size="30%" {
+            }
+        }
+        pane size="50%" {
+            command "branchdiff"
+        }
+    }
+    pane size=1 borderless=true {
+        plugin location="status-bar"
+    }
+}
