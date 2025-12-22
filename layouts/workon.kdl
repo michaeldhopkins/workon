@@ -1,13 +1,17 @@
+keybinds {
+    unbind "Alt f"
+}
+
 layout {
     pane size=1 borderless=true {
         plugin location="tab-bar"
     }
     pane split_direction="vertical" {
         pane split_direction="horizontal" size="50%" {
-            pane size="70%" {
+            pane size="80%" {
                 command "claude"
             }
-            pane size="30%" {
+            pane size="20%" {
             }
         }
         pane size="50%" {

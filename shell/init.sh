@@ -41,5 +41,5 @@ workon() {
 
     dir="$(cd "$dir" && pwd)"
     cd "$dir" || return 1
-    zellij --layout "$_WORKON_ROOT/layouts/workon.kdl"
+    zellij --layout "$_WORKON_ROOT/layouts/workon.kdl" options --simplified-ui true --show-startup-tips false
 }
