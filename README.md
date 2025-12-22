@@ -3,8 +3,8 @@
 Development workspace launcher using Zellij.
 
 Opens a project directory in a 3-pane Zellij layout:
-- **Left top (70%)**: Claude CLI
-- **Left bottom (30%)**: Terminal
+- **Left top (80%)**: Claude CLI
+- **Left bottom (20%)**: Terminal
 - **Right (50%)**: branchdiff (git diff viewer)
 
 ## Dependencies
@@ -40,3 +40,8 @@ workon ~/projects/myproject
 ```
 
 If any dependencies are missing, workon will list them and exit.
+
+## Tips
+
+- **Click URLs**: Use `Cmd+Shift+Click` to open hyperlinks (Shift bypasses zellij's mouse handling)
+- **Word navigation**: `Option+Left/Right` arrows work for moving between words
