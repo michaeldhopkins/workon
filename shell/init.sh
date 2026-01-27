@@ -27,7 +27,15 @@ _workon_check_deps() {
 }
 
 workon() {
-    local dir="${1:-.}"
+    local dir
+    local new_session=false
+
+    if [[ "$1" == "-n" ]]; then
+        new_session=true
+        shift
+    fi
+
+    dir="${1:-.}"
 
     if ! _workon_check_deps; then
         echo "Install missing dependencies and try again." >&2
@@ -41,5 +49,15 @@ workon() {
 
     dir="$(cd "$dir" && pwd)"
     cd "$dir" || return 1
-    zellij --layout "$_WORKON_ROOT/layouts/workon.kdl" options --simplified-ui true --show-startup-tips false
+
+    local session_name="$(basename "$dir")"
+
+    if [[ "$new_session" == true ]]; then
+        zellij delete-session "$session_name" --force 2>/dev/null
+        zellij -s "$session_name" -n "$_WORKON_ROOT/layouts/workon.kdl" options --simplified-ui true --show-startup-tips false
+    elif zellij attach "$session_name" 2>/dev/null; then
+        return 0
+    else
+        zellij -s "$session_name" -n "$_WORKON_ROOT/layouts/workon.kdl" options --simplified-ui true --show-startup-tips false
+    fi
 }

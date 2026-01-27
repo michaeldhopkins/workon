@@ -37,11 +37,23 @@ workon
 
 # Open specific directory
 workon ~/projects/myproject
+
+# Force new session (deletes existing session with same name)
+workon -n ~/projects/myproject
 ```
 
 If any dependencies are missing, workon will list them and exit.
 
+## Session Management
+
+workon uses Zellij sessions named after the directory basename. This means:
+
+- Running `workon ~/projects/foo` creates a session named "foo"
+- Running `workon ~/projects/foo` again attaches to the existing "foo" session
+- The terminal tab/window title shows the session name
+- Use `workon -n` to delete an existing session and start fresh
+
 ## Tips
 
 - **Click URLs**: Use `Cmd+Shift+Click` to open hyperlinks (Shift bypasses zellij's mouse handling)
-- **Word navigation**: `Option+Left/Right` arrows work for moving between words
+- **Locked mode**: Zellij starts in locked mode to prevent accidental shortcuts. Press `Ctrl+G` to unlock when you need Zellij features.
