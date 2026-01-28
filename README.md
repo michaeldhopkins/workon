@@ -20,7 +20,7 @@ Install all dependencies before using workon.
 Add to your `~/.zshrc` or `~/.bashrc`:
 
 ```bash
-source ~/projects/rust/workon/workon/shell/init.sh
+source /path/to/workon/shell/init.sh
 ```
 
 Then reload your shell:
