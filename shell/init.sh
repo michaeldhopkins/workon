@@ -139,6 +139,13 @@ _workon_workspace() {
         fi
     fi
 
+    # Pre-approve workspace trust so Claude doesn't prompt on launch
+    local claude_json="$HOME/.claude.json"
+    if [[ -f "$claude_json" ]]; then
+        jq --arg dir "$ws_dir" '.projects[$dir].hasTrustDialogAccepted = true' "$claude_json" > "${claude_json}.tmp" \
+            && mv "${claude_json}.tmp" "$claude_json"
+    fi
+
     cd "$ws_dir"
     zellij --new-session-with-layout "$_WORKON_ROOT/layouts/workon.kdl" --session "$tab_name"
 
