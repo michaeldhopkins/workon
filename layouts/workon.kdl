@@ -1,18 +1,16 @@
 default_mode "locked"
-session_serialization false
-on_force_close "quit"
 
 layout {
-    pane split_direction="vertical" {
-        pane split_direction="horizontal" size="50%" {
-            pane size="80%" {
-                command "claude"
+    tab {
+        pane split_direction="vertical" {
+            pane split_direction="horizontal" size="50%" {
+                pane command="claude" size="80%" focus=true
+                pane size="20%"
             }
-            pane size="20%" {
-            }
-        }
-        pane size="50%" {
-            command "branchdiff"
+            pane command="branchdiff" size="50%"
         }
     }
 }
+
+on_force_close "quit"
+session_serialization false

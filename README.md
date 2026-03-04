@@ -5,15 +5,14 @@ Development workspace launcher using Zellij.
 Opens a project directory in a 3-pane Zellij layout:
 - **Left top (80%)**: Claude CLI
 - **Left bottom (20%)**: Terminal
-- **Right (50%)**: branchdiff (git diff viewer)
+- **Right (50%)**: branchdiff
 
 ## Dependencies
 
 - [zellij](https://zellij.dev/) - Terminal multiplexer
 - [claude](https://claude.ai/code) - Claude CLI
-- [branchdiff](../branchdiff) - Git diff TUI
-
-Install all dependencies before using workon.
+- [branchdiff](https://github.com/michaeldhopkins/branchdiff) - Git/jj diff TUI
+- [jj](https://martinvonz.github.io/jj/) - Required for `-w` (workspace) mode
 
 ## Installation
 
@@ -23,37 +22,41 @@ Add to your `~/.zshrc` or `~/.bashrc`:
 source /path/to/workon/shell/init.sh
 ```
 
-Then reload your shell:
-
-```bash
-source ~/.zshrc
-```
-
 ## Usage
 
 ```bash
-# Open current directory
-workon
-
-# Open specific directory
-workon ~/projects/myproject
-
-# Force new session (deletes existing session with same name)
-workon -n ~/projects/myproject
+workon                # open current directory
+workon mbc            # open ~/workspace/mbc
+workon -n mbc         # force new session (destroys existing)
+workon -w mbc         # ephemeral jj workspace (parallel session)
 ```
 
-If any dependencies are missing, workon will list them and exit.
+## Workspace mode (`-w`)
 
-## Session Management
+Creates an ephemeral jj workspace in `~/.worktrees/` for running a second independent session on the same repo. The workspace is cleaned up when the Zellij session closes.
 
-workon uses Zellij sessions named after the directory basename. This means:
+What it does:
+1. Initializes jj (colocated) if the project only has git
+2. Creates a jj workspace branched from master
+3. Symlinks `.claude/` and copies `.env` from the main repo
+4. For Rails apps: creates an isolated test database and loads the schema
+5. Launches a Zellij session in the workspace
+6. On exit: prompts to bookmark uncommitted work, then cleans up the workspace, test database, and directory
 
-- Running `workon ~/projects/foo` creates a session named "foo"
-- Running `workon ~/projects/foo` again attaches to the existing "foo" session
-- The terminal tab/window title shows the session name
-- Use `workon -n` to delete an existing session and start fresh
+The primary session (`workon mbc`) is unaffected — it works directly in the project directory as before.
+
+### Limitations
+
+- The workspace shares the development database with the primary session. Don't run migrations or the Rails server from a workspace.
+- `parallel_rspec` uses shared test databases. Use `bundle exec rspec` in the workspace for isolated specs.
+
+## Session management
+
+Sessions are named after the directory basename. Running `workon mbc` twice reattaches to the existing session. Use `-n` to start fresh.
+
+Workspace sessions are named `<project>-ws-<id>` (e.g., `mbc-ws-a1b2c3`) and don't collide with primary sessions.
 
 ## Tips
 
-- **Click URLs**: Use `Cmd+Shift+Click` to open hyperlinks (Shift bypasses zellij's mouse handling)
-- **Locked mode**: Zellij starts in locked mode to prevent accidental shortcuts. Press `Ctrl+G` to unlock when you need Zellij features.
+- **Click URLs**: `Cmd+Shift+Click` to open hyperlinks (Shift bypasses zellij mouse handling)
+- **Locked mode**: Zellij starts in locked mode. Press `Ctrl+G` to unlock for Zellij features.
