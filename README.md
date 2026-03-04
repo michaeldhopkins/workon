@@ -37,7 +37,7 @@ Creates an ephemeral jj workspace in `~/.worktrees/` for running a second indepe
 
 What it does:
 1. Initializes jj (colocated) if the project only has git
-2. Creates a jj workspace branched from master
+2. Creates a jj workspace branched from trunk (main/master)
 3. Symlinks `.claude/` and copies `.env` from the main repo
 4. For Rails apps: creates an isolated test database and loads the schema
 5. Launches a Zellij session in the workspace

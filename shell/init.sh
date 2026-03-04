@@ -108,8 +108,11 @@ _workon_workspace() {
 
     mkdir -p "$HOME/.worktrees"
 
+    local main_branch
+    main_branch=$(jj -R "$project_dir" log -r 'trunk()' --no-graph -T 'bookmarks' --limit 1 | sed 's/@.*//')
+
     echo "Creating jj workspace ${ws_id}..."
-    if ! jj -R "$project_dir" workspace add "$ws_dir" --name "$ws_id" -r master 2>&1; then
+    if ! jj -R "$project_dir" workspace add "$ws_dir" --name "$ws_id" -r "$main_branch" 2>&1; then
         echo "Failed to create jj workspace"
         return 1
     fi
