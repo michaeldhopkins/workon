@@ -56,6 +56,24 @@ Sessions are named after the directory basename. Running `workon mbc` twice reat
 
 Workspace sessions are named `<project>-ws-<id>` (e.g., `mbc-ws-a1b2c3`) and don't collide with primary sessions.
 
+## Claude Code setup
+
+To skip the workspace trust prompt and auto-allow file operations in worktrees, add to `~/.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Edit(~/.worktrees/**)",
+      "Write(~/.worktrees/**)",
+      "Read(~/.worktrees/**)"
+    ]
+  }
+}
+```
+
+Workspace trust is also pre-seeded in `~/.claude.json` automatically on each `workon -w` launch.
+
 ## Tips
 
 - **Click URLs**: `Cmd+Shift+Click` to open hyperlinks (Shift bypasses zellij mouse handling)
