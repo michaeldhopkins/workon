@@ -253,9 +253,6 @@ jobs:
             artifacts/SHA256SUMS.txt
 
       - name: Trigger Homebrew tap update
-        if: env.TAP_TOKEN != ''
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
