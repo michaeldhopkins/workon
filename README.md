@@ -16,10 +16,14 @@ Opens a project directory in a 3-pane Zellij layout:
 
 ## Installation
 
-Add to your `~/.zshrc` or `~/.bashrc`:
+```bash
+brew install michaeldhopkins/tap/workon
+```
+
+Or build from source:
 
 ```bash
-source /path/to/workon/shell/init.sh
+cargo install workon
 ```
 
 ## Usage
@@ -49,6 +53,10 @@ The primary session (`workon mbc`) is unaffected — it works directly in the pr
 
 - The workspace shares the development database with the primary session. Don't run migrations or the Rails server from a workspace.
 - `parallel_rspec` uses shared test databases. Use `bundle exec rspec` in the workspace for isolated specs.
+
+## Custom layout
+
+The default Zellij layout is embedded in the binary. To override it, create `~/.config/workon/layout.kdl` with your preferred layout.
 
 ## Session management
 

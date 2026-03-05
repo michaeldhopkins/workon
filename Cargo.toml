@@ -1,0 +1,39 @@
+[package]
+name = "workon"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+description = "Development workspace launcher with Zellij, Claude CLI, and branchdiff"
+repository = "https://github.com/michaeldhopkins/workon"
+
+[[bin]]
+name = "workon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rand = "0.9"
+serde = "1"
+serde_json = "1"
+tempfile = "3"
+which = "7"
+
+[dev-dependencies]
+assert_cmd = "2"
+clap_complete = "4"
+clap_mangen = "0.2"
+predicates = "3"
+
+[lints.clippy]
+struct-excessive-bools = "deny"
+fn-params-excessive-bools = "deny"
+match_bool = "warn"
+bool_to_int_with_if = "warn"
+cognitive-complexity = "warn"
+too-many-lines = "warn"
+collapsible-if = "deny"
+too-many-arguments = "deny"
+needless-range-loop = "deny"
+extend_with_drain = "deny"
