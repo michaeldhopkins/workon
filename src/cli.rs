@@ -6,7 +6,7 @@ pub struct Cli {
     /// Project path or ~/workspace/<name>
     pub project: Option<String>,
 
-    /// Force new session (delete existing)
+    /// Force new session (delete existing, recover from hung server)
     #[arg(short = 'n', conflicts_with = "workspace")]
     pub new_session: bool,
 
