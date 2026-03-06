@@ -60,7 +60,7 @@ The default Zellij layout is embedded in the binary. To override it, create `~/.
 
 ## Session management
 
-Sessions are named after the directory basename. Running `workon mbc` twice reattaches to the existing session. Use `-n` to start fresh.
+Sessions are named after the directory basename. Running `workon mbc` twice reattaches to the existing session. Use `-n` to start fresh. If the zellij server is unresponsive, `-n` will detect the hang (5s timeout), kill the stuck server process, and launch a fresh session.
 
 Workspace sessions are named `<project>-ws-<id>` (e.g., `mbc-ws-a1b2c3`) and don't collide with primary sessions.
 

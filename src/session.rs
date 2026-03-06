@@ -1,8 +1,13 @@
+use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tempfile::NamedTempFile;
+use wait_timeout::ChildExt;
+
+const ZELLIJ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn run(name: &str, layout: &Path, working_dir: &Path, force_new: bool) -> Result<()> {
     if session_exists(name)? {
@@ -18,14 +23,12 @@ pub fn run(name: &str, layout: &Path, working_dir: &Path, force_new: bool) -> Re
 }
 
 fn session_exists(name: &str) -> Result<bool> {
-    let output = Command::new("zellij")
-        .args(["list-sessions", "--no-formatting"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .context("failed to list zellij sessions")?;
+    let output = match zellij_with_timeout(&["list-sessions", "--no-formatting"], true) {
+        Ok(output) => output,
+        Err(_) => return Ok(false),
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output);
     Ok(stdout.lines().any(|line| {
         line.split_whitespace()
             .next()
@@ -34,11 +37,57 @@ fn session_exists(name: &str) -> Result<bool> {
 }
 
 fn delete_session(name: &str) -> Result<()> {
-    Command::new("zellij")
-        .args(["delete-session", name, "--force"])
-        .status()
-        .context("failed to delete zellij session")?;
+    let _ = zellij_with_timeout(&["delete-session", name, "--force"], false);
     Ok(())
+}
+
+/// Run a zellij command with a timeout. If it hangs, kill the stuck server.
+fn zellij_with_timeout(args: &[&str], capture_stdout: bool) -> Result<Vec<u8>> {
+    let mut cmd = Command::new("zellij");
+    cmd.args(args)
+        .stdout(if capture_stdout { Stdio::piped() } else { Stdio::null() })
+        .stderr(Stdio::null());
+
+    match run_with_timeout(&mut cmd, ZELLIJ_TIMEOUT)? {
+        Some(stdout) => Ok(stdout),
+        None => {
+            kill_zellij_server();
+            anyhow::bail!("zellij command timed out; killed hung server")
+        }
+    }
+}
+
+/// Spawn a command and wait up to `timeout`. Returns `Some(stdout)` on success,
+/// `None` if the command was killed after timing out.
+fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<Option<Vec<u8>>> {
+    let mut child = cmd.spawn().context("failed to spawn command")?;
+
+    match child.wait_timeout(timeout)? {
+        Some(_status) => {
+            let mut stdout = Vec::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_end(&mut stdout);
+            }
+            Ok(Some(stdout))
+        }
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok(None)
+        }
+    }
+}
+
+fn kill_zellij_server() {
+    eprintln!("Warning: zellij server appears hung, killing it...");
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", "zellij-server"])
+        .status();
+    if let Ok(uid_output) = Command::new("id").arg("-u").output() {
+        let uid = String::from_utf8_lossy(&uid_output.stdout).trim().to_string();
+        let socket_dir = format!("/tmp/zellij-{uid}");
+        let _ = std::fs::remove_dir_all(socket_dir);
+    }
 }
 
 pub fn launch(name: &str, layout: &Path, working_dir: &Path) -> Result<()> {
@@ -111,4 +160,32 @@ fn zellij_config_path() -> Option<std::path::PathBuf> {
         .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
         .ok()?;
     Some(config_dir.join("zellij").join("config.kdl"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_with_timeout_returns_stdout_on_success() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello").stdout(Stdio::piped()).stderr(Stdio::null());
+
+        let result = run_with_timeout(&mut cmd, Duration::from_secs(5)).unwrap();
+        let stdout = result.expect("should complete within timeout");
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn run_with_timeout_returns_none_on_hang() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60").stdout(Stdio::null()).stderr(Stdio::null());
+
+        let start = std::time::Instant::now();
+        let result = run_with_timeout(&mut cmd, Duration::from_secs(1)).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "should return None on timeout");
+        assert!(elapsed < Duration::from_secs(3), "should not wait much longer than the timeout");
+    }
 }
