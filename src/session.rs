@@ -10,15 +10,16 @@ use wait_timeout::ChildExt;
 const ZELLIJ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn run(name: &str, layout: &Path, working_dir: &Path, force_new: bool) -> Result<()> {
+    let empty = std::collections::HashMap::new();
     if session_exists(name)? {
         if force_new {
             delete_session(name)?;
-            launch(name, layout, working_dir)
+            launch(name, layout, working_dir, &empty)
         } else {
             attach(name, working_dir)
         }
     } else {
-        launch(name, layout, working_dir)
+        launch(name, layout, working_dir, &empty)
     }
 }
 
@@ -90,7 +91,12 @@ fn kill_zellij_server() {
     }
 }
 
-pub fn launch(name: &str, layout: &Path, working_dir: &Path) -> Result<()> {
+pub fn launch(
+    name: &str,
+    layout: &Path,
+    working_dir: &Path,
+    extra_env: &std::collections::HashMap<String, String>,
+) -> Result<()> {
     let config = locked_config()?;
 
     Command::new("zellij")
@@ -101,6 +107,7 @@ pub fn launch(name: &str, layout: &Path, working_dir: &Path) -> Result<()> {
             name,
         ])
         .env("ZELLIJ_CONFIG_FILE", config.path())
+        .envs(extra_env)
         .current_dir(working_dir)
         .status()
         .context("failed to launch zellij session")?;

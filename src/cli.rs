@@ -13,4 +13,8 @@ pub struct Cli {
     /// Ephemeral jj workspace mode
     #[arg(short = 'w')]
     pub workspace: bool,
+
+    /// Skip copying gitignored files into the workspace
+    #[arg(long, requires = "workspace")]
+    pub skip_copy_ignored: bool,
 }
