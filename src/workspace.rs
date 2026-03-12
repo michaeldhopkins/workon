@@ -79,13 +79,6 @@ pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip
         bail!("failed to create jj workspace");
     }
 
-    let claude_dir = project_dir.join(".claude");
-    if claude_dir.is_dir() && !ws_dir.join(".claude").exists()
-        && let Err(e) = copy_dir_recursive(&claude_dir, &ws_dir.join(".claude"))
-    {
-        eprintln!("Warning: failed to copy .claude directory: {e}");
-    }
-
     if !skip_copy_ignored {
         // Snapshot ensures the git index is in sync with jj's working copy,
         // so git ls-files --ignored returns accurate results.
@@ -349,20 +342,6 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
 
 /// Run `mise env` in the given directory and parse the exported variables.
 /// Returns a map of env var names to values that mise wants set for that directory.
@@ -796,24 +775,6 @@ mod tests {
             std::fs::read_to_string(ws.join("config/settings.toml")).unwrap(),
             "tracked"
         );
-    }
-
-    #[test]
-    fn copy_dir_recursive_copies_nested_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("src_dir");
-        let dst = tmp.path().join("dst_dir");
-
-        std::fs::create_dir_all(src.join("sub/deep")).unwrap();
-        std::fs::write(src.join("top.txt"), "top").unwrap();
-        std::fs::write(src.join("sub/mid.txt"), "mid").unwrap();
-        std::fs::write(src.join("sub/deep/bottom.txt"), "bottom").unwrap();
-
-        copy_dir_recursive(&src, &dst).unwrap();
-
-        assert_eq!(std::fs::read_to_string(dst.join("top.txt")).unwrap(), "top");
-        assert_eq!(std::fs::read_to_string(dst.join("sub/mid.txt")).unwrap(), "mid");
-        assert_eq!(std::fs::read_to_string(dst.join("sub/deep/bottom.txt")).unwrap(), "bottom");
     }
 
     #[test]

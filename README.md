@@ -42,10 +42,10 @@ Creates an ephemeral jj workspace in `~/.worktrees/` for running a second indepe
 What it does:
 1. Initializes jj (colocated) if the project only has git
 2. Creates a jj workspace branched from trunk (main/master)
-3. Symlinks `.claude/` and copies `.env` from the main repo
+3. Clones gitignored files (build artifacts, `node_modules/`, `target/`, etc.) using APFS `clonefile(2)` on macOS for near-instant copy-on-write directory cloning, with cross-platform reflink fallback via [clonetree](https://crates.io/crates/clonetree)
 4. For Rails apps: creates an isolated test database and loads the schema
 5. Launches a Zellij session in the workspace
-6. On exit: prompts to bookmark uncommitted work, then cleans up the workspace, test database, and directory
+6. On exit: prompts to bookmark uncommitted work, forgets the jj workspace, drops any test database, and removes the directory in the background
 
 The primary session (`workon mbc`) is unaffected — it works directly in the project directory as before.
 
