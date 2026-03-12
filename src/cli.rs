@@ -2,6 +2,7 @@ use clap::Parser;
 
 #[derive(Parser)]
 #[command(name = "workon", version, about = "Development workspace launcher with Zellij")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     /// Project path or ~/workspace/<name>
     pub project: Option<String>,

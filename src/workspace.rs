@@ -80,10 +80,10 @@ pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip
     }
 
     let claude_dir = project_dir.join(".claude");
-    if claude_dir.is_dir() && !ws_dir.join(".claude").exists() {
-        if let Err(e) = copy_dir_recursive(&claude_dir, &ws_dir.join(".claude")) {
-            eprintln!("Warning: failed to copy .claude directory: {e}");
-        }
+    if claude_dir.is_dir() && !ws_dir.join(".claude").exists()
+        && let Err(e) = copy_dir_recursive(&claude_dir, &ws_dir.join(".claude"))
+    {
+        eprintln!("Warning: failed to copy .claude directory: {e}");
     }
 
     if !skip_copy_ignored {
@@ -269,12 +269,12 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
             continue;
         }
 
-        if let Some(parent) = dst.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("\rWarning: could not create directory {}: {e}", parent.display());
-                eprint!("Copying gitignored files... {}/{total}", i + 1);
-                continue;
-            }
+        if let Some(parent) = dst.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("\rWarning: could not create directory {}: {e}", parent.display());
+            eprint!("Copying gitignored files... {}/{total}", i + 1);
+            continue;
         }
 
         if let Err(e) = std::fs::copy(&src, &dst) {
