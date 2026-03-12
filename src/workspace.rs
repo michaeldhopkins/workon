@@ -167,8 +167,20 @@ fn cleanup(
         eprintln!("Dropped test database {db}");
     }
 
-    let _ = std::fs::remove_dir_all(ws_dir);
-    eprintln!("Removed workspace directory");
+    // Spawn rm -rf in the background so the user gets their shell back
+    // immediately. The OS will finish the deletion asynchronously.
+    match Command::new("rm")
+        .args(["-rf", &path_str(ws_dir)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => eprintln!("Removing workspace directory in background"),
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(ws_dir);
+            eprintln!("Removed workspace directory");
+        }
+    }
 
     Ok(())
 }
@@ -255,42 +267,85 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    eprint!("Copying gitignored files... 0/{total}");
-    let mut count = 0u32;
+    // On macOS/APFS, clonefile handles ~20k files/sec. On other platforms
+    // the per-file reflink fallback is closer to ~3k files/sec.
+    let rate = if cfg!(target_os = "macos") { 20_000 } else { 3_000 };
+    let est_secs = total / rate;
+    if est_secs >= 2 {
+        eprint!("Cloning {total} gitignored files (~{est_secs}s)...");
+    } else {
+        eprint!("Cloning {total} gitignored files...");
+    }
 
-    for (i, rel_path) in lines.iter().enumerate() {
-        let dst = ws_dir.join(rel_path);
+    // Collect unique first-level path components (dirs and root files).
+    let mut top_level: Vec<String> = lines.iter()
+        .map(|l| match l.find('/') {
+            Some(i) => l[..i].to_string(),
+            None => l.to_string(),
+        })
+        .collect();
+    top_level.sort_unstable();
+    top_level.dedup();
+
+    // Clone each top-level entry. On macOS/APFS this uses clonefile(2) to
+    // clone entire directory trees in a single syscall. On other platforms
+    // it walks the tree and reflinks each file individually.
+    let opts = clonetree::Options::new();
+    let mut cloned: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for name in &top_level {
+        let src = project_dir.join(name);
+        let dst = ws_dir.join(name);
+
         if dst.exists() {
             continue;
         }
 
-        let src = project_dir.join(rel_path);
-        if !src.is_file() {
-            continue;
-        }
-
-        if let Some(parent) = dst.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
+        if src.is_dir() {
+            if clonetree::clone_tree(&src, &dst, &opts).is_ok() {
+                cloned.insert(name);
+            }
+        } else if src.is_file()
+            && std::fs::copy(&src, &dst).is_ok()
         {
-            eprintln!("\rWarning: could not create directory {}: {e}", parent.display());
-            eprint!("Copying gitignored files... {}/{total}", i + 1);
-            continue;
-        }
-
-        if let Err(e) = std::fs::copy(&src, &dst) {
-            eprintln!("\rWarning: could not copy {}: {e}", rel_path);
-            eprint!("Copying gitignored files... {}/{total}", i + 1);
-            continue;
-        }
-
-        count += 1;
-
-        if (i + 1) % 500 == 0 || i + 1 == total {
-            eprint!("\rCopying gitignored files... {}/{total}", i + 1);
+            cloned.insert(name);
         }
     }
 
-    eprintln!("\rCopied {count} gitignored files into workspace    ");
+    // Copy any stragglers whose top-level clone failed.
+    let stragglers: Vec<&str> = lines.iter()
+        .filter(|l| {
+            let top = match l.find('/') {
+                Some(i) => &l[..i],
+                None => *l,
+            };
+            !cloned.contains(top)
+        })
+        .copied()
+        .collect();
+
+    let mut copied = 0usize;
+    if !stragglers.is_empty() {
+        for rel_path in &stragglers {
+            let dst = ws_dir.join(rel_path);
+            if dst.exists() { continue; }
+            let src = project_dir.join(rel_path);
+            if !src.is_file() { continue; }
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::copy(&src, &dst) {
+                eprintln!("\rWarning: could not copy {rel_path}: {e}");
+            } else {
+                copied += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "\rCloned {total} gitignored files ({} dirs cloned, {copied} copied individually)    ",
+        cloned.len(),
+    );
+
     Ok(())
 }
 
@@ -648,6 +703,99 @@ mod tests {
         copy_gitignored_files(&project, &ws).unwrap();
 
         assert_eq!(std::fs::read_to_string(ws.join("secret.key")).unwrap(), "already_here");
+    }
+
+    #[test]
+    fn copy_gitignored_files_clones_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+
+        Command::new("git")
+            .args(["init", &path_str(&project)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        std::fs::write(project.join(".gitignore"), "build/\nsecret.key\n").unwrap();
+        std::fs::write(project.join("tracked.txt"), "hello").unwrap();
+        std::fs::write(project.join("secret.key"), "root_file").unwrap();
+        std::fs::create_dir_all(project.join("build/sub")).unwrap();
+        std::fs::write(project.join("build/out.o"), "compiled").unwrap();
+        std::fs::write(project.join("build/sub/lib.a"), "archive").unwrap();
+
+        Command::new("git")
+            .args(["-C", &path_str(&project), "add", ".gitignore", "tracked.txt"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&project), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        copy_gitignored_files(&project, &ws).unwrap();
+
+        assert_eq!(std::fs::read_to_string(ws.join("secret.key")).unwrap(), "root_file");
+        assert_eq!(std::fs::read_to_string(ws.join("build/out.o")).unwrap(), "compiled");
+        assert_eq!(std::fs::read_to_string(ws.join("build/sub/lib.a")).unwrap(), "archive");
+    }
+
+    #[test]
+    fn copy_gitignored_files_falls_back_for_partially_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+
+        Command::new("git")
+            .args(["init", &path_str(&project)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        // config/ has both tracked and ignored files
+        std::fs::write(project.join(".gitignore"), "config/creds/\n").unwrap();
+        std::fs::create_dir_all(project.join("config/creds")).unwrap();
+        std::fs::write(project.join("config/settings.toml"), "tracked").unwrap();
+        std::fs::write(project.join("config/creds/secret.key"), "hidden").unwrap();
+
+        Command::new("git")
+            .args(["-C", &path_str(&project), "add", ".gitignore", "config/settings.toml"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&project), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        // Simulate jj workspace add having already placed tracked files
+        std::fs::create_dir_all(ws.join("config")).unwrap();
+        std::fs::write(ws.join("config/settings.toml"), "tracked").unwrap();
+
+        copy_gitignored_files(&project, &ws).unwrap();
+
+        // The ignored file should be copied via fallback (clone_tree fails
+        // because config/ already exists in ws)
+        assert_eq!(
+            std::fs::read_to_string(ws.join("config/creds/secret.key")).unwrap(),
+            "hidden"
+        );
+        // Tracked file should be untouched
+        assert_eq!(
+            std::fs::read_to_string(ws.join("config/settings.toml")).unwrap(),
+            "tracked"
+        );
     }
 
     #[test]
