@@ -11,9 +11,9 @@ pub struct Cli {
     #[arg(short = 'n', conflicts_with = "workspace")]
     pub new_session: bool,
 
-    /// Ephemeral jj workspace mode
-    #[arg(short = 'w')]
-    pub workspace: bool,
+    /// Ephemeral jj workspace mode, optionally with a label for the session
+    #[arg(short = 'w', num_args = 0..=1, default_missing_value = "")]
+    pub workspace: Option<String>,
 
     /// Skip copying gitignored files into the workspace
     #[arg(long, requires = "workspace")]

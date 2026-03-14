@@ -48,12 +48,18 @@ pub fn ensure_jj(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip_copy_ignored: bool) -> Result<()> {
-    let ws_id = generate_ws_id();
+pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip_copy_ignored: bool, label: Option<&str>) -> Result<()> {
+    let ws_id = match label {
+        Some(l) => format!("{}-{}", generate_ws_id(), slugify(l)),
+        None => generate_ws_id(),
+    };
     let ws_dir = home_dir()?
         .join(".worktrees")
         .join(format!("{project_name}-{ws_id}"));
-    let tab_name = format!("{project_name}-{ws_id}");
+    let tab_name = match label {
+        Some(l) => capitalize(l),
+        None => format!("{project_name}-{ws_id}"),
+    };
 
     std::fs::create_dir_all(home_dir()?.join(".worktrees"))?;
 
@@ -502,6 +508,24 @@ fn generate_ws_id() -> String {
     format!("ws-{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2])
 }
 
+fn slugify(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
 fn detect_trunk(project_dir: &Path) -> String {
     let ok = Command::new("git")
         .args(["-C", &path_str(project_dir), "rev-parse", "--verify", "origin/master"])
@@ -577,6 +601,23 @@ mod tests {
         let a = generate_ws_id();
         let b = generate_ws_id();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn slugify_converts_text_to_slug() {
+        assert_eq!(slugify("HD Ticket #12345"), "hd-ticket-12345");
+        assert_eq!(slugify("Fix the BUG"), "fix-the-bug");
+        assert_eq!(slugify("  leading/trailing  "), "leading-trailing");
+        assert_eq!(slugify("a--b"), "a-b");
+        assert_eq!(slugify("simple"), "simple");
+    }
+
+    #[test]
+    fn capitalize_uppercases_first_char() {
+        assert_eq!(capitalize("fix tests"), "Fix tests");
+        assert_eq!(capitalize("HD Ticket"), "HD Ticket");
+        assert_eq!(capitalize(""), "");
+        assert_eq!(capitalize("a"), "A");
     }
 
     #[test]
