@@ -119,12 +119,18 @@ mod tests {
         let origin = tmp.join("origin.git");
         let repo = tmp.join("repo");
 
-        // Create a bare origin
-        Command::new("git").args(["init", "--bare", &path_str(&origin)])
+        // Create a bare origin with explicit default branch
+        Command::new("git").args(["init", "--bare", "--initial-branch=main", &path_str(&origin)])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
         // Clone it to get a working repo with origin remote
         Command::new("git").args(["clone", &path_str(&origin), &path_str(&repo)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        // Configure user for CI environments where global config is absent
+        Command::new("git").args(["-C", &path_str(&repo), "config", "user.email", "test@test.com"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "config", "user.name", "Test"])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
         // Create initial commit and push
