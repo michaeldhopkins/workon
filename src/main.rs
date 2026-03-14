@@ -5,6 +5,7 @@ mod home;
 mod layout;
 mod resolve;
 mod session;
+mod vcs;
 mod workspace;
 
 use anyhow::Result;
@@ -20,8 +21,8 @@ fn main() -> Result<()> {
 
     if let Some(label) = cli.workspace {
         let label = if label.is_empty() { None } else { Some(label.as_str()) };
-        workspace::ensure_jj(&project.dir)?;
-        workspace::run_workspace(&project.dir, &project.name, layout.path(), cli.skip_copy_ignored, label)?;
+        let vcs = vcs::detect(&project.dir)?;
+        workspace::run_workspace(&project.dir, &project.name, layout.path(), cli.skip_copy_ignored, label, &*vcs)?;
     } else {
         session::run(&project.name, layout.path(), &project.dir, cli.new_session)?;
     }

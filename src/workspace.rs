@@ -8,47 +8,16 @@ use rand::Rng;
 
 use crate::claude_trust;
 use crate::session;
+use crate::vcs::Vcs;
 
-pub fn ensure_jj(project_dir: &Path) -> Result<()> {
-    let has_git = project_dir.join(".git").is_dir();
-    let has_jj = project_dir.join(".jj").is_dir();
-
-    if has_git && !has_jj {
-        eprintln!("Initializing jj colocated repo in {}...", project_dir.display());
-        run_cmd("jj", &["git", "init", "--colocate", "-R", &path_str(project_dir)])?;
-
-        let main_branch = detect_trunk(project_dir);
-
-        run_cmd(
-            "jj",
-            &[
-                "bookmark",
-                "track",
-                &format!("{main_branch}@origin"),
-                "-R",
-                &path_str(project_dir),
-            ],
-        )?;
-
-        run_cmd(
-            "jj",
-            &[
-                "config",
-                "set",
-                "--repo",
-                "remotes.origin.auto-track-bookmarks",
-                "glob:*",
-                "-R",
-                &path_str(project_dir),
-            ],
-        )?;
-
-        eprintln!("jj initialized, tracking {main_branch}@origin");
-    }
-    Ok(())
-}
-
-pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip_copy_ignored: bool, label: Option<&str>) -> Result<()> {
+pub fn run_workspace(
+    project_dir: &Path,
+    project_name: &str,
+    layout: &Path,
+    skip_copy_ignored: bool,
+    label: Option<&str>,
+    vcs: &dyn Vcs,
+) -> Result<()> {
     let ws_id = match label {
         Some(l) => format!("{}-{}", generate_ws_id(), slugify(l)),
         None => generate_ws_id(),
@@ -63,36 +32,11 @@ pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip
 
     std::fs::create_dir_all(home_dir()?.join(".worktrees"))?;
 
-    let main_branch = detect_trunk_jj(project_dir)?;
-
-    eprintln!("Creating jj workspace {ws_id}...");
-    let status = Command::new("jj")
-        .args([
-            "-R",
-            &path_str(project_dir),
-            "workspace",
-            "add",
-            &path_str(&ws_dir),
-            "--name",
-            &ws_id,
-            "-r",
-            &main_branch,
-        ])
-        .status()
-        .context("failed to create jj workspace")?;
-
-    if !status.success() {
-        bail!("failed to create jj workspace");
-    }
+    let trunk = vcs.detect_trunk(project_dir)?;
+    vcs.create_workspace(project_dir, &ws_dir, &ws_id, &trunk)?;
 
     if !skip_copy_ignored {
-        // Snapshot ensures the git index is in sync with jj's working copy,
-        // so git ls-files --ignored returns accurate results.
-        let _ = Command::new("jj")
-            .args(["-R", &path_str(project_dir), "snapshot"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        vcs.pre_copy_sync(project_dir);
 
         if let Err(e) = copy_gitignored_files(project_dir, &ws_dir) {
             eprintln!("Warning: failed to copy gitignored files: {e}");
@@ -103,8 +47,6 @@ pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip
         eprintln!("Warning: failed to trust mise configs: {e}");
     }
 
-    // Resolve mise environment for the worktree so child processes
-    // (including Claude Code's subshells) get the correct tool versions.
     let mise_vars = mise_env(&ws_dir);
 
     let mut created_db = None;
@@ -116,7 +58,7 @@ pub fn run_workspace(project_dir: &Path, project_name: &str, layout: &Path, skip
 
     session::launch(&tab_name, layout, &ws_dir, &mise_vars)?;
 
-    cleanup(&ws_id, project_dir, &ws_dir, created_db.as_deref())
+    cleanup(&ws_id, project_dir, &ws_dir, created_db.as_deref(), vcs)
 }
 
 fn cleanup(
@@ -124,39 +66,26 @@ fn cleanup(
     project_dir: &Path,
     ws_dir: &Path,
     created_db: Option<&str>,
+    vcs: &dyn Vcs,
 ) -> Result<()> {
     eprintln!();
     eprintln!("Cleaning up workspace {ws_id}...");
 
-    if has_uncommitted_changes(ws_id, project_dir) {
+    if vcs.has_uncommitted_changes(ws_id, project_dir, ws_dir) {
         eprintln!("Workspace has uncommitted changes.");
-        eprint!("Auto-bookmark as workon/{ws_id}? [y/N] ");
+        eprint!("Auto-save as workon/{ws_id}? [y/N] ");
         std::io::stderr().flush()?;
 
         let mut answer = String::new();
         std::io::stdin().read_line(&mut answer)?;
-        if answer.trim().eq_ignore_ascii_case("y") {
-            let _ = run_cmd(
-                "jj",
-                &[
-                    "-R",
-                    &path_str(project_dir),
-                    "bookmark",
-                    "set",
-                    &format!("workon/{ws_id}"),
-                    "-r",
-                    &format!("{ws_id}@"),
-                ],
-            );
-            eprintln!("Bookmarked as workon/{ws_id}");
+        if answer.trim().eq_ignore_ascii_case("y")
+            && let Err(e) = vcs.save_work(ws_id, project_dir, ws_dir)
+        {
+            eprintln!("Warning: failed to save work: {e}");
         }
     }
 
-    let _ = Command::new("jj")
-        .args(["-R", &path_str(project_dir), "workspace", "forget", ws_id])
-        .stderr(Stdio::null())
-        .status();
-    eprintln!("Forgot jj workspace {ws_id}");
+    vcs.forget_workspace(ws_id, project_dir, ws_dir);
 
     if let Some(db) = created_db {
         let _ = Command::new("dropdb")
@@ -182,28 +111,6 @@ fn cleanup(
     }
 
     Ok(())
-}
-
-fn has_uncommitted_changes(ws_id: &str, project_dir: &Path) -> bool {
-    Command::new("jj")
-        .args([
-            "-R",
-            &path_str(project_dir),
-            "log",
-            "--ignore-working-copy",
-            "-r",
-            &format!("{ws_id}@"),
-            "--no-graph",
-            "-T",
-            r#"if(empty, "", "changes")"#,
-            "--limit",
-            "1",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| !o.stdout.is_empty() && String::from_utf8_lossy(&o.stdout).contains("changes"))
-        .unwrap_or(false)
 }
 
 fn setup_rails_db(
@@ -526,56 +433,6 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-fn detect_trunk(project_dir: &Path) -> String {
-    let ok = Command::new("git")
-        .args(["-C", &path_str(project_dir), "rev-parse", "--verify", "origin/master"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-
-    if ok { "master".into() } else { "main".into() }
-}
-
-fn detect_trunk_jj(project_dir: &Path) -> Result<String> {
-    let output = Command::new("jj")
-        .args([
-            "-R",
-            &path_str(project_dir),
-            "log",
-            "-r",
-            "trunk()",
-            "--no-graph",
-            "-T",
-            "bookmarks",
-            "--limit",
-            "1",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .context("failed to detect trunk branch")?;
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let branch = raw.split('@').next().unwrap_or("main").trim();
-    if branch.is_empty() {
-        Ok("main".into())
-    } else {
-        Ok(branch.into())
-    }
-}
-
-fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to run {program}"))?;
-    if !status.success() {
-        bail!("{program} exited with status {status}");
-    }
-    Ok(())
-}
-
 fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
@@ -628,7 +485,6 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&ws).unwrap();
 
-        // Init a git repo with a .gitignore
         Command::new("git")
             .args(["init", &path_str(&project)])
             .stdout(Stdio::null())
@@ -638,12 +494,10 @@ mod tests {
         std::fs::write(project.join(".gitignore"), "secret.key\nconfig/creds/\n").unwrap();
         std::fs::write(project.join("tracked.txt"), "hello").unwrap();
 
-        // Create gitignored files
         std::fs::write(project.join("secret.key"), "supersecret").unwrap();
         std::fs::create_dir_all(project.join("config/creds")).unwrap();
         std::fs::write(project.join("config/creds/master.key"), "key123").unwrap();
 
-        // Commit tracked files so git recognizes the repo
         Command::new("git")
             .args(["-C", &path_str(&project), "add", ".gitignore", "tracked.txt"])
             .stdout(Stdio::null())
@@ -731,7 +585,6 @@ mod tests {
             .status()
             .unwrap();
 
-        // Pre-existing file in workspace should not be overwritten
         std::fs::write(ws.join("secret.key"), "already_here").unwrap();
 
         copy_gitignored_files(&project, &ws).unwrap();
@@ -794,7 +647,6 @@ mod tests {
             .stderr(Stdio::null())
             .status()
             .unwrap();
-        // config/ has both tracked and ignored files
         std::fs::write(project.join(".gitignore"), "config/creds/\n").unwrap();
         std::fs::create_dir_all(project.join("config/creds")).unwrap();
         std::fs::write(project.join("config/settings.toml"), "tracked").unwrap();
@@ -813,19 +665,15 @@ mod tests {
             .status()
             .unwrap();
 
-        // Simulate jj workspace add having already placed tracked files
         std::fs::create_dir_all(ws.join("config")).unwrap();
         std::fs::write(ws.join("config/settings.toml"), "tracked").unwrap();
 
         copy_gitignored_files(&project, &ws).unwrap();
 
-        // The ignored file should be copied via fallback (clone_tree fails
-        // because config/ already exists in ws)
         assert_eq!(
             std::fs::read_to_string(ws.join("config/creds/secret.key")).unwrap(),
             "hidden"
         );
-        // Tracked file should be untouched
         assert_eq!(
             std::fs::read_to_string(ws.join("config/settings.toml")).unwrap(),
             "tracked"
@@ -846,16 +694,13 @@ mod tests {
             .stderr(Stdio::null())
             .status()
             .unwrap();
-        // vendor/ has both tracked and ignored content
         std::fs::write(project.join(".gitignore"), "vendor/bundle/\n").unwrap();
         std::fs::create_dir_all(project.join("vendor")).unwrap();
         std::fs::write(project.join("vendor/tracked.txt"), "tracked").unwrap();
 
-        // Simulate a bundler git gem checkout (a nested git repo)
         let gem_dir = project.join("vendor/bundle/gems/some_gem-abc123");
         std::fs::create_dir_all(&gem_dir).unwrap();
         std::fs::write(gem_dir.join("lib.rb"), "puts 'hello'").unwrap();
-        // Make it a nested git repo so git treats it as a single directory entry
         Command::new("git")
             .args(["init", &path_str(&gem_dir)])
             .stdout(Stdio::null())
@@ -888,13 +733,11 @@ mod tests {
             .status()
             .unwrap();
 
-        // Simulate jj workspace add having already created vendor/ with tracked file
         std::fs::create_dir_all(ws.join("vendor")).unwrap();
         std::fs::write(ws.join("vendor/tracked.txt"), "tracked").unwrap();
 
         copy_gitignored_files(&project, &ws).unwrap();
 
-        // The nested git repo directory should have been cloned
         assert!(
             ws.join("vendor/bundle/gems/some_gem-abc123/lib.rb").exists(),
             "nested git repo content should be copied to workspace"
@@ -935,7 +778,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
-        // These should be skipped
         std::fs::create_dir_all(root.join(".hidden")).unwrap();
         std::fs::write(root.join(".hidden/.mise.toml"), "").unwrap();
         std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
@@ -952,10 +794,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
-        // depth 3 (within limit: root=0, a=1, b=2, c=3)
         std::fs::create_dir_all(root.join("a/b/c")).unwrap();
         std::fs::write(root.join("a/b/c/.mise.toml"), "").unwrap();
-        // depth 4 (beyond limit)
         std::fs::create_dir_all(root.join("a/b/c/d")).unwrap();
         std::fs::write(root.join("a/b/c/d/.mise.toml"), "").unwrap();
 
