@@ -266,9 +266,9 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
     let rate = if cfg!(target_os = "macos") { 20_000 } else { 3_000 };
     let est_secs = total / rate;
     if est_secs >= 2 {
-        eprint!("Cloning {total} gitignored files (~{est_secs}s)...");
+        eprintln!("Cloning {total} gitignored files (~{est_secs}s, skip with --skip-copy-ignored)...");
     } else {
-        eprint!("Cloning {total} gitignored files...");
+        eprintln!("Cloning {total} gitignored files (skip with --skip-copy-ignored)...");
     }
 
     // Collect unique first-level path components (dirs and root files).
@@ -349,7 +349,7 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "\rCloned {total} gitignored files ({} dirs cloned, {copied} copied individually)    ",
+        "Cloned {total} gitignored files ({} dirs cloned, {copied} copied individually)",
         cloned.len(),
     );
 
