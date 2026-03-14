@@ -253,6 +253,7 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
     let file_list = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = file_list.lines()
         .filter(|l| !l.is_empty() && !l.starts_with(".jj/"))
+        .map(|l| l.strip_suffix('/').unwrap_or(l))
         .collect();
     let total = lines.len();
 
@@ -322,14 +323,27 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
             let dst = ws_dir.join(rel_path);
             if dst.exists() { continue; }
             let src = project_dir.join(rel_path);
-            if !src.is_file() { continue; }
-            if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::copy(&src, &dst) {
-                eprintln!("\rWarning: could not copy {rel_path}: {e}");
-            } else {
-                copied += 1;
+            if src.is_dir() {
+                // Nested git repos (e.g. bundler git gem checkouts) appear as
+                // directory entries in `git ls-files --others`. Clone them whole.
+                if let Some(parent) = dst.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match clonetree::clone_tree(&src, &dst, &opts) {
+                    Ok(()) => copied += 1,
+                    Err(e) => {
+                        eprintln!("\rWarning: could not clone dir {rel_path}: {e}");
+                    }
+                }
+            } else if src.is_file() {
+                if let Some(parent) = dst.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::copy(&src, &dst) {
+                    eprintln!("\rWarning: could not copy {rel_path}: {e}");
+                } else {
+                    copied += 1;
+                }
             }
         }
     }
@@ -774,6 +788,83 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(ws.join("config/settings.toml")).unwrap(),
             "tracked"
+        );
+    }
+
+    #[test]
+    fn copy_gitignored_files_clones_nested_git_repos_as_stragglers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+
+        Command::new("git")
+            .args(["init", &path_str(&project)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        // vendor/ has both tracked and ignored content
+        std::fs::write(project.join(".gitignore"), "vendor/bundle/\n").unwrap();
+        std::fs::create_dir_all(project.join("vendor")).unwrap();
+        std::fs::write(project.join("vendor/tracked.txt"), "tracked").unwrap();
+
+        // Simulate a bundler git gem checkout (a nested git repo)
+        let gem_dir = project.join("vendor/bundle/gems/some_gem-abc123");
+        std::fs::create_dir_all(&gem_dir).unwrap();
+        std::fs::write(gem_dir.join("lib.rb"), "puts 'hello'").unwrap();
+        // Make it a nested git repo so git treats it as a single directory entry
+        Command::new("git")
+            .args(["init", &path_str(&gem_dir)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&gem_dir), "add", "."])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&gem_dir), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        Command::new("git")
+            .args(["-C", &path_str(&project), "add", ".gitignore", "vendor/tracked.txt"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&project), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        // Simulate jj workspace add having already created vendor/ with tracked file
+        std::fs::create_dir_all(ws.join("vendor")).unwrap();
+        std::fs::write(ws.join("vendor/tracked.txt"), "tracked").unwrap();
+
+        copy_gitignored_files(&project, &ws).unwrap();
+
+        // The nested git repo directory should have been cloned
+        assert!(
+            ws.join("vendor/bundle/gems/some_gem-abc123/lib.rb").exists(),
+            "nested git repo content should be copied to workspace"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("vendor/bundle/gems/some_gem-abc123/lib.rb")).unwrap(),
+            "puts 'hello'"
+        );
+        assert!(
+            ws.join("vendor/bundle/gems/some_gem-abc123/.git").exists(),
+            "nested .git directory should be cloned too"
         );
     }
 
