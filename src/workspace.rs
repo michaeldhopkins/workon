@@ -7,15 +7,16 @@ use anyhow::{bail, Context, Result};
 use rand::Rng;
 
 use crate::claude_trust;
+use crate::layout;
 use crate::session;
 use crate::vcs::Vcs;
 
 pub fn run_workspace(
     project_dir: &Path,
     project_name: &str,
-    layout: &Path,
     skip_copy_ignored: bool,
     label: Option<&str>,
+    resume: Option<&str>,
     vcs: &dyn Vcs,
 ) -> Result<()> {
     let ws_id = match label {
@@ -56,13 +57,24 @@ pub fn run_workspace(
 
     let _ = claude_trust::approve_workspace(&ws_dir);
 
-    session::launch(&tab_name, layout, &ws_dir, &mise_vars)?;
+    let ws_layout;
+    let claude_session_id;
+    if let Some(prev_session_id) = resume {
+        migrate_claude_session(prev_session_id, &ws_dir);
+        ws_layout = layout::get_resume_layout(prev_session_id)?;
+        claude_session_id = prev_session_id.to_string();
+    } else {
+        claude_session_id = generate_claude_session_id();
+        ws_layout = layout::get_workspace_layout(&claude_session_id)?;
+    }
+    session::launch(&tab_name, ws_layout.path(), &ws_dir, &mise_vars)?;
 
-    cleanup(&ws_id, project_dir, &ws_dir, created_db.as_deref(), vcs)
+    cleanup(&ws_id, &claude_session_id, project_dir, &ws_dir, created_db.as_deref(), vcs)
 }
 
 fn cleanup(
     ws_id: &str,
+    claude_session_id: &str,
     project_dir: &Path,
     ws_dir: &Path,
     created_db: Option<&str>,
@@ -70,6 +82,8 @@ fn cleanup(
 ) -> Result<()> {
     eprintln!();
     eprintln!("Cleaning up workspace {ws_id}...");
+    eprintln!("Claude session: {claude_session_id}");
+    eprintln!("  Resume with: workon -w --resume {claude_session_id}");
 
     const GENERATED_FILES: &[&str] = &[".env.test.local"];
     let changed = vcs.changed_files(ws_id, project_dir, ws_dir);
@@ -414,9 +428,58 @@ fn find_mise_configs_recursive(dir: &Path, configs: &mut Vec<PathBuf>, depth: u3
     }
 }
 
+/// Copy a Claude session file from wherever it was originally stored to the new
+/// workspace's project directory so `claude --resume` can find it.
+fn migrate_claude_session(session_id: &str, new_ws_dir: &Path) {
+    let claude_dir = match home_dir() {
+        Ok(h) => h.join(".claude").join("projects"),
+        Err(_) => return,
+    };
+    let session_file = format!("{session_id}.jsonl");
+
+    // Scan all project dirs for the session file
+    let entries = match std::fs::read_dir(&claude_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let src = entry.path().join(&session_file);
+        if src.is_file() {
+            let dest_dir_name = encode_claude_project_path(new_ws_dir);
+            let dest_dir = claude_dir.join(dest_dir_name);
+            let _ = std::fs::create_dir_all(&dest_dir);
+            match std::fs::copy(&src, dest_dir.join(&session_file)) {
+                Ok(_) => {
+                    eprintln!("Migrated Claude session to new workspace");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to copy Claude session: {e}");
+                    return;
+                }
+            }
+        }
+    }
+    eprintln!("Warning: could not find Claude session {session_id}");
+}
+
+/// Encode a path the way Claude Code does for its project directory names.
+/// Non-alphanumeric characters are replaced with `-`.
+/// `/Users/foo/.worktrees/bar` → `-Users-foo--worktrees-bar`
+fn encode_claude_project_path(path: &Path) -> String {
+    path_str(path)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 fn generate_ws_id() -> String {
     let bytes: [u8; 3] = rand::rng().random();
     format!("ws-{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2])
+}
+
+fn generate_claude_session_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn slugify(text: &str) -> String {
@@ -455,6 +518,18 @@ mod tests {
         assert!(id.starts_with("ws-"));
         assert_eq!(id.len(), 9); // "ws-" + 6 hex chars
         assert!(id[3..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn encode_claude_project_path_matches_claude_convention() {
+        let p = Path::new("/Users/foo/.worktrees/bar-ws-abc123");
+        assert_eq!(encode_claude_project_path(p), "-Users-foo--worktrees-bar-ws-abc123");
+    }
+
+    #[test]
+    fn claude_session_id_is_valid_uuid() {
+        let id = generate_claude_session_id();
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "should be a valid UUID: {id}");
     }
 
     #[test]
