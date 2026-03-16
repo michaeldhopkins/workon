@@ -42,14 +42,19 @@ impl Vcs for GitBackend {
         // git worktrees have their own index; no sync needed.
     }
 
-    fn has_uncommitted_changes(&self, _ws_id: &str, _project_dir: &Path, ws_dir: &Path) -> bool {
+    fn changed_files(&self, _ws_id: &str, _project_dir: &Path, ws_dir: &Path) -> Vec<String> {
         Command::new("git")
             .args(["-C", &path_str(ws_dir), "status", "--porcelain"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
-            .map(|o| !o.stdout.is_empty())
-            .unwrap_or(false)
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|line| line.get(3..).map(|p| p.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
@@ -146,23 +151,24 @@ mod tests {
     }
 
     #[test]
-    fn has_uncommitted_changes_clean_repo() {
+    fn changed_files_clean_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let (_origin, repo) = init_repo_with_remote(tmp.path());
 
         let backend = GitBackend;
-        assert!(!backend.has_uncommitted_changes("ws-test", &repo, &repo));
+        assert!(backend.changed_files("ws-test", &repo, &repo).is_empty());
     }
 
     #[test]
-    fn has_uncommitted_changes_dirty_repo() {
+    fn changed_files_dirty_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let (_origin, repo) = init_repo_with_remote(tmp.path());
 
         std::fs::write(repo.join("new_file.txt"), "dirty").unwrap();
 
         let backend = GitBackend;
-        assert!(backend.has_uncommitted_changes("ws-test", &repo, &repo));
+        let files = backend.changed_files("ws-test", &repo, &repo);
+        assert_eq!(files, vec!["new_file.txt"]);
     }
 
     #[test]

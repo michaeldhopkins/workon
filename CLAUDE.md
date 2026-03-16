@@ -9,7 +9,14 @@ cargo check --locked        # type-check
 cargo test --locked         # run tests
 cargo clippy --locked -- -D warnings   # lint (warnings are errors)
 cargo deny check licenses   # license audit
+cargo install --path .      # install locally so the user can test
 ```
+
+Always run `cargo install --path .` after tests and clippy pass. The user expects the locally installed binary to reflect the latest changes.
+
+## Versioning
+
+Bump the version in `Cargo.toml` with every change. Use semver: patch for fixes/improvements, minor for new features, major for breaking changes. Do this before running the build & test steps so the lockfile and installed binary reflect the new version.
 
 ## Pre-push checklist
 
