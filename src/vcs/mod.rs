@@ -13,7 +13,7 @@ pub trait Vcs: Send + Sync {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String>;
     fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()>;
     fn pre_copy_sync(&self, project_dir: &Path);
-    fn has_uncommitted_changes(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> bool;
+    fn changed_files(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String>;
     fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
     fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path);
 }

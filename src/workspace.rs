@@ -71,7 +71,11 @@ fn cleanup(
     eprintln!();
     eprintln!("Cleaning up workspace {ws_id}...");
 
-    if vcs.has_uncommitted_changes(ws_id, project_dir, ws_dir) {
+    const GENERATED_FILES: &[&str] = &[".env.test.local"];
+    let changed = vcs.changed_files(ws_id, project_dir, ws_dir);
+    let has_meaningful_changes = changed.iter().any(|f| !GENERATED_FILES.contains(&f.as_str()));
+
+    if has_meaningful_changes {
         eprintln!("Workspace has uncommitted changes.");
         eprint!("Auto-save as workon/{ws_id}? [y/N] ");
         std::io::stderr().flush()?;

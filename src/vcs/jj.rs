@@ -99,21 +99,24 @@ impl Vcs for JjBackend {
             .status();
     }
 
-    fn has_uncommitted_changes(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> bool {
+    fn changed_files(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
         Command::new("jj")
             .args([
                 "-R", &path_str(project_dir),
-                "log", "--ignore-working-copy",
+                "diff", "--ignore-working-copy",
                 "-r", &format!("{ws_id}@"),
-                "--no-graph",
-                "-T", r#"if(empty, "", "changes")"#,
-                "--limit", "1",
+                "--summary",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
-            .map(|o| !o.stdout.is_empty() && String::from_utf8_lossy(&o.stdout).contains("changes"))
-            .unwrap_or(false)
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|line| line.split_once(' ').map(|(_, path)| path.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn save_work(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Result<()> {
