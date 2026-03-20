@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
 use rand::Rng;
@@ -170,6 +171,27 @@ fn setup_rails_db(
 }
 
 fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
+    let files = enumerate_gitignored_files(project_dir)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+    let total = files.len();
+    // On macOS/APFS, clonefile handles ~20k files/sec. On other platforms
+    // the per-file reflink fallback is closer to ~3k files/sec.
+    let rate = if cfg!(target_os = "macos") { 20_000 } else { 3_000 };
+    let est_secs = total / rate;
+    if est_secs >= 2 {
+        eprintln!("Cloning {total} gitignored files (~{est_secs}s, skip with --skip-copy-ignored)...");
+    } else {
+        eprintln!("Cloning {total} gitignored files (skip with --skip-copy-ignored)...");
+    }
+    let cancelled = AtomicBool::new(false);
+    let silent = AtomicBool::new(false);
+    do_copy_files(project_dir, ws_dir, &files, &cancelled, &silent);
+    Ok(())
+}
+
+fn enumerate_gitignored_files(project_dir: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .args(["-C", &path_str(project_dir), "ls-files", "--others", "--ignored", "--exclude-standard"])
         .stdout(Stdio::piped())
@@ -182,42 +204,36 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
     }
 
     let file_list = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = file_list.lines()
+    Ok(file_list.lines()
         .filter(|l| !l.is_empty() && !l.starts_with(".jj/"))
-        .map(|l| l.strip_suffix('/').unwrap_or(l))
-        .collect();
-    let total = lines.len();
+        .map(|l| l.strip_suffix('/').unwrap_or(l).to_string())
+        .collect())
+}
 
-    if total == 0 {
-        return Ok(());
-    }
-
-    // On macOS/APFS, clonefile handles ~20k files/sec. On other platforms
-    // the per-file reflink fallback is closer to ~3k files/sec.
-    let rate = if cfg!(target_os = "macos") { 20_000 } else { 3_000 };
-    let est_secs = total / rate;
-    if est_secs >= 2 {
-        eprintln!("Cloning {total} gitignored files (~{est_secs}s, skip with --skip-copy-ignored)...");
-    } else {
-        eprintln!("Cloning {total} gitignored files (skip with --skip-copy-ignored)...");
-    }
+fn do_copy_files(
+    project_dir: &Path,
+    ws_dir: &Path,
+    files: &[String],
+    cancelled: &AtomicBool,
+    silent: &AtomicBool,
+) {
+    let total = files.len();
 
     // Collect unique first-level path components (dirs and root files).
-    let mut top_level: Vec<String> = lines.iter()
+    let mut top_level: Vec<String> = files.iter()
         .map(|l| match l.find('/') {
             Some(i) => l[..i].to_string(),
-            None => l.to_string(),
+            None => l.clone(),
         })
         .collect();
     top_level.sort_unstable();
     top_level.dedup();
 
-    // Clone each top-level entry. On macOS/APFS this uses clonefile(2) to
-    // clone entire directory trees in a single syscall. On other platforms
-    // it walks the tree and reflinks each file individually.
     let opts = clonetree::Options::new();
     let mut cloned: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for name in &top_level {
+        if cancelled.load(Ordering::Relaxed) { return; }
+
         let src = project_dir.join(name);
         let dst = ws_dir.join(name);
 
@@ -237,55 +253,61 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
     }
 
     // Copy any stragglers whose top-level clone failed.
-    let stragglers: Vec<&str> = lines.iter()
+    let stragglers: Vec<&str> = files.iter()
         .filter(|l| {
             let top = match l.find('/') {
                 Some(i) => &l[..i],
-                None => *l,
+                None => l.as_str(),
             };
             !cloned.contains(top)
         })
-        .copied()
+        .map(String::as_str)
         .collect();
 
     let mut copied = 0usize;
-    if !stragglers.is_empty() {
-        for rel_path in &stragglers {
-            let dst = ws_dir.join(rel_path);
-            if dst.exists() { continue; }
-            let src = project_dir.join(rel_path);
-            if src.is_dir() {
-                // Nested git repos (e.g. bundler git gem checkouts) appear as
-                // directory entries in `git ls-files --others`. Clone them whole.
-                if let Some(parent) = dst.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match clonetree::clone_tree(&src, &dst, &opts) {
-                    Ok(()) => copied += 1,
-                    Err(e) => {
+    for rel_path in &stragglers {
+        if cancelled.load(Ordering::Relaxed) { return; }
+
+        let dst = ws_dir.join(rel_path);
+        if dst.exists() { continue; }
+        let src = project_dir.join(rel_path);
+        if src.is_dir() {
+            // Nested git repos (e.g. bundler git gem checkouts) appear as
+            // directory entries in `git ls-files --others`. Clone them whole.
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match clonetree::clone_tree(&src, &dst, &opts) {
+                Ok(()) => copied += 1,
+                Err(e) => {
+                    if !silent.load(Ordering::Relaxed) {
                         eprintln!("\rWarning: could not clone dir {rel_path}: {e}");
                     }
                 }
-            } else if src.is_file() {
-                if let Some(parent) = dst.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::copy(&src, &dst) {
+            }
+        } else if src.is_file() {
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::copy(&src, &dst) {
+                if !silent.load(Ordering::Relaxed) {
                     eprintln!("\rWarning: could not copy {rel_path}: {e}");
-                } else {
-                    copied += 1;
                 }
+            } else {
+                copied += 1;
             }
         }
     }
 
-    eprintln!(
-        "Cloned {total} gitignored files ({} dirs cloned, {copied} copied individually)",
-        cloned.len(),
-    );
-
-    Ok(())
+    if !silent.load(Ordering::Relaxed) {
+        eprintln!(
+            "Cloned {total} gitignored files ({} dirs cloned, {copied} copied individually)",
+            cloned.len(),
+        );
+    }
 }
+
+
 
 
 /// Run `mise env` in the given directory and parse the exported variables.
@@ -900,5 +922,88 @@ not an export line
         assert_eq!(vars.get("RUBY_ROOT").unwrap(), "/home/user/.mise/installs/ruby/4.0.1");
         assert_eq!(vars.get("COMPOSER_HOME").unwrap(), "/home/user/.composer");
         assert!(!vars.contains_key("not"));
+    }
+
+    #[test]
+    fn do_copy_files_stops_on_cancel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+
+        Command::new("git")
+            .args(["init", &path_str(&project)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        std::fs::write(project.join(".gitignore"), "a.key\nb.key\nc.key\n").unwrap();
+        std::fs::write(project.join("a.key"), "a").unwrap();
+        std::fs::write(project.join("b.key"), "b").unwrap();
+        std::fs::write(project.join("c.key"), "c").unwrap();
+
+        Command::new("git")
+            .args(["-C", &path_str(&project), "add", ".gitignore"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&project), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        // Cancel immediately before copying starts
+        let cancelled = AtomicBool::new(true);
+        let silent = AtomicBool::new(false);
+        let files = enumerate_gitignored_files(&project).unwrap();
+        do_copy_files(&project, &ws, &files, &cancelled, &silent);
+
+        assert!(!ws.join("a.key").exists(), "no files should be copied when cancelled");
+        assert!(!ws.join("b.key").exists());
+        assert!(!ws.join("c.key").exists());
+    }
+
+    #[test]
+    fn do_copy_files_respects_silent_flag() {
+        // Verify do_copy_files completes successfully with silent=true
+        // (no panics from suppressed output).
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+
+        Command::new("git")
+            .args(["init", &path_str(&project)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        std::fs::write(project.join(".gitignore"), "secret.key\n").unwrap();
+        std::fs::write(project.join("secret.key"), "value").unwrap();
+
+        Command::new("git")
+            .args(["-C", &path_str(&project), "add", ".gitignore"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&project), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        let cancelled = AtomicBool::new(false);
+        let silent = AtomicBool::new(true);
+        let files = enumerate_gitignored_files(&project).unwrap();
+        do_copy_files(&project, &ws, &files, &cancelled, &silent);
+
+        assert_eq!(std::fs::read_to_string(ws.join("secret.key")).unwrap(), "value");
     }
 }
