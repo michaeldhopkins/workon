@@ -1006,4 +1006,57 @@ not an export line
 
         assert_eq!(std::fs::read_to_string(ws.join("secret.key")).unwrap(), "value");
     }
+
+    #[test]
+    fn copy_gitignored_files_into_jj_workspace() {
+        // Simulate copying into a workspace that was created by `jj workspace add`:
+        // the workspace has tracked files and a .jj/ directory but no .git/.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+
+        Command::new("git")
+            .args(["init", &path_str(&project)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        std::fs::write(project.join(".gitignore"), "target/\n.env\n").unwrap();
+        std::fs::write(project.join("src.txt"), "code").unwrap();
+
+        Command::new("git")
+            .args(["-C", &path_str(&project), "add", "."])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&project), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        // Create gitignored files in the project
+        std::fs::create_dir_all(project.join("target/debug")).unwrap();
+        std::fs::write(project.join("target/debug/app"), "binary").unwrap();
+        std::fs::write(project.join(".env"), "SECRET=123").unwrap();
+
+        // Simulate a jj workspace: has tracked files and .jj/ but no .git/
+        std::fs::write(ws.join("src.txt"), "code").unwrap();
+        std::fs::create_dir_all(ws.join(".jj/working_copy")).unwrap();
+
+        copy_gitignored_files(&project, &ws).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(ws.join("target/debug/app")).unwrap(),
+            "binary"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join(".env")).unwrap(),
+            "SECRET=123"
+        );
+    }
 }
