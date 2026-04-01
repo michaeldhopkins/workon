@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
-use super::{path_str, run_cmd, Vcs};
+use super::{detect_git_remote, path_str, run_cmd, Vcs};
 
 pub struct JjBackend;
 
@@ -12,62 +12,84 @@ pub(crate) fn init_jj(project_dir: &Path) -> Result<()> {
     eprintln!("Initializing jj colocated repo in {}...", project_dir.display());
     run_cmd("jj", &["git", "init", "--colocate", "-R", &path_str(project_dir)])?;
 
-    let main_branch = detect_trunk_git(project_dir);
+    let (main_branch, remote) = detect_trunk_git(project_dir);
 
     run_cmd(
         "jj",
         &[
             "bookmark", "track",
-            &format!("{main_branch}@origin"),
+            &format!("{main_branch}@{remote}"),
             "-R", &path_str(project_dir),
         ],
     )?;
 
+    let auto_track_key = format!("remotes.{remote}.auto-track-bookmarks");
     run_cmd(
         "jj",
         &[
             "config", "set", "--repo",
-            "remotes.origin.auto-track-bookmarks", "glob:*",
+            &auto_track_key, "glob:*",
             "-R", &path_str(project_dir),
         ],
     )?;
 
-    eprintln!("jj initialized, tracking {main_branch}@origin");
+    eprintln!("jj initialized, tracking {main_branch}@{remote}");
     Ok(())
 }
 
-fn detect_trunk_git(project_dir: &Path) -> String {
-    let ok = Command::new("git")
-        .args(["-C", &path_str(project_dir), "rev-parse", "--verify", "origin/master"])
+/// Extract the first non-@git bookmark from jj's `bookmarks` template output.
+/// Returns the full form (e.g. "master@heroku") so it resolves as a jj revision
+/// even when the bookmark isn't tracked locally.
+fn first_real_bookmark(raw: &str) -> &str {
+    raw.split_whitespace()
+        .find(|b| !b.ends_with("@git"))
+        .unwrap_or("")
+}
+
+fn detect_trunk_git(project_dir: &Path) -> (String, String) {
+    let remote = detect_git_remote(project_dir);
+    let has_master = Command::new("git")
+        .args(["-C", &path_str(project_dir), "rev-parse", "--verify", &format!("{remote}/master")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success());
 
-    if ok { "master".into() } else { "main".into() }
+    let branch = if has_master { "master" } else { "main" };
+    (branch.into(), remote)
 }
 
 impl Vcs for JjBackend {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String> {
-        let output = Command::new("jj")
-            .args([
-                "-R", &path_str(project_dir),
-                "log", "-r", "trunk()",
-                "--no-graph", "-T", "bookmarks",
-                "--limit", "1",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .context("failed to detect trunk branch")?;
+        // trunk() works when the remote is named "origin"; fall back to
+        // searching all remotes for repos with non-standard remote names.
+        let revsets = [
+            "trunk()",
+            r#"latest(remote_bookmarks("master") | remote_bookmarks("main"))"#,
+        ];
+        for revset in &revsets {
+            let output = Command::new("jj")
+                .args([
+                    "-R", &path_str(project_dir),
+                    "log", "-r", revset,
+                    "--no-graph", "-T", "bookmarks",
+                    "--limit", "1",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok();
 
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let branch = raw.split('@').next().unwrap_or("main").trim();
-        if branch.is_empty() {
-            Ok("main".into())
-        } else {
-            Ok(branch.into())
+            if let Some(output) = output {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                let bookmark = first_real_bookmark(&raw);
+                if !bookmark.is_empty() {
+                    return Ok(bookmark.to_string());
+                }
+            }
         }
+
+        Ok("main".into())
     }
 
     fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()> {
@@ -139,5 +161,31 @@ impl Vcs for JjBackend {
             .stderr(Stdio::null())
             .status();
         eprintln!("Forgot jj workspace {ws_id}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_real_bookmark_picks_non_git_entry() {
+        assert_eq!(first_real_bookmark("master@heroku master@git"), "master@heroku");
+    }
+
+    #[test]
+    fn first_real_bookmark_returns_bare_name() {
+        assert_eq!(first_real_bookmark("main"), "main");
+    }
+
+    #[test]
+    fn first_real_bookmark_skips_git_only() {
+        assert_eq!(first_real_bookmark("main@git"), "");
+    }
+
+    #[test]
+    fn first_real_bookmark_empty_input() {
+        assert_eq!(first_real_bookmark(""), "");
+        assert_eq!(first_real_bookmark("   "), "");
     }
 }

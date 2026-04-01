@@ -3,14 +3,15 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
-use super::{path_str, Vcs};
+use super::{detect_git_remote, path_str, Vcs};
 
 pub struct GitBackend;
 
 impl Vcs for GitBackend {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String> {
+        let remote = detect_git_remote(project_dir);
         let ok = Command::new("git")
-            .args(["-C", &path_str(project_dir), "rev-parse", "--verify", "origin/master"])
+            .args(["-C", &path_str(project_dir), "rev-parse", "--verify", &format!("{remote}/master")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -21,13 +22,14 @@ impl Vcs for GitBackend {
 
     fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()> {
         eprintln!("Creating git worktree {ws_id}...");
+        let remote = detect_git_remote(project_dir);
         let status = Command::new("git")
             .args([
                 "-C", &path_str(project_dir),
                 "worktree", "add",
                 "--detach",
                 &path_str(ws_dir),
-                &format!("origin/{trunk}"),
+                &format!("{remote}/{trunk}"),
             ])
             .status()
             .context("failed to create git worktree")?;
@@ -148,6 +150,56 @@ mod tests {
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
         (origin, repo)
+    }
+
+    fn init_repo_with_named_remote(tmp: &Path, remote_name: &str, branch: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let origin = tmp.join("origin.git");
+        let repo = tmp.join("repo");
+
+        Command::new("git").args(["init", "--bare", &format!("--initial-branch={branch}"), &path_str(&origin)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        // Clone with a custom remote name
+        Command::new("git").args(["clone", "-o", remote_name, &path_str(&origin), &path_str(&repo)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        Command::new("git").args(["-C", &path_str(&repo), "config", "user.email", "test@test.com"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "config", "user.name", "Test"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "add", "."])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "commit", "-m", "init"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "push"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        (origin, repo)
+    }
+
+    #[test]
+    fn detect_trunk_with_non_origin_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_named_remote(tmp.path(), "heroku", "master");
+
+        let backend = GitBackend;
+        let trunk = backend.detect_trunk(&repo).unwrap();
+        assert_eq!(trunk, "master");
+    }
+
+    #[test]
+    fn create_worktree_with_non_origin_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_named_remote(tmp.path(), "heroku", "master");
+        let ws_dir = tmp.path().join("worktree");
+
+        let backend = GitBackend;
+        backend.create_workspace(&repo, &ws_dir, "ws-test", "master").unwrap();
+        assert!(ws_dir.join("README.md").exists());
+
+        backend.forget_workspace("ws-test", &repo, &ws_dir);
     }
 
     #[test]

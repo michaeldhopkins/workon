@@ -65,3 +65,21 @@ pub(crate) fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
 }
 
 use anyhow::Context;
+
+/// Returns the name of the first git remote (usually "origin", but could be anything).
+pub(crate) fn detect_git_remote(project_dir: &Path) -> String {
+    Command::new("git")
+        .args(["-C", &path_str(project_dir), "remote"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "origin".into())
+}
