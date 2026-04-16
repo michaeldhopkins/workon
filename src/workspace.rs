@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use rand::Rng;
+use vcs_runner::{binary_available, run_git_utf8, Cmd};
 
 use crate::claude_trust;
 use crate::layout;
@@ -107,21 +107,13 @@ fn cleanup(
     vcs.forget_workspace(ws_id, project_dir, ws_dir);
 
     if let Some(db) = created_db {
-        let _ = Command::new("dropdb")
-            .arg(db)
-            .stderr(Stdio::null())
-            .status();
+        let _ = Cmd::new("dropdb").arg(db).run();
         eprintln!("Dropped test database {db}");
     }
 
     // Spawn rm -rf in the background so the user gets their shell back
     // immediately. The OS will finish the deletion asynchronously.
-    match Command::new("rm")
-        .args(["-rf", &path_str(ws_dir)])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    match Cmd::new("rm").args(["-rf", &path_str(ws_dir)]).spawn() {
         Ok(_) => eprintln!("Removing workspace directory in background"),
         Err(_) => {
             let _ = std::fs::remove_dir_all(ws_dir);
@@ -141,27 +133,20 @@ fn setup_rails_db(
     let db_name = format!("{}_{}_test", project_name, ws_id).replace('-', "_");
     eprintln!("Creating test database {db_name}...");
 
-    let ok = Command::new("createdb")
-        .arg(&db_name)
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-
-    if ok {
+    if Cmd::new("createdb").arg(&db_name).run().is_ok() {
         let env_content = format!("DATABASE_URL=postgresql://localhost/{db_name}");
         let _ = std::fs::write(ws_dir.join(".env.test.local"), env_content);
 
         eprintln!("Loading schema...");
-        let _ = Command::new("bundle")
+        let mut cmd = Cmd::new("bundle")
             .args(["exec", "rails", "db:schema:load"])
             .env("RAILS_ENV", "test")
-            .env(
-                "DATABASE_URL",
-                format!("postgresql://localhost/{db_name}"),
-            )
-            .envs(mise_vars)
-            .current_dir(ws_dir)
-            .status();
+            .env("DATABASE_URL", format!("postgresql://localhost/{db_name}"))
+            .in_dir(ws_dir);
+        for (k, v) in mise_vars {
+            cmd = cmd.env(k, v);
+        }
+        let _ = cmd.run();
 
         Some(db_name)
     } else {
@@ -192,19 +177,10 @@ fn copy_gitignored_files(project_dir: &Path, ws_dir: &Path) -> Result<()> {
 }
 
 fn enumerate_gitignored_files(project_dir: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["-C", &path_str(project_dir), "ls-files", "--others", "--ignored", "--exclude-standard"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .context("failed to list gitignored files")?;
+    let stdout = run_git_utf8(project_dir, &["ls-files", "--others", "--ignored", "--exclude-standard"])
+        .map_err(|e| anyhow::anyhow!("failed to list gitignored files: {e}"))?;
 
-    if !output.status.success() {
-        bail!("git ls-files failed");
-    }
-
-    let file_list = String::from_utf8_lossy(&output.stdout);
-    Ok(file_list.lines()
+    Ok(stdout.lines()
         .filter(|l| !l.is_empty() && !l.starts_with(".jj/"))
         .map(|l| l.strip_suffix('/').unwrap_or(l).to_string())
         .collect())
@@ -310,23 +286,11 @@ fn do_copy_files(
 
 
 
-/// Run `mise env` in the given directory and parse the exported variables.
-/// Returns a map of env var names to values that mise wants set for that directory.
 fn mise_env(dir: &Path) -> HashMap<String, String> {
-    let output = Command::new("mise")
-        .arg("env")
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return HashMap::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_mise_env_output(&stdout)
+    match Cmd::new("mise").arg("env").in_dir(dir).run() {
+        Ok(output) => parse_mise_env_output(&output.stdout_lossy()),
+        Err(_) => HashMap::new(),
+    }
 }
 
 fn parse_mise_env_output(output: &str) -> HashMap<String, String> {
@@ -342,14 +306,7 @@ fn parse_mise_env_output(output: &str) -> HashMap<String, String> {
 }
 
 fn trust_mise_configs(ws_dir: &Path) -> Result<()> {
-    let mise_available = Command::new("mise")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-
-    if !mise_available {
+    if !binary_available("mise") {
         return Ok(());
     }
 
@@ -357,15 +314,9 @@ fn trust_mise_configs(ws_dir: &Path) -> Result<()> {
 
     for config_path in &configs {
         let display = config_path.strip_prefix(ws_dir).unwrap_or(config_path);
-        let status = Command::new("mise")
-            .args(["trust", &path_str(config_path)])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        match status {
-            Ok(s) if s.success() => eprintln!("Trusted mise config: {}", display.display()),
-            _ => eprintln!("Warning: could not trust mise config: {}", display.display()),
+        match Cmd::new("mise").args(["trust", &path_str(config_path)]).run() {
+            Ok(_) => eprintln!("Trusted mise config: {}", display.display()),
+            Err(_) => eprintln!("Warning: could not trust mise config: {}", display.display()),
         }
     }
 
@@ -532,6 +483,8 @@ fn home_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+
     use super::*;
 
     #[test]

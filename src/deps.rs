@@ -1,6 +1,5 @@
-use std::process::{Command, Stdio};
-
 use anyhow::{bail, Result};
+use vcs_runner::Cmd;
 
 struct Dep {
     name: &'static str,
@@ -46,14 +45,8 @@ pub fn check_all() -> Result<()> {
 }
 
 fn check_version(name: &str, path: &std::path::Path) -> Option<String> {
-    let output = Command::new(path)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
-
-    let version_str = String::from_utf8_lossy(&output.stdout);
+    let output = Cmd::new(path.to_string_lossy().as_ref()).arg("--version").run().ok()?;
+    let version_str = output.stdout_lossy();
     let version_str = version_str.trim();
 
     match name {
