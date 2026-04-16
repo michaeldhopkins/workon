@@ -1,37 +1,23 @@
 use std::path::Path;
-use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use vcs_runner::{parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8};
 
-use super::{detect_git_remote, path_str, run_cmd, Vcs};
+use super::{detect_git_remote, path_str, Vcs};
 
 pub struct JjBackend;
 
 /// One-time jj initialization for a git repo that doesn't have .jj yet.
 pub(crate) fn init_jj(project_dir: &Path) -> Result<()> {
     eprintln!("Initializing jj colocated repo in {}...", project_dir.display());
-    run_cmd("jj", &["git", "init", "--colocate", "-R", &path_str(project_dir)])?;
+    run_jj(project_dir, &["git", "init", "--colocate"])?;
 
     let (main_branch, remote) = detect_trunk_git(project_dir);
 
-    run_cmd(
-        "jj",
-        &[
-            "bookmark", "track",
-            &format!("{main_branch}@{remote}"),
-            "-R", &path_str(project_dir),
-        ],
-    )?;
+    run_jj(project_dir, &["bookmark", "track", &format!("{main_branch}@{remote}")])?;
 
     let auto_track_key = format!("remotes.{remote}.auto-track-bookmarks");
-    run_cmd(
-        "jj",
-        &[
-            "config", "set", "--repo",
-            &auto_track_key, "glob:*",
-            "-R", &path_str(project_dir),
-        ],
-    )?;
+    run_jj(project_dir, &["config", "set", "--repo", &auto_track_key, "glob:*"])?;
 
     eprintln!("jj initialized, tracking {main_branch}@{remote}");
     Ok(())
@@ -48,12 +34,7 @@ fn first_real_bookmark(raw: &str) -> &str {
 
 fn detect_trunk_git(project_dir: &Path) -> (String, String) {
     let remote = detect_git_remote(project_dir);
-    let has_master = Command::new("git")
-        .args(["-C", &path_str(project_dir), "rev-parse", "--verify", &format!("{remote}/master")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    let has_master = run_git(project_dir, &["rev-parse", "--verify", &format!("{remote}/master")]).is_ok();
 
     let branch = if has_master { "master" } else { "main" };
     (branch.into(), remote)
@@ -68,21 +49,11 @@ impl Vcs for JjBackend {
             r#"latest(remote_bookmarks("master") | remote_bookmarks("main"))"#,
         ];
         for revset in &revsets {
-            let output = Command::new("jj")
-                .args([
-                    "-R", &path_str(project_dir),
-                    "log", "-r", revset,
-                    "--no-graph", "-T", "bookmarks",
-                    "--limit", "1",
-                ])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
-                .ok();
-
-            if let Some(output) = output {
-                let raw = String::from_utf8_lossy(&output.stdout);
-                let bookmark = first_real_bookmark(&raw);
+            if let Ok(output) = run_jj_utf8(
+                project_dir,
+                &["log", "-r", revset, "--no-graph", "-T", "bookmarks", "--limit", "1"],
+            ) {
+                let bookmark = first_real_bookmark(&output);
                 if !bookmark.is_empty() {
                     return Ok(bookmark.to_string());
                 }
@@ -94,20 +65,11 @@ impl Vcs for JjBackend {
 
     fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()> {
         eprintln!("Creating jj workspace {ws_id}...");
-        let status = Command::new("jj")
-            .args([
-                "-R", &path_str(project_dir),
-                "workspace", "add",
-                &path_str(ws_dir),
-                "--name", ws_id,
-                "-r", trunk,
-            ])
-            .status()
-            .context("failed to create jj workspace")?;
-
-        if !status.success() {
-            bail!("failed to create jj workspace");
-        }
+        run_jj(
+            project_dir,
+            &["workspace", "add", &path_str(ws_dir), "--name", ws_id, "-r", trunk],
+        )
+        .context("failed to create jj workspace")?;
 
         // jj workspaces don't have a .git directory, so git commands
         // (branchdiff, git log, etc.) fail inside the workspace. Set up a
@@ -123,52 +85,34 @@ impl Vcs for JjBackend {
         // Running any jj command triggers an automatic snapshot in modern jj,
         // which ensures the git index is in sync with jj's working copy so
         // that git ls-files --ignored returns accurate results.
-        let _ = Command::new("jj")
-            .args(["-R", &path_str(project_dir), "status"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = run_jj(project_dir, &["status"]);
     }
 
     fn changed_files(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
-        Command::new("jj")
-            .args([
-                "-R", &path_str(project_dir),
-                "diff", "--ignore-working-copy",
-                "-r", &format!("{ws_id}@"),
-                "--summary",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|line| line.split_once(' ').map(|(_, path)| path.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        run_jj_utf8(
+            project_dir,
+            &["diff", "--ignore-working-copy", "-r", &format!("{ws_id}@"), "--summary"],
+        )
+        .map(|stdout| {
+            parse_diff_summary(&stdout)
+                .into_iter()
+                .map(|c| c.path.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     fn save_work(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Result<()> {
-        run_cmd(
-            "jj",
-            &[
-                "-R", &path_str(project_dir),
-                "bookmark", "set",
-                &format!("workon/{ws_id}"),
-                "-r", &format!("{ws_id}@"),
-            ],
+        run_jj(
+            project_dir,
+            &["bookmark", "set", &format!("workon/{ws_id}"), "-r", &format!("{ws_id}@")],
         )?;
         eprintln!("Bookmarked as workon/{ws_id}");
         Ok(())
     }
 
     fn forget_workspace(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) {
-        let _ = Command::new("jj")
-            .args(["-R", &path_str(project_dir), "workspace", "forget", ws_id])
-            .stderr(Stdio::null())
-            .status();
+        let _ = run_jj(project_dir, &["workspace", "forget", ws_id]);
 
         // Clean up the git worktree reference we created alongside the jj workspace.
         if let Some(git_dir) = absolute_git_dir(project_dir) {
@@ -181,14 +125,8 @@ impl Vcs for JjBackend {
 }
 
 fn absolute_git_dir(project_dir: &Path) -> Option<String> {
-    Command::new("git")
-        .args(["-C", &path_str(project_dir), "rev-parse", "--absolute-git-dir"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+    run_git_utf8(project_dir, &["rev-parse", "--absolute-git-dir"])
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
@@ -207,26 +145,15 @@ fn setup_git_worktree(project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &st
     std::fs::write(format!("{wt_git_dir}/gitdir"), format!("{}/.git\n", path_str(ws_dir)))?;
     std::fs::write(format!("{wt_git_dir}/commondir"), "../..\n")?;
 
-    // Resolve trunk to a commit hash for the worktree HEAD.
     let trunk_branch = trunk.split('@').next().unwrap_or(trunk);
     let remote = detect_git_remote(project_dir);
-    let head_output = Command::new("git")
-        .args(["-C", &path_str(project_dir), "rev-parse", &format!("{remote}/{trunk_branch}")])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+
+    let head_output = run_git_utf8(project_dir, &["rev-parse", &format!("{remote}/{trunk_branch}")])
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        .filter(|s| !s.is_empty());
 
     let head = head_output.unwrap_or_else(|| {
-        Command::new("git")
-            .args(["-C", &path_str(project_dir), "rev-parse", "HEAD"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
+        run_git_utf8(project_dir, &["rev-parse", "HEAD"]).unwrap_or_default()
     });
 
     std::fs::write(format!("{wt_git_dir}/HEAD"), format!("{head}\n"))?;
@@ -239,6 +166,8 @@ fn setup_git_worktree(project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &st
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+
     use super::*;
 
     #[test]

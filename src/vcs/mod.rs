@@ -2,9 +2,9 @@ mod git;
 mod jj;
 
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use anyhow::{bail, Result};
+use vcs_runner::{jj_available, run_git_utf8};
 
 pub use self::git::GitBackend;
 pub use self::jj::JjBackend;
@@ -20,7 +20,6 @@ pub trait Vcs: Send + Sync {
 
 /// Detect VCS backend. jj preferred; git fallback when jj unavailable.
 pub fn detect(project_dir: &Path) -> Result<Box<dyn Vcs>> {
-    // Already has .jj → use jj
     if project_dir.join(".jj").is_dir() {
         return Ok(Box::new(JjBackend));
     }
@@ -30,56 +29,23 @@ pub fn detect(project_dir: &Path) -> Result<Box<dyn Vcs>> {
         bail!("not a git or jj repository");
     }
 
-    // Has .git, no .jj → try to init jj if binary available
     if jj_available() {
         jj::init_jj(project_dir)?;
         return Ok(Box::new(JjBackend));
     }
 
-    // jj not installed → git fallback
     Ok(Box::new(GitBackend))
-}
-
-fn jj_available() -> bool {
-    Command::new("jj")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 pub(crate) fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-pub(crate) fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to run {program}"))?;
-    if !status.success() {
-        bail!("{program} exited with status {status}");
-    }
-    Ok(())
-}
-
-use anyhow::Context;
-
 /// Returns the name of the first git remote (usually "origin", but could be anything).
 pub(crate) fn detect_git_remote(project_dir: &Path) -> String {
-    Command::new("git")
-        .args(["-C", &path_str(project_dir), "remote"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+    run_git_utf8(project_dir, &["remote"])
         .ok()
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .map(|s| s.trim().to_string())
-        })
+        .and_then(|s| s.lines().next().map(|l| l.to_string()))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "origin".into())
 }

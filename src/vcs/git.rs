@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use vcs_runner::{run_git, run_git_utf8};
 
 use super::{detect_git_remote, path_str, Vcs};
 
@@ -10,12 +10,7 @@ pub struct GitBackend;
 impl Vcs for GitBackend {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String> {
         let remote = detect_git_remote(project_dir);
-        let ok = Command::new("git")
-            .args(["-C", &path_str(project_dir), "rev-parse", "--verify", &format!("{remote}/master")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
+        let ok = run_git(project_dir, &["rev-parse", "--verify", &format!("{remote}/master")]).is_ok();
 
         Ok(if ok { "master".into() } else { "main".into() })
     }
@@ -23,20 +18,11 @@ impl Vcs for GitBackend {
     fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()> {
         eprintln!("Creating git worktree {ws_id}...");
         let remote = detect_git_remote(project_dir);
-        let status = Command::new("git")
-            .args([
-                "-C", &path_str(project_dir),
-                "worktree", "add",
-                "--detach",
-                &path_str(ws_dir),
-                &format!("{remote}/{trunk}"),
-            ])
-            .status()
-            .context("failed to create git worktree")?;
-
-        if !status.success() {
-            bail!("failed to create git worktree");
-        }
+        run_git(
+            project_dir,
+            &["worktree", "add", "--detach", &path_str(ws_dir), &format!("{remote}/{trunk}")],
+        )
+        .context("failed to create git worktree")?;
         Ok(())
     }
 
@@ -45,13 +31,12 @@ impl Vcs for GitBackend {
     }
 
     fn changed_files(&self, _ws_id: &str, _project_dir: &Path, ws_dir: &Path) -> Vec<String> {
-        Command::new("git")
-            .args(["-C", &path_str(ws_dir), "status", "--porcelain"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
+        // Use run_git (not run_git_utf8) — we must NOT trim. `git status --porcelain`
+        // emits lines like " M path" for modified-unstaged files; trimming the leading
+        // space corrupts line.get(3..).
+        run_git(ws_dir, &["status", "--porcelain"])
+            .map(|out| {
+                out.stdout_lossy()
                     .lines()
                     .filter_map(|line| line.get(3..).map(|p| p.to_string()))
                     .collect()
@@ -60,87 +45,45 @@ impl Vcs for GitBackend {
     }
 
     fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
-        // Stage everything and commit in the worktree
-        let status = Command::new("git")
-            .args(["-C", &path_str(ws_dir), "add", "-A"])
-            .status()
-            .context("failed to stage changes")?;
-        if !status.success() {
-            bail!("git add failed");
-        }
+        run_git(ws_dir, &["add", "-A"]).context("failed to stage changes")?;
+        run_git(ws_dir, &["commit", "-m", &format!("wip: workon/{ws_id}")]).context("failed to commit changes")?;
 
-        let status = Command::new("git")
-            .args([
-                "-C", &path_str(ws_dir),
-                "commit", "-m", &format!("wip: workon/{ws_id}"),
-            ])
-            .status()
-            .context("failed to commit changes")?;
-        if !status.success() {
-            bail!("git commit failed");
-        }
+        let hash = run_git_utf8(ws_dir, &["rev-parse", "HEAD"]).context("failed to get commit hash")?;
 
-        // Get the commit hash
-        let output = Command::new("git")
-            .args(["-C", &path_str(ws_dir), "rev-parse", "HEAD"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .context("failed to get commit hash")?;
-        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        // Create a branch in the main repo pointing at that commit
-        let status = Command::new("git")
-            .args([
-                "-C", &path_str(project_dir),
-                "branch", &format!("workon/{ws_id}"), &hash,
-            ])
-            .status()
+        run_git(project_dir, &["branch", &format!("workon/{ws_id}"), &hash])
             .context("failed to create branch")?;
-        if !status.success() {
-            bail!("git branch creation failed");
-        }
 
         eprintln!("Saved as branch workon/{ws_id}");
         Ok(())
     }
 
     fn forget_workspace(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) {
-        let _ = Command::new("git")
-            .args([
-                "-C", &path_str(project_dir),
-                "worktree", "remove", "--force",
-                &path_str(ws_dir),
-            ])
-            .stderr(Stdio::null())
-            .status();
+        let _ = run_git(project_dir, &["worktree", "remove", "--force", &path_str(ws_dir)]);
         eprintln!("Removed git worktree");
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+
     use super::*;
 
     fn init_repo_with_remote(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
         let origin = tmp.join("origin.git");
         let repo = tmp.join("repo");
 
-        // Create a bare origin with explicit default branch
         Command::new("git").args(["init", "--bare", "--initial-branch=main", &path_str(&origin)])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
-        // Clone it to get a working repo with origin remote
         Command::new("git").args(["clone", &path_str(&origin), &path_str(&repo)])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
-        // Configure user for CI environments where global config is absent
         Command::new("git").args(["-C", &path_str(&repo), "config", "user.email", "test@test.com"])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
         Command::new("git").args(["-C", &path_str(&repo), "config", "user.name", "Test"])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
-        // Create initial commit and push
         std::fs::write(repo.join("README.md"), "hello").unwrap();
         Command::new("git").args(["-C", &path_str(&repo), "add", "."])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
@@ -159,7 +102,6 @@ mod tests {
         Command::new("git").args(["init", "--bare", &format!("--initial-branch={branch}"), &path_str(&origin)])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
-        // Clone with a custom remote name
         Command::new("git").args(["clone", "-o", remote_name, &path_str(&origin), &path_str(&repo)])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
@@ -223,6 +165,22 @@ mod tests {
         assert_eq!(files, vec!["new_file.txt"]);
     }
 
+    /// Regression: `git status --porcelain` emits " M path" (leading space) for
+    /// modified-unstaged files. Earlier versions trimmed the whole stdout, eating
+    /// the leading space and corrupting line.get(3..).
+    #[test]
+    fn changed_files_modified_unstaged_preserves_leading_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_remote(tmp.path());
+
+        // README.md was committed by init_repo_with_remote — modify it without staging.
+        std::fs::write(repo.join("README.md"), "modified content").unwrap();
+
+        let backend = GitBackend;
+        let files = backend.changed_files("ws-test", &repo, &repo);
+        assert_eq!(files, vec!["README.md"]);
+    }
+
     #[test]
     fn create_and_forget_worktree() {
         let tmp = tempfile::tempdir().unwrap();
@@ -247,12 +205,10 @@ mod tests {
         let backend = GitBackend;
         backend.create_workspace(&repo, &ws_dir, "ws-abc123", "main").unwrap();
 
-        // Make a change in the worktree
         std::fs::write(ws_dir.join("work.txt"), "important work").unwrap();
 
         backend.save_work("ws-abc123", &repo, &ws_dir).unwrap();
 
-        // Verify branch exists in main repo
         let output = Command::new("git")
             .args(["-C", &path_str(&repo), "branch", "--list", "workon/ws-abc123"])
             .stdout(Stdio::piped())
