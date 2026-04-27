@@ -60,7 +60,9 @@ The default Zellij layout is embedded in the binary. To override it, create `~/.
 
 ## Session management
 
-Sessions are named after the directory basename. Running `workon mbc` twice reattaches to the existing session. Use `-n` to start fresh. If the zellij server is unresponsive, `-n` will detect the hang (5s timeout), kill the stuck server process, and launch a fresh session.
+Sessions are named after the directory basename. Running `workon mbc` twice reattaches to the existing session. Use `-n` to start fresh.
+
+If a zellij server is hung, workon detects the unresponsive IPC (5s timeout), kills only the server bound to your project's session (other sessions are left alone), removes the stale socket, and launches a fresh session. Recovery runs whether or not you pass `-n`. Pre-flight checks before `attach` and `launch` ensure the no-timeout interactive zellij commands won't block on a wedged server.
 
 Workspace sessions are named `<project>-ws-<id>` (e.g., `mbc-ws-a1b2c3`) and don't collide with primary sessions.
 
