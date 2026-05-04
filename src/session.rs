@@ -41,8 +41,17 @@ fn session_exists(name: &str) -> Result<bool> {
             recover_session(name)?;
             Ok(false)
         }
+        // Fresh machine / fully-reaped sessions: zellij exits 1 with this
+        // stderr sentinel. Semantically equivalent to "our session does not
+        // exist" — return false so the caller launches a new one.
+        Err(ref e) if is_no_sessions_error(e) => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+fn is_no_sessions_error(err: &RunError) -> bool {
+    err.stderr()
+        .is_some_and(|s| s.contains("No active zellij sessions"))
 }
 
 fn delete_session(name: &str) -> Result<()> {
@@ -316,6 +325,76 @@ mod tests {
         assert!(elapsed < Duration::from_secs(3));
     }
 
+    /// Build a real `RunError::NonZeroExit` by running `sh -c "...>&2; exit 1"`.
+    /// `CmdDisplay::new` is crate-private upstream, so direct construction
+    /// isn't an option — running a real subprocess is the supported path.
+    fn non_zero_exit_with_stderr(stderr: &str) -> RunError {
+        let script = format!("printf %s {} 1>&2; exit 1", shell_single_quote(stderr));
+        Cmd::new("sh")
+            .args(["-c", &script])
+            .timeout(Duration::from_secs(5))
+            .run()
+            .expect_err("expected non-zero exit")
+    }
+
+    /// Single-quote a string for POSIX shell. Inputs in this file are static
+    /// test fixtures, but using the right quoting keeps the helper reusable.
+    fn shell_single_quote(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('\'');
+        for ch in s.chars() {
+            if ch == '\'' {
+                out.push_str("'\\''");
+            } else {
+                out.push(ch);
+            }
+        }
+        out.push('\'');
+        out
+    }
+
+    #[test]
+    fn no_sessions_error_recognized_on_fresh_machine() {
+        // The exact stderr zellij emits when no sessions exist on the host.
+        // Without this classifier, workon's first run on a clean machine
+        // aborts. See specs/no-active-sessions-bug.md.
+        let err = non_zero_exit_with_stderr("No active zellij sessions found.");
+        assert!(is_no_sessions_error(&err));
+    }
+
+    #[test]
+    fn no_sessions_error_tolerates_punctuation_drift() {
+        let err = non_zero_exit_with_stderr("No active zellij sessions found");
+        assert!(is_no_sessions_error(&err));
+    }
+
+    #[test]
+    fn unrelated_non_zero_exit_is_not_no_sessions() {
+        let err = non_zero_exit_with_stderr("some other zellij failure");
+        assert!(!is_no_sessions_error(&err));
+    }
+
+    #[test]
+    fn timeout_error_is_not_no_sessions() {
+        let err = Cmd::new("sleep")
+            .arg("60")
+            .timeout(Duration::from_millis(100))
+            .run()
+            .expect_err("expected timeout");
+        assert!(err.is_timeout());
+        assert!(!is_no_sessions_error(&err));
+    }
+
+    #[test]
+    fn spawn_error_is_not_no_sessions() {
+        let err = Cmd::new("definitely-not-a-real-binary-zxqv-9001")
+            .timeout(Duration::from_secs(5))
+            .run()
+            .expect_err("expected spawn failure");
+        assert!(err.is_spawn_failure());
+        assert!(!is_no_sessions_error(&err));
+    }
+
     #[test]
     fn regex_escape_handles_metacharacters() {
         assert_eq!(regex_escape("simple"), "simple");
@@ -325,18 +404,21 @@ mod tests {
         assert_eq!(regex_escape("ws-a1b2c3"), "ws-a1b2c3");
     }
 
+    /// Both ZELLIJ_SOCKET_DIR tests mutate process-global env. Serialize them
+    /// against each other so cargo's parallel test runner can't interleave a
+    /// snapshot/restore from one test with a set from another.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn socket_dir_honors_explicit_override() {
-        // Snapshot any prior value so other tests aren't affected.
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var_os("ZELLIJ_SOCKET_DIR");
-        // SAFETY: tests in this module are single-threaded by `cargo test`'s
-        // default unless flagged otherwise; this env mutation is contained.
+        // SAFETY: env mutation is serialized with sibling test via ENV_MUTEX.
         unsafe { std::env::set_var("ZELLIJ_SOCKET_DIR", "/custom/zellij/sock") };
 
         let dir = socket_dir().expect("socket_dir should respect override");
         assert_eq!(dir, PathBuf::from("/custom/zellij/sock"));
 
-        // Restore.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var("ZELLIJ_SOCKET_DIR", v),
@@ -347,7 +429,9 @@ mod tests {
 
     #[test]
     fn session_socket_appends_session_name() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var_os("ZELLIJ_SOCKET_DIR");
+        // SAFETY: env mutation is serialized with sibling test via ENV_MUTEX.
         unsafe { std::env::set_var("ZELLIJ_SOCKET_DIR", "/custom/zellij/sock") };
 
         let socket = session_socket("my-project").expect("session_socket");
