@@ -12,14 +12,22 @@ use crate::layout;
 use crate::session;
 use crate::vcs::Vcs;
 
+#[derive(Default)]
+pub struct WorkspaceOptions<'a> {
+    pub skip_copy_ignored: bool,
+    pub label: Option<&'a str>,
+    pub resume: Option<&'a str>,
+    pub config: Option<&'a str>,
+}
+
 pub fn run_workspace(
     project_dir: &Path,
     project_name: &str,
-    skip_copy_ignored: bool,
-    label: Option<&str>,
-    resume: Option<&str>,
+    opts: WorkspaceOptions<'_>,
     vcs: &dyn Vcs,
 ) -> Result<()> {
+    let WorkspaceOptions { skip_copy_ignored, label, resume, config } = opts;
+
     let ws_id = match label {
         Some(l) => format!("{}-{}", generate_ws_id(), slugify(l)),
         None => generate_ws_id(),
@@ -62,11 +70,11 @@ pub fn run_workspace(
     let claude_session_id;
     if let Some(prev_session_id) = resume {
         migrate_claude_session(prev_session_id, &ws_dir);
-        ws_layout = layout::get_resume_layout(prev_session_id)?;
+        ws_layout = layout::resolve_resume_layout(config, prev_session_id)?;
         claude_session_id = prev_session_id.to_string();
     } else {
         claude_session_id = generate_claude_session_id();
-        ws_layout = layout::get_workspace_layout(&claude_session_id)?;
+        ws_layout = layout::resolve_workspace_layout(config, &claude_session_id)?;
     }
     session::launch(&tab_name, ws_layout.path(), &ws_dir, &mise_vars)?;
 

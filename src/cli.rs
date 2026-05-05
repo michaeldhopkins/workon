@@ -22,4 +22,8 @@ pub struct Cli {
     /// Resume a Claude session by ID (printed when a workspace exits)
     #[arg(short = 'r', long, requires = "workspace")]
     pub resume: Option<String>,
+
+    /// Named config to load from ~/.config/workon/configs/<name>.kdl
+    #[arg(short = 'c', long = "config")]
+    pub config: Option<String>,
 }
