@@ -27,3 +27,35 @@ fn skip_copy_ignored_requires_workspace() {
         .failure()
         .stderr(predicate::str::contains("--skip-copy-ignored"));
 }
+
+#[test]
+fn help_lists_config_flag() {
+    cargo_bin_cmd!("workon")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--config"));
+}
+
+#[test]
+fn missing_named_config_errors_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    cargo_bin_cmd!("workon")
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .args(["--config", "no-such-config", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no-such-config"))
+        .stderr(predicate::str::contains("#creating-a-config"));
+}
+
+#[test]
+fn invalid_config_name_with_path_traversal_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    cargo_bin_cmd!("workon")
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .args(["--config", "../etc/hosts", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid config name"));
+}

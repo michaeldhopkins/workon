@@ -1,25 +1,133 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tempfile::NamedTempFile;
 use vcs_runner::{Cmd, RunError};
 
+use crate::layout;
+
 const ZELLIJ_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn run(name: &str, layout: &Path, working_dir: &Path, force_new: bool) -> Result<()> {
+pub fn run(
+    name: &str,
+    layout: &Path,
+    working_dir: &Path,
+    force_new: bool,
+    layout_content: &str,
+    config_name: &str,
+) -> Result<()> {
     let empty = std::collections::HashMap::new();
     if session_exists(name)? {
         if force_new {
             delete_session(name)?;
             launch(name, layout, working_dir, &empty)
         } else {
+            ensure_layout_compatible(name, layout_content, config_name)?;
             attach(name, working_dir)
         }
     } else {
         launch(name, layout, working_dir, &empty)
     }
+}
+
+/// Refuse to attach to a running zellij session whose layout doesn't match
+/// the requested config. We can't ask zellij which layout it loaded, so we
+/// approximate: the focused command in the requested layout must be present
+/// in the session's process tree. If it isn't, attaching would silently give
+/// the user the *running* config rather than the requested one.
+fn ensure_layout_compatible(name: &str, layout_content: &str, config_name: &str) -> Result<()> {
+    let running = match running_descendant_commands(name) {
+        Ok(set) => set,
+        // Best-effort: a `ps` failure or missing server PID shouldn't block
+        // attach, since the user might have been about to fix things anyway.
+        Err(_) => return Ok(()),
+    };
+    ensure_layout_compatible_inner(name, layout_content, config_name, &running)
+}
+
+/// Pure decision logic for `ensure_layout_compatible`. Split out so the
+/// branching (focused-command lookup, empty-running shortcut, bail message)
+/// is testable without spawning `ps` or `pgrep`.
+fn ensure_layout_compatible_inner(
+    name: &str,
+    layout_content: &str,
+    config_name: &str,
+    running: &HashSet<String>,
+) -> Result<()> {
+    let Some(focused) = layout::focused_command(layout_content)? else {
+        return Ok(());
+    };
+    if running.is_empty() || running.contains(&focused) {
+        return Ok(());
+    }
+    bail!(
+        "zellij session '{name}' is already running in the main worktree with a different layout. \
+         Zellij keeps the original layout when reattaching, so '{config_name}' would be ignored.\n\n\
+         To open it as a separate workspace, run: workon -w -c {config_name}\n\
+         To replace the running session instead:  workon -n -c {config_name}"
+    );
+}
+
+/// Set of basename commands running anywhere under the zellij server for
+/// session `name`. Empty if no server is found.
+fn running_descendant_commands(name: &str) -> Result<HashSet<String>> {
+    let Some(server_pid) = server_pid_for(name)? else {
+        return Ok(HashSet::new());
+    };
+    let out = Cmd::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,comm="])
+        .timeout(ZELLIJ_TIMEOUT)
+        .run()?;
+    Ok(parse_descendants(&out.stdout_lossy(), server_pid))
+}
+
+/// Pure parser for `ps -A -o pid=,ppid=,comm=` output. Walks the PPID graph
+/// from `root_pid` and returns the set of basenames of all descendants.
+/// Cross-platform: macOS prints full paths in `comm`; Linux prints basenames.
+/// We strip leading directories defensively.
+fn parse_descendants(ps_stdout: &str, root_pid: u32) -> HashSet<String> {
+    let mut by_ppid: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
+    for line in ps_stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let pid: u32 = match parts[0].parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let ppid: u32 = match parts[1].parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let comm = parts[2..].join(" ");
+        let basename = comm.rsplit('/').next().unwrap_or(&comm);
+        // Login shells appear as "-zsh"; trim the leading dash.
+        let basename = basename.trim_start_matches('-').to_string();
+        by_ppid.entry(ppid).or_default().push((pid, basename));
+    }
+
+    let mut found: HashSet<String> = HashSet::new();
+    let mut visited: HashSet<u32> = HashSet::new();
+    visited.insert(root_pid);
+    let mut frontier: Vec<u32> = vec![root_pid];
+    while let Some(p) = frontier.pop() {
+        if let Some(children) = by_ppid.get(&p) {
+            for (child_pid, child_comm) in children {
+                // Guard against cycles in the input. Real process trees can't
+                // cycle (kernel-enforced), but a malformed/racy `ps` snapshot
+                // could produce one and we'd otherwise spin forever.
+                if visited.insert(*child_pid) {
+                    found.insert(child_comm.clone());
+                    frontier.push(*child_pid);
+                }
+            }
+        }
+    }
+    found
 }
 
 fn session_exists(name: &str) -> Result<bool> {
@@ -301,6 +409,158 @@ fn zellij_config_path() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_descendants_finds_direct_children_linux_format() {
+        // Linux-style: comm column is the basename only.
+        let stdout = "\
+   100     1 systemd
+   200   100 zellij
+   300   200 claude
+   400   200 branchdiff
+   500     1 unrelated
+";
+        let descendants = parse_descendants(stdout, 200);
+        assert!(descendants.contains("claude"), "got {descendants:?}");
+        assert!(descendants.contains("branchdiff"), "got {descendants:?}");
+        assert!(!descendants.contains("unrelated"), "got {descendants:?}");
+        assert!(!descendants.contains("systemd"), "got {descendants:?}");
+    }
+
+    #[test]
+    fn parse_descendants_strips_paths_macos_format() {
+        // macOS-style: comm column is the full executable path.
+        let stdout = "\
+  100     1 /sbin/launchd
+  200   100 /usr/local/bin/zellij
+  300   200 /Users/me/.opencode/bin/opencode
+  400   200 /usr/local/bin/branchdiff
+";
+        let descendants = parse_descendants(stdout, 200);
+        assert!(descendants.contains("opencode"), "got {descendants:?}");
+        assert!(descendants.contains("branchdiff"), "got {descendants:?}");
+    }
+
+    #[test]
+    fn parse_descendants_recurses_through_grandchildren() {
+        let stdout = "\
+   100     1 zellij
+   200   100 zsh
+   300   200 ruby
+   400   300 bundle
+";
+        let descendants = parse_descendants(stdout, 100);
+        assert!(descendants.contains("zsh"));
+        assert!(descendants.contains("ruby"));
+        assert!(descendants.contains("bundle"));
+    }
+
+    #[test]
+    fn parse_descendants_strips_login_shell_dash() {
+        let stdout = "\
+   100     1 zellij
+   200   100 -zsh
+";
+        let descendants = parse_descendants(stdout, 100);
+        assert!(descendants.contains("zsh"), "got {descendants:?}");
+    }
+
+    #[test]
+    fn parse_descendants_returns_empty_for_unknown_root() {
+        let stdout = "\
+   100     1 systemd
+   200   100 zellij
+";
+        let descendants = parse_descendants(stdout, 9999);
+        assert!(descendants.is_empty());
+    }
+
+    #[test]
+    fn parse_descendants_skips_malformed_lines() {
+        let stdout = "header line\n   100     1 zellij\nincomplete\n   200   100 claude\n";
+        let descendants = parse_descendants(stdout, 100);
+        assert!(descendants.contains("claude"));
+    }
+
+    #[test]
+    fn parse_descendants_terminates_on_pid_cycle() {
+        // Pathological input: 200's parent is 100, but 100's parent is 200.
+        // Without a visited-set guard the BFS would loop forever.
+        let stdout = "\
+   100   200 zellij
+   200   100 child
+";
+        // Run with a hard wall-clock budget so a regression hangs the test
+        // run rather than the whole CI job.
+        let start = std::time::Instant::now();
+        let descendants = parse_descendants(stdout, 100);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(descendants.contains("child"), "got {descendants:?}");
+    }
+
+    #[test]
+    fn ensure_layout_compatible_inner_ok_when_focused_command_present() {
+        let layout = r#"pane command="claude" focus=true"#;
+        let mut running = HashSet::new();
+        running.insert("claude".to_string());
+        running.insert("branchdiff".to_string());
+        assert!(ensure_layout_compatible_inner("proj", layout, "default", &running).is_ok());
+    }
+
+    #[test]
+    fn ensure_layout_compatible_inner_bails_when_focused_command_absent() {
+        let layout = r#"pane command="opencode" focus=true"#;
+        let mut running = HashSet::new();
+        running.insert("claude".to_string());
+        running.insert("branchdiff".to_string());
+
+        let err = ensure_layout_compatible_inner("proj", layout, "opencode", &running)
+            .expect_err("should refuse on mismatch");
+        let msg = err.to_string();
+
+        assert!(msg.contains("'proj'"), "{msg}");
+        assert!(msg.contains("'opencode'"), "{msg}");
+        assert!(msg.contains("main worktree"), "{msg}");
+        assert!(msg.contains("workon -w -c opencode"), "{msg}");
+        assert!(msg.contains("-n"), "{msg}");
+    }
+
+    #[test]
+    fn ensure_layout_compatible_inner_ok_when_running_set_is_empty() {
+        // Empty running set means we couldn't determine anything (e.g. server
+        // PID not found yet). Don't block attach — current behavior wins.
+        let layout = r#"pane command="opencode" focus=true"#;
+        let running = HashSet::new();
+        assert!(ensure_layout_compatible_inner("proj", layout, "opencode", &running).is_ok());
+    }
+
+    #[test]
+    fn ensure_layout_compatible_inner_ok_when_layout_has_no_commands() {
+        // Layouts with only empty terminal panes have nothing to match against.
+        let layout = r#"layout {
+    pane size="50%"
+    pane size="50%"
+}"#;
+        let mut running = HashSet::new();
+        running.insert("anything".to_string());
+        assert!(ensure_layout_compatible_inner("proj", layout, "blank", &running).is_ok());
+    }
+
+    #[test]
+    fn ensure_layout_compatible_inner_bail_message_uses_config_name() {
+        let layout = r#"pane command="myco" focus=true"#;
+        let running = {
+            let mut s = HashSet::new();
+            s.insert("claude".to_string());
+            s
+        };
+        let err = ensure_layout_compatible_inner("foo", layout, "my-config", &running)
+            .expect_err("should refuse");
+        let msg = err.to_string();
+        // The recovery hint must use the requested config name verbatim so the
+        // user can copy-paste it.
+        assert!(msg.contains("workon -w -c my-config"), "{msg}");
+    }
 
     #[test]
     fn timed_run_returns_stdout_on_success() {
