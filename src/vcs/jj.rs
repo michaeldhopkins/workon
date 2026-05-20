@@ -26,9 +26,13 @@ pub(crate) fn init_jj(project_dir: &Path) -> Result<()> {
 /// Extract the first non-@git bookmark from jj's `bookmarks` template output.
 /// Returns the full form (e.g. "master@heroku") so it resolves as a jj revision
 /// even when the bookmark isn't tracked locally.
+///
+/// Strips trailing `*` (out-of-sync with tracked remote) and `?` (conflict)
+/// markers that jj's `bookmarks` template appends to the name.
 fn first_real_bookmark(raw: &str) -> &str {
     raw.split_whitespace()
-        .find(|b| !b.ends_with("@git"))
+        .map(|b| b.trim_end_matches(['*', '?']))
+        .find(|b| !b.is_empty() && !b.ends_with("@git"))
         .unwrap_or("")
 }
 
@@ -189,6 +193,17 @@ mod tests {
     fn first_real_bookmark_empty_input() {
         assert_eq!(first_real_bookmark(""), "");
         assert_eq!(first_real_bookmark("   "), "");
+    }
+
+    #[test]
+    fn first_real_bookmark_strips_sync_markers() {
+        // jj's `bookmarks` template appends `*` when a local bookmark is
+        // out of sync with its tracked remote, and `?` for conflicts.
+        // These suffixes are display indicators, not part of the revision name.
+        assert_eq!(first_real_bookmark("master*"), "master");
+        assert_eq!(first_real_bookmark("master?"), "master");
+        assert_eq!(first_real_bookmark("master* master@heroku_test master@git"), "master");
+        assert_eq!(first_real_bookmark("master*?"), "master");
     }
 
     #[test]
