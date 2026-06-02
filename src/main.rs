@@ -29,12 +29,14 @@ fn main() -> Result<()> {
         layout::ensure_resume_compatible(config.unwrap_or("default"), &layout_content)?;
     }
 
-    if let Some(label) = cli.workspace {
-        let label = if label.is_empty() { None } else { Some(label.as_str()) };
+    // Treat `--name ""` as no name so it falls back to the default.
+    let name = cli.name.as_deref().filter(|s| !s.is_empty());
+
+    if cli.workspace {
         let vcs = vcs::detect(&project.dir)?;
         let opts = WorkspaceOptions {
             skip_copy_ignored: cli.skip_copy_ignored,
-            label,
+            label: name,
             resume: cli.resume.as_deref(),
             config,
         };
@@ -42,7 +44,7 @@ fn main() -> Result<()> {
     } else {
         let layout = layout::resolve_layout(config)?;
         session::run(
-            &project.name,
+            name.unwrap_or(&project.name),
             layout.path(),
             &project.dir,
             cli.new_session,

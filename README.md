@@ -38,11 +38,16 @@ cargo install workon
 ```bash
 workon                       # open current directory with the default config
 workon mbc                   # open ~/workspace/mbc
-workon -n mbc                # force new session (destroys existing)
+workon mbc --new-session     # force new session (destroys existing)
+workon mbc --name api        # name the session "api" instead of "mbc"
 workon -w mbc                # ephemeral jj workspace (parallel session)
 workon -c opencode           # open with the "opencode" custom config
-workon -w fix-bug -c opencode  # workspace using a custom config
+workon -w mbc --name fix-bug -c opencode  # named workspace using a custom config
 ```
+
+The session is named after the project by default. Pass `--name` to override
+it — handy for running a second session of the same project under a distinct
+name. With `-w`, `--name` also labels the worktree and the saved bookmark.
 
 ## Workspace mode (`-w`)
 
@@ -140,7 +145,7 @@ different layout. Zellij keeps the original layout when reattaching, so
 'opencode' would be ignored.
 
 To open it as a separate workspace, run: workon -w -c opencode
-To replace the running session instead:  workon -n -c opencode
+To replace the running session instead:  workon --new-session -c opencode
 ```
 
 This works in both directions — bare `workon` against a session you started with `-c opencode` will also be refused.
