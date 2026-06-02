@@ -16,6 +16,11 @@ pub trait Vcs: Send + Sync {
     fn changed_files(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String>;
     fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
     fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path);
+
+    /// Stop a workon-generated file (e.g. `.env.test.local`) from surfacing as
+    /// a phantom change in the workspace. The file is per-workspace and must
+    /// never be committed. Best-effort: failures are warned about, not fatal.
+    fn ignore_generated_file(&self, project_dir: &Path, ws_dir: &Path, relpath: &str);
 }
 
 /// Detect VCS backend. jj preferred; git fallback when jj unavailable.
@@ -39,6 +44,35 @@ pub fn detect(project_dir: &Path) -> Result<Box<dyn Vcs>> {
 
 pub(crate) fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
+}
+
+/// Append `pattern` to the repo's shared `info/exclude` if not already present.
+///
+/// Worktrees and jj workspaces share the common git dir's `info/exclude`, so a
+/// pattern added here applies to every workspace. That's exactly right for
+/// per-workspace generated files like `.env.test.local` — they should never be
+/// tracked anywhere. Idempotent: a pattern already on its own line is left alone.
+pub(crate) fn append_git_exclude(project_dir: &Path, pattern: &str) -> Result<()> {
+    let git_dir = run_git_utf8(project_dir, &["rev-parse", "--absolute-git-dir"])
+        .map_err(|e| anyhow::anyhow!("could not locate .git directory: {e}"))?;
+    let exclude = Path::new(git_dir.trim()).join("info").join("exclude");
+
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == pattern) {
+        return Ok(());
+    }
+
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(pattern);
+    content.push('\n');
+    std::fs::write(&exclude, content)?;
+    Ok(())
 }
 
 /// Returns the name of the first git remote (usually "origin", but could be anything).

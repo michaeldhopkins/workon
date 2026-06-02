@@ -61,6 +61,12 @@ impl Vcs for GitBackend {
         let _ = run_git(project_dir, &["worktree", "remove", "--force", &path_str(ws_dir)]);
         eprintln!("Removed git worktree");
     }
+
+    fn ignore_generated_file(&self, project_dir: &Path, _ws_dir: &Path, relpath: &str) {
+        if let Err(e) = super::append_git_exclude(project_dir, relpath) {
+            eprintln!("Warning: could not exclude {relpath} from git: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +200,38 @@ mod tests {
 
         backend.forget_workspace("ws-test", &repo, &ws_dir);
         assert!(!ws_dir.exists());
+    }
+
+    #[test]
+    fn ignore_generated_file_excludes_from_git_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_remote(tmp.path());
+
+        std::fs::write(repo.join(".env.test.local"), "DATABASE_URL=postgresql://localhost/x").unwrap();
+        // Before excluding, the generated file shows up as a change.
+        let backend = GitBackend;
+        assert_eq!(backend.changed_files("ws-test", &repo, &repo), vec![".env.test.local"]);
+
+        backend.ignore_generated_file(&repo, &repo, ".env.test.local");
+
+        assert!(
+            backend.changed_files("ws-test", &repo, &repo).is_empty(),
+            "excluded file should not surface in git status"
+        );
+    }
+
+    #[test]
+    fn ignore_generated_file_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_remote(tmp.path());
+
+        let backend = GitBackend;
+        backend.ignore_generated_file(&repo, &repo, ".env.test.local");
+        backend.ignore_generated_file(&repo, &repo, ".env.test.local");
+
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        let occurrences = exclude.lines().filter(|l| l.trim() == ".env.test.local").count();
+        assert_eq!(occurrences, 1, "pattern should be written exactly once");
     }
 
     #[test]
