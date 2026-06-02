@@ -12,6 +12,14 @@ use crate::layout;
 use crate::session;
 use crate::vcs::Vcs;
 
+/// The per-workspace test DB env file. Workon writes it on setup and excludes
+/// it from the VCS — it must never be tracked or auto-saved as a real change.
+const ENV_TEST_LOCAL: &str = ".env.test.local";
+
+/// Files workon generates inside a workspace; ignored when deciding whether the
+/// workspace has meaningful changes worth offering to save.
+const GENERATED_FILES: &[&str] = &[ENV_TEST_LOCAL];
+
 #[derive(Default)]
 pub struct WorkspaceOptions<'a> {
     pub skip_copy_ignored: bool,
@@ -62,6 +70,10 @@ pub fn run_workspace(
     let mut created_db = None;
     if ws_dir.join("config/database.yml").is_file() {
         created_db = setup_rails_db(project_name, &ws_id, &ws_dir, &mise_vars);
+        // setup_rails_db only writes .env.test.local when the DB was created.
+        if created_db.is_some() {
+            vcs.ignore_generated_file(project_dir, &ws_dir, ENV_TEST_LOCAL);
+        }
     }
 
     let _ = claude_trust::approve_workspace(&ws_dir);
@@ -94,7 +106,6 @@ fn cleanup(
     eprintln!("Claude session: {claude_session_id}");
     eprintln!("  Resume with: workon -w --resume {claude_session_id}");
 
-    const GENERATED_FILES: &[&str] = &[".env.test.local"];
     let changed = vcs.changed_files(ws_id, project_dir, ws_dir);
     let has_meaningful_changes = changed.iter().any(|f| !GENERATED_FILES.contains(&f.as_str()));
 
@@ -143,7 +154,7 @@ fn setup_rails_db(
 
     if Cmd::new("createdb").arg(&db_name).run().is_ok() {
         let env_content = format!("DATABASE_URL=postgresql://localhost/{db_name}");
-        let _ = std::fs::write(ws_dir.join(".env.test.local"), env_content);
+        let _ = std::fs::write(ws_dir.join(ENV_TEST_LOCAL), env_content);
 
         eprintln!("Loading schema...");
         let mut cmd = Cmd::new("bundle")

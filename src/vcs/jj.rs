@@ -126,6 +126,19 @@ impl Vcs for JjBackend {
 
         eprintln!("Forgot jj workspace {ws_id}");
     }
+
+    fn ignore_generated_file(&self, project_dir: &Path, ws_dir: &Path, relpath: &str) {
+        // The exclude has to land first: `jj file untrack` refuses to drop a
+        // path unless it's already ignored, otherwise jj would re-snapshot it
+        // on the next working-copy refresh.
+        if let Err(e) = super::append_git_exclude(project_dir, relpath) {
+            eprintln!("Warning: could not exclude {relpath} from git: {e}");
+            return;
+        }
+        if let Err(e) = run_jj(ws_dir, &["file", "untrack", relpath]) {
+            eprintln!("Warning: could not untrack {relpath} in jj: {e}");
+        }
+    }
 }
 
 fn absolute_git_dir(project_dir: &Path) -> Option<String> {
@@ -204,6 +217,55 @@ mod tests {
         assert_eq!(first_real_bookmark("master?"), "master");
         assert_eq!(first_real_bookmark("master* master@heroku_test master@git"), "master");
         assert_eq!(first_real_bookmark("master*?"), "master");
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let repo_path = path_str(repo);
+        let mut full = vec!["-C", &*repo_path];
+        full.extend_from_slice(args);
+        Command::new("git").args(&full)
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+    }
+
+    /// Regression for the issue: `.env.test.local` written into a fresh jj
+    /// *workspace* (not the main repo) must not surface as a phantom `A` change.
+    /// Exercises the real topology — exclude lands in the main repo's git dir,
+    /// untrack runs inside the separate workspace working copy.
+    #[test]
+    fn ignore_generated_file_drops_phantom_add_in_jj_workspace() {
+        // Requires jj on PATH; CI doesn't install it, so skip there.
+        if !vcs_runner::jj_available() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@t.com"]);
+        git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("README"), "hi").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+
+        run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+        run_jj(&repo, &["workspace", "add", &path_str(&ws), "--name", "testws", "-r", "main"]).unwrap();
+
+        std::fs::write(ws.join(".env.test.local"), "DATABASE_URL=postgresql://localhost/x").unwrap();
+
+        // Sanity: jj sees the generated file as a phantom add before we exclude it.
+        let before = run_jj_utf8(&ws, &["status"]).unwrap();
+        assert!(before.contains(".env.test.local"), "jj should track the file initially");
+
+        JjBackend.ignore_generated_file(&repo, &ws, ".env.test.local");
+
+        let after = run_jj_utf8(&ws, &["status"]).unwrap();
+        assert!(
+            !after.contains(".env.test.local"),
+            "excluded + untracked file should not surface in jj status, got:\n{after}"
+        );
     }
 
     #[test]
