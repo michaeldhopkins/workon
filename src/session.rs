@@ -67,7 +67,7 @@ fn ensure_layout_compatible_inner(
         "zellij session '{name}' is already running in the main worktree with a different layout. \
          Zellij keeps the original layout when reattaching, so '{config_name}' would be ignored.\n\n\
          To open it as a separate workspace, run: workon -w -c {config_name}\n\
-         To replace the running session instead:  workon -n -c {config_name}"
+         To replace the running session instead:  workon --new-session -c {config_name}"
     );
 }
 
@@ -522,7 +522,7 @@ mod tests {
         assert!(msg.contains("'opencode'"), "{msg}");
         assert!(msg.contains("main worktree"), "{msg}");
         assert!(msg.contains("workon -w -c opencode"), "{msg}");
-        assert!(msg.contains("-n"), "{msg}");
+        assert!(msg.contains("--new-session"), "{msg}");
     }
 
     #[test]

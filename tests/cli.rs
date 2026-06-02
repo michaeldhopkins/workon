@@ -37,6 +37,63 @@ fn help_lists_config_flag() {
         .stdout(predicate::str::contains("--config"));
 }
 
+/// `--resume` is workspace-only. Guards the `requires = "workspace"` constraint
+/// across the change of `-w` from an optional-value arg to a plain bool flag.
+#[test]
+fn resume_requires_workspace() {
+    cargo_bin_cmd!("workon")
+        .args(["--resume", "some-session-id", "some-project"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--resume"));
+}
+
+#[test]
+fn help_lists_name_flag() {
+    cargo_bin_cmd!("workon")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--name"));
+}
+
+#[test]
+fn help_lists_new_session_long_flag() {
+    cargo_bin_cmd!("workon")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--new-session"));
+}
+
+/// `-n` used to force a new session; it's now an inert no-op. It must still
+/// *parse* (no "unexpected argument") — proven by reaching the config error
+/// rather than a clap parse error.
+#[test]
+fn reserved_n_short_flag_is_accepted_as_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    cargo_bin_cmd!("workon")
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .args(["-n", "--config", "no-such-config", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no-such-config"));
+}
+
+/// `-w` is now a pure boolean flag — it must not swallow the following
+/// `--config` token as a value. If it did, config resolution wouldn't run and
+/// we'd never see the "no-such-config" error.
+#[test]
+fn workspace_flag_takes_no_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    cargo_bin_cmd!("workon")
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .args(["-w", "--config", "no-such-config", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no-such-config"));
+}
+
 #[test]
 fn missing_named_config_errors_cleanly() {
     let tmp = tempfile::tempdir().unwrap();
