@@ -88,9 +88,27 @@ pub fn run_workspace(
         claude_session_id = generate_claude_session_id();
         ws_layout = layout::resolve_workspace_layout(config, &claude_session_id)?;
     }
+    // Snapshot any pre-existing stranded commits so the teardown warning only
+    // flags work orphaned during *this* session, not the user's older WIP.
+    let orphans_before = orphan_ids(vcs.orphaned_work(project_dir));
+
     session::launch(&tab_name, ws_layout.path(), &ws_dir, &mise_vars)?;
 
-    cleanup(&ws_id, &claude_session_id, project_dir, &ws_dir, created_db.as_deref(), vcs)
+    cleanup(&ws_id, &claude_session_id, project_dir, &ws_dir, created_db.as_deref(), &orphans_before, vcs)
+}
+
+/// Change-id of each orphan line (the leading token), as a set for diffing
+/// the pre-session baseline against the post-session state.
+fn orphan_ids(lines: Vec<String>) -> std::collections::HashSet<String> {
+    lines.iter().filter_map(|l| l.split_whitespace().next().map(String::from)).collect()
+}
+
+/// Default-yes save prompt: empty input (bare Enter, or EOF from a closed
+/// session) and any `y`/`yes` mean save; only an explicit `n`/`no`/other
+/// declines.
+fn is_affirmative(answer: &str) -> bool {
+    let a = answer.trim();
+    a.is_empty() || a.eq_ignore_ascii_case("y") || a.eq_ignore_ascii_case("yes")
 }
 
 fn cleanup(
@@ -99,6 +117,7 @@ fn cleanup(
     project_dir: &Path,
     ws_dir: &Path,
     created_db: Option<&str>,
+    orphans_before: &std::collections::HashSet<String>,
     vcs: &dyn Vcs,
 ) -> Result<()> {
     eprintln!();
@@ -106,20 +125,48 @@ fn cleanup(
     eprintln!("Claude session: {claude_session_id}");
     eprintln!("  Resume with: workon -w --resume {claude_session_id}");
 
+    // In-stack work not already bookmarked/pushed (changed_files is now
+    // bookmark-aware) plus commits stranded off the stack during this session.
+    // Either kind would vanish into an anonymous head on teardown.
     let changed = vcs.changed_files(ws_id, project_dir, ws_dir);
-    let has_meaningful_changes = changed.iter().any(|f| !GENERATED_FILES.contains(&f.as_str()));
+    let meaningful: Vec<&String> = changed.iter().filter(|f| !GENERATED_FILES.contains(&f.as_str())).collect();
+    let new_orphans: Vec<String> = vcs
+        .orphaned_work(project_dir)
+        .into_iter()
+        .filter(|l| l.split_whitespace().next().is_none_or(|id| !orphans_before.contains(id)))
+        .collect();
 
-    if has_meaningful_changes {
-        eprintln!("Workspace has uncommitted changes.");
-        eprint!("Auto-save as workon/{ws_id}? [y/N] ");
+    if !meaningful.is_empty() || !new_orphans.is_empty() {
+        eprintln!("Workspace has unsaved work that won't survive teardown:");
+        for f in &meaningful {
+            eprintln!("    changed:  {f}");
+        }
+        for o in &new_orphans {
+            eprintln!("    stranded: {o}");
+        }
+        // Default yes: the prompt only fires for work that would otherwise be
+        // lost, so preserving is almost always what you want. Empty/EOF (you
+        // closed the session without answering) counts as yes.
+        eprint!("Save under workon/{ws_id}* bookmarks? [Y/n] ");
         std::io::stderr().flush()?;
-
         let mut answer = String::new();
         std::io::stdin().read_line(&mut answer)?;
-        if answer.trim().eq_ignore_ascii_case("y")
-            && let Err(e) = vcs.save_work(ws_id, project_dir, ws_dir)
-        {
-            eprintln!("Warning: failed to save work: {e}");
+
+        if is_affirmative(&answer) {
+            if !meaningful.is_empty()
+                && let Err(e) = vcs.save_work(ws_id, project_dir, ws_dir)
+            {
+                eprintln!("Warning: failed to save work: {e}");
+            }
+            for o in &new_orphans {
+                if let Some(id) = o.split_whitespace().next()
+                    && let Err(e) = vcs.save_orphan(project_dir, ws_id, id)
+                {
+                    eprintln!("Warning: failed to save stranded commit {id}: {e}");
+                }
+            }
+        } else {
+            eprintln!("Not saved. Recover later with: jj log");
         }
     }
 
@@ -505,6 +552,41 @@ mod tests {
     use std::process::{Command, Stdio};
 
     use super::*;
+
+    #[test]
+    fn orphan_ids_extracts_leading_change_id() {
+        let lines = vec![
+            "abc12345  fix the thing".to_string(),
+            "def67890  (no description set)".to_string(),
+        ];
+        let ids = orphan_ids(lines);
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("abc12345"));
+        assert!(ids.contains("def67890"));
+    }
+
+    #[test]
+    fn orphan_ids_empty_input_is_empty_set() {
+        assert!(orphan_ids(vec![]).is_empty());
+    }
+
+    #[test]
+    fn is_affirmative_defaults_to_yes() {
+        // Bare Enter and EOF (closed session) both arrive as empty -> save.
+        assert!(is_affirmative(""));
+        assert!(is_affirmative("\n"));
+        assert!(is_affirmative("y"));
+        assert!(is_affirmative("Y\n"));
+        assert!(is_affirmative("yes"));
+    }
+
+    #[test]
+    fn is_affirmative_explicit_no_declines() {
+        assert!(!is_affirmative("n"));
+        assert!(!is_affirmative("N\n"));
+        assert!(!is_affirmative("no"));
+        assert!(!is_affirmative("nope"));
+    }
 
     #[test]
     fn ws_id_format() {

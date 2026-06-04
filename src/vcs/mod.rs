@@ -13,9 +13,31 @@ pub trait Vcs: Send + Sync {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String>;
     fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()>;
     fn pre_copy_sync(&self, project_dir: &Path);
+
+    /// Files in the workspace whose work would be lost on teardown — i.e.
+    /// changes not already reachable from a bookmark/branch or a remote. Work
+    /// you've already named or pushed is excluded, so a clean "finish, bookmark,
+    /// leave" flow reports nothing and the save prompt stays silent.
     fn changed_files(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String>;
+
+    /// Bookmark/branch the unsaved in-stack work under `workon/<ws_id>`.
     fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
     fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path);
+
+    /// One-line `<change-id>  <desc>` rows for non-empty commits that descend
+    /// from trunk but are unreachable from any workspace and unsaved (no
+    /// bookmark, not pushed) — work an agent stranded by `jj new <trunk>` over
+    /// uncommitted edits, which `changed_files` can't see. Default: none (git
+    /// worktrees don't strand commits this way).
+    fn orphaned_work(&self, _project_dir: &Path) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Bookmark a single stranded commit (by change-id) under
+    /// `workon/<ws_id>-<change-id>` so it survives teardown. Default: no-op.
+    fn save_orphan(&self, _project_dir: &Path, _ws_id: &str, _change_id: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Stop a workon-generated file (e.g. `.env.test.local`) from surfacing as
     /// a phantom change in the workspace. The file is per-workspace and must
