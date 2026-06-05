@@ -35,19 +35,20 @@ cargo install workon
 
 ## Usage
 
+workon always operates on the **current directory** — `cd` into your project first.
+
 ```bash
-workon                       # open current directory with the default config
-workon mbc                   # open ~/workspace/mbc
-workon mbc --new-session     # force new session (destroys existing)
-workon mbc --name api        # name the session "api" instead of "mbc"
-workon -w mbc                # ephemeral jj workspace (parallel session)
+workon                       # open the current directory with the default config
+workon --new-session         # force new session (destroys existing)
+workon --name api            # name the session "api" instead of the directory name
+workon -w                    # ephemeral jj workspace (parallel session)
 workon -c opencode           # open with the "opencode" custom config
-workon -w mbc --name fix-bug -c opencode  # named workspace using a custom config
+workon -w --name fix-bug -c opencode  # named workspace using a custom config
 ```
 
-The session is named after the project by default. Pass `--name` to override
-it — handy for running a second session of the same project under a distinct
-name. With `-w`, `--name` also labels the worktree and the saved bookmark.
+The session is named after the current directory by default. Pass `--name` to
+override it — handy for running a second session of the same project under a
+distinct name. With `-w`, `--name` also labels the worktree and the saved bookmark.
 
 ## Workspace mode (`-w`)
 
@@ -61,7 +62,7 @@ What it does:
 5. Launches a Zellij session in the workspace
 6. On exit: prompts to bookmark uncommitted work, forgets the jj workspace, drops any test database, and removes the directory in the background
 
-The primary session (`workon mbc`) is unaffected — it works directly in the project directory as before.
+The primary session (plain `workon`) is unaffected — it works directly in the project directory as before.
 
 ### Limitations
 
@@ -161,7 +162,7 @@ Error: --resume only works with claude-based configs (active config: opencode)
 
 ## Session management
 
-Sessions are named after the directory basename. Running `workon mbc` twice reattaches to the existing session. Use `-n` to start fresh.
+Sessions are named after the directory basename. Running `workon` twice in the same directory reattaches to the existing session. Use `--new-session` to start fresh.
 
 If a zellij server is hung, workon detects the unresponsive IPC (5s timeout), kills only the server bound to your project's session (other sessions are left alone), removes the stale socket, and launches a fresh session. Recovery runs whether or not you pass `-n`. Pre-flight checks before `attach` and `launch` ensure the no-timeout interactive zellij commands won't block on a wedged server.
 
