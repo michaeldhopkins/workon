@@ -22,7 +22,7 @@ fn help_flag() {
 #[test]
 fn skip_copy_ignored_requires_workspace() {
     cargo_bin_cmd!("workon")
-        .args(["--skip-copy-ignored", "some-project"])
+        .arg("--skip-copy-ignored")
         .assert()
         .failure()
         .stderr(predicate::str::contains("--skip-copy-ignored"));
@@ -42,7 +42,7 @@ fn help_lists_config_flag() {
 #[test]
 fn resume_requires_workspace() {
     cargo_bin_cmd!("workon")
-        .args(["--resume", "some-session-id", "some-project"])
+        .args(["--resume", "some-session-id"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--resume"));
@@ -74,7 +74,7 @@ fn reserved_n_short_flag_is_accepted_as_noop() {
     let tmp = tempfile::tempdir().unwrap();
     cargo_bin_cmd!("workon")
         .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["-n", "--config", "no-such-config", "."])
+        .args(["-n", "--config", "no-such-config"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no-such-config"));
@@ -88,7 +88,7 @@ fn workspace_flag_takes_no_value() {
     let tmp = tempfile::tempdir().unwrap();
     cargo_bin_cmd!("workon")
         .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["-w", "--config", "no-such-config", "."])
+        .args(["-w", "--config", "no-such-config"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no-such-config"));
@@ -99,7 +99,7 @@ fn missing_named_config_errors_cleanly() {
     let tmp = tempfile::tempdir().unwrap();
     cargo_bin_cmd!("workon")
         .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["--config", "no-such-config", "."])
+        .args(["--config", "no-such-config"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no-such-config"))
@@ -111,7 +111,7 @@ fn invalid_config_name_with_path_traversal_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     cargo_bin_cmd!("workon")
         .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["--config", "../etc/hosts", "."])
+        .args(["--config", "../etc/hosts"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid config name"));

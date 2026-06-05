@@ -16,7 +16,7 @@ use crate::workspace::WorkspaceOptions;
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();
 
-    let project = resolve::resolve(cli.project.as_deref())?;
+    let project = resolve::resolve()?;
     let config = cli.config.as_deref();
 
     // Resolve the layout first so deps::check_all knows which binaries to require

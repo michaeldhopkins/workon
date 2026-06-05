@@ -4,10 +4,7 @@ use clap::Parser;
 #[command(name = "workon", version, about = "Development workspace launcher with Zellij")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
-    /// Project path or ~/workspace/<name>
-    pub project: Option<String>,
-
-    /// Name the session — and, with -w, the worktree. Defaults to the project name.
+    /// Name the session — and, with -w, the worktree. Defaults to the directory name.
     #[arg(long)]
     pub name: Option<String>,
 
