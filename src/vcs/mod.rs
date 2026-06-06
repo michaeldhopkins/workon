@@ -24,18 +24,19 @@ pub trait Vcs: Send + Sync {
     fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
     fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path);
 
-    /// One-line `<change-id>  <desc>` rows for non-empty commits that descend
-    /// from trunk but are unreachable from any workspace and unsaved (no
-    /// bookmark, not pushed) — work an agent stranded by `jj new <trunk>` over
-    /// uncommitted edits, which `changed_files` can't see. Default: none (git
-    /// worktrees don't strand commits this way).
-    fn orphaned_work(&self, _project_dir: &Path) -> Vec<String> {
+    /// One-line `<commit-id>  <desc>` rows for non-empty commits that **this
+    /// workspace** stranded off its stack and that are still unsaved (no
+    /// bookmark/branch, not pushed, unreachable). Attribution is per-workspace
+    /// via the workspace's own pointer history — jj's operation log, git's
+    /// per-worktree HEAD reflog — so a concurrent workspace's orphans are never
+    /// misattributed here. Default: none.
+    fn stranded_work(&self, _ws_id: &str, _project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
         Vec::new()
     }
 
-    /// Bookmark a single stranded commit (by change-id) under
-    /// `workon/<ws_id>-<change-id>` so it survives teardown. Default: no-op.
-    fn save_orphan(&self, _project_dir: &Path, _ws_id: &str, _change_id: &str) -> Result<()> {
+    /// Bookmark a single stranded commit under `workon/<ws_id>-<id>` so it
+    /// survives teardown. Default: no-op.
+    fn save_stranded(&self, _project_dir: &Path, _ws_id: &str, _commit_id: &str) -> Result<()> {
         Ok(())
     }
 

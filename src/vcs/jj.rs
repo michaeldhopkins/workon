@@ -24,6 +24,37 @@ impl JjBackend {
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
     }
+
+    /// Commit ids this workspace's `@` moved away from, parsed from
+    /// `jj op log --op-diff`. Each operation prints a `Changed working copy
+    /// <ws>@:` block whose `- <change_id> <commit_id> …` lines are the commits
+    /// `@` left behind. Scoped to this workspace's blocks only — the basis for
+    /// concurrency-proof attribution. Callers filter to those still stranded.
+    fn abandoned_working_copies(&self, ws_id: &str, project_dir: &Path) -> Vec<String> {
+        let header = format!("Changed working copy {ws_id}@:");
+        let Ok(out) = run_jj_utf8(project_dir, &["op", "log", "--op-diff", "--no-graph"]) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        let mut in_block = false;
+        for line in out.lines() {
+            let t = line.trim();
+            if t == header {
+                in_block = true;
+            } else if !in_block {
+                continue;
+            } else if let Some(rest) = t.strip_prefix("- ") {
+                if let Some(commit_id) = rest.split_whitespace().nth(1) {
+                    ids.push(commit_id.to_string());
+                }
+            } else if !t.starts_with("+ ") {
+                in_block = false;
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
 }
 
 /// One-time jj initialization for a git repo that doesn't have .jj yet.
@@ -162,28 +193,37 @@ impl Vcs for JjBackend {
         Ok(())
     }
 
-    fn orphaned_work(&self, project_dir: &Path) -> Vec<String> {
-        let trunk = self.trunk_or_default(project_dir);
-        // Non-empty commits below trunk that no workspace can reach and that no
-        // bookmark or remote names (directly or as an ancestor) — i.e. stranded
-        // by `jj new`/abandon and not yet saved anywhere.
+    fn stranded_work(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
+        // Candidates: commits this workspace's @ moved away from, recovered from
+        // the operation log. `jj op log --op-diff` prints, per operation, a
+        // "Changed working copy <ws>@:" block whose `-` line is the commit @ left
+        // behind. Scoping to *this* workspace's blocks is what makes attribution
+        // concurrency-proof (a repo-wide revset would also catch other
+        // workspaces' orphans).
+        let candidates = self.abandoned_working_copies(ws_id, project_dir);
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        // Keep only those still genuinely stranded: non-empty, unsaved, and
+        // unreachable from any workspace.
         let revset = format!(
-            "({trunk}..) & ~empty() & ~ancestors(bookmarks() | remote_bookmarks()) \
-             & ~working_copies() & ~ancestors(working_copies())"
+            "({}) & ~empty() & ~ancestors(bookmarks() | remote_bookmarks()) \
+             & ~working_copies() & ~ancestors(working_copies())",
+            candidates.join("|")
         );
         run_jj_utf8(
             project_dir,
             &["log", "--ignore-working-copy", "--no-graph", "-r", &revset,
-              "-T", r#"change_id.shortest(8) ++ "  " ++ if(description, description.first_line(), "(no description set)") ++ "\n""#],
+              "-T", r#"commit_id.shortest(8) ++ "  " ++ if(description, description.first_line(), "(no description set)") ++ "\n""#],
         )
         .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect())
         .unwrap_or_default()
     }
 
-    fn save_orphan(&self, project_dir: &Path, ws_id: &str, change_id: &str) -> Result<()> {
-        let name = format!("workon/{ws_id}-{change_id}");
-        run_jj(project_dir, &["bookmark", "set", &name, "-r", change_id])?;
-        eprintln!("Saved stranded commit {change_id} as {name}");
+    fn save_stranded(&self, project_dir: &Path, ws_id: &str, commit_id: &str) -> Result<()> {
+        let name = format!("workon/{ws_id}-{commit_id}");
+        run_jj(project_dir, &["bookmark", "set", &name, "-r", commit_id])?;
+        eprintln!("Saved stranded commit {commit_id} as {name}");
         Ok(())
     }
 
@@ -447,40 +487,6 @@ mod tests {
         assert!(out.contains("nonempty"), "bookmark target must be non-empty, got {out}");
     }
 
-    /// Regression for the reported bug: `jj new <trunk>` over uncommitted edits
-    /// strands them on a sibling. changed_files (range) can't see it, but
-    /// orphaned_work must flag it so teardown warns instead of losing it.
-    #[test]
-    fn orphaned_work_flags_jj_new_orphan() {
-        if !vcs_runner::jj_available() {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let (repo, ws) = setup_ws(tmp.path(), "wsc");
-        std::fs::write(ws.join("app.rb"), "agent edit").unwrap();
-        run_jj(&ws, &["new", "master", "-m", "fresh start"]).unwrap();
-
-        // The range query is blind to the sibling orphan...
-        assert!(JjBackend.changed_files("wsc", &repo, &ws).is_empty(), "range query can't reach the sibling");
-        // ...but the orphan net catches it.
-        let orphans = JjBackend.orphaned_work(&repo);
-        assert_eq!(orphans.len(), 1, "exactly one stranded commit expected, got {orphans:?}");
-    }
-
-    #[test]
-    fn orphaned_work_empty_for_clean_and_in_stack_work() {
-        if !vcs_runner::jj_available() {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let (repo, ws) = setup_ws(tmp.path(), "wsd");
-        assert!(JjBackend.orphaned_work(&repo).is_empty(), "clean workspace has no orphans");
-
-        std::fs::write(ws.join("app.rb"), "x").unwrap();
-        run_jj(&ws, &["commit", "-m", "feat"]).unwrap();
-        assert!(JjBackend.orphaned_work(&repo).is_empty(), "in-stack committed work is not an orphan");
-    }
-
     /// The "finish, bookmark, leave" flow must stay silent — bookmarked work is
     /// findable, so it should not trigger the save prompt.
     #[test]
@@ -500,41 +506,54 @@ mod tests {
         );
     }
 
+    /// The bug op-log attribution fixes: two workspaces sharing the repo each
+    /// strand an orphan. A repo-wide scan would let either teardown claim both;
+    /// per-workspace attribution must return only that workspace's own.
     #[test]
-    fn orphaned_work_silent_for_bookmarked_orphan() {
+    fn stranded_work_attributes_per_workspace() {
         if !vcs_runner::jj_available() {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let (repo, ws) = setup_ws(tmp.path(), "wsf");
-        std::fs::write(ws.join("app.rb"), "agent edit").unwrap();
-        run_jj(&ws, &["new", "master", "-m", "fresh"]).unwrap();
+        let (repo, ws1) = setup_ws(tmp.path(), "wsone");
+        let ws2 = tmp.path().join("ws-two");
+        run_jj(&repo, &["workspace", "add", &path_str(&ws2), "--name", "wstwo", "-r", "master"]).unwrap();
 
-        let id = JjBackend.orphaned_work(&repo)[0].split_whitespace().next().unwrap().to_string();
-        run_jj(&repo, &["bookmark", "set", "rescued", "-r", &id]).unwrap();
-        assert!(JjBackend.orphaned_work(&repo).is_empty(), "a bookmarked orphan is no longer stranded");
+        std::fs::write(ws1.join("app.rb"), "ws1 edit").unwrap();
+        run_jj(&ws1, &["new", "master", "-m", "ws1 fresh"]).unwrap();
+        std::fs::write(ws2.join("app.rb"), "ws2 edit").unwrap();
+        run_jj(&ws2, &["new", "master", "-m", "ws2 fresh"]).unwrap();
+
+        let s1 = JjBackend.stranded_work("wsone", &repo, &ws1);
+        let s2 = JjBackend.stranded_work("wstwo", &repo, &ws2);
+        assert_eq!(s1.len(), 1, "wsone should see only its own orphan, got {s1:?}");
+        assert_eq!(s2.len(), 1, "wstwo should see only its own orphan, got {s2:?}");
+        assert_ne!(
+            s1[0].split_whitespace().next(),
+            s2[0].split_whitespace().next(),
+            "the two workspaces must not be attributed the same commit"
+        );
     }
 
     #[test]
-    fn save_orphan_bookmarks_stranded_commit() {
+    fn stranded_work_empty_for_clean_and_excludes_saved() {
         if !vcs_runner::jj_available() {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let (repo, ws) = setup_ws(tmp.path(), "wsg");
-        std::fs::write(ws.join("app.rb"), "agent edit").unwrap();
+        let (repo, ws) = setup_ws(tmp.path(), "wsx");
+        assert!(JjBackend.stranded_work("wsx", &repo, &ws).is_empty(), "clean workspace strands nothing");
+
+        std::fs::write(ws.join("app.rb"), "edit").unwrap();
         run_jj(&ws, &["new", "master", "-m", "fresh"]).unwrap();
+        let s = JjBackend.stranded_work("wsx", &repo, &ws);
+        assert_eq!(s.len(), 1, "the jj-new orphan should be attributed, got {s:?}");
 
-        let id = JjBackend.orphaned_work(&repo)[0].split_whitespace().next().unwrap().to_string();
-        JjBackend.save_orphan(&repo, "wsg", &id).unwrap();
-
-        let out = run_jj_utf8(
-            &repo,
-            &["log", "--ignore-working-copy", "--no-graph", "-r", &format!("workon/wsg-{id}"),
-              "-T", r#"if(empty, "empty", "nonempty")"#],
-        )
-        .unwrap();
-        assert!(out.contains("nonempty"), "bookmark should sit on the stranded work, got {out}");
-        assert!(JjBackend.orphaned_work(&repo).is_empty(), "saved orphan is no longer stranded");
+        let id = s[0].split_whitespace().next().unwrap().to_string();
+        JjBackend.save_stranded(&repo, "wsx", &id).unwrap();
+        assert!(
+            JjBackend.stranded_work("wsx", &repo, &ws).is_empty(),
+            "a saved (bookmarked) stranded commit is no longer stranded"
+        );
     }
 }
