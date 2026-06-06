@@ -104,6 +104,48 @@ impl Vcs for GitBackend {
         Ok(())
     }
 
+    fn stranded_work(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String> {
+        // git's analog of jj's stranded sibling: commit on the detached HEAD,
+        // then move HEAD away (e.g. `git switch -d origin/master`). The commit is
+        // now reflog-only — invisible to changed_files (HEAD is no longer ahead).
+        // The per-worktree HEAD reflog is the attribution source (concurrency-
+        // proof: it's this worktree's own pointer history).
+        let trunk = self.trunk_ref(project_dir);
+        let Ok(reflog) = run_git_utf8(ws_dir, &["reflog", "show", "--format=%H"]) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut stranded = Vec::new();
+        for sha in reflog.lines().map(str::trim).filter(|s| !s.is_empty()) {
+            if !seen.insert(sha) {
+                continue;
+            }
+            // Still stranded? Ahead of trunk, not on the current stack, on no ref.
+            let ahead = run_git_utf8(ws_dir, &["rev-list", "-n", "1", &format!("{trunk}..{sha}")])
+                .is_ok_and(|s| !s.trim().is_empty());
+            let on_stack = run_git(ws_dir, &["merge-base", "--is-ancestor", sha, "HEAD"]).is_ok();
+            let on_ref = run_git_utf8(
+                ws_dir,
+                &["for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads", "refs/remotes"],
+            )
+            .is_ok_and(|s| !s.trim().is_empty());
+            if ahead && !on_stack && !on_ref
+                && let Ok(desc) = run_git_utf8(ws_dir, &["log", "-1", "--format=%h  %s", sha])
+            {
+                stranded.push(desc.trim().to_string());
+            }
+        }
+        stranded
+    }
+
+    fn save_stranded(&self, project_dir: &Path, ws_id: &str, commit_id: &str) -> Result<()> {
+        let name = format!("workon/{ws_id}-{commit_id}");
+        run_git(project_dir, &["branch", &name, commit_id])
+            .context("failed to branch stranded commit")?;
+        eprintln!("Saved stranded commit {commit_id} as branch {name}");
+        Ok(())
+    }
+
     fn forget_workspace(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) {
         let _ = run_git(project_dir, &["worktree", "remove", "--force", &path_str(ws_dir)]);
         eprintln!("Removed git worktree");
@@ -376,5 +418,86 @@ mod tests {
         assert_eq!(branch_sha.trim(), head.trim(), "branch should point at the committed work");
 
         backend.forget_workspace("ws-y", &repo, &ws);
+    }
+
+    /// Commit work on a worktree's detached HEAD, then move HEAD off it — the
+    /// commit is now reflog-only. changed_files can't see it (HEAD isn't ahead);
+    /// stranded_work recovers it from the per-worktree reflog.
+    fn strand_via_reflog(ws: &Path, content: &str, msg: &str) {
+        std::fs::write(ws.join("orphan.txt"), content).unwrap();
+        git_c(ws, &["add", "."]);
+        git_c(ws, &["commit", "-m", msg]);
+        git_c(ws, &["checkout", "--detach", "origin/main"]); // HEAD no longer ahead -> orphan
+    }
+
+    #[test]
+    fn stranded_work_detects_and_excludes_branched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_remote(tmp.path());
+        let ws = tmp.path().join("wt");
+        let backend = GitBackend;
+        backend.create_workspace(&repo, &ws, "ws-r", "main").unwrap();
+
+        strand_via_reflog(&ws, "lost work", "stranded feature");
+        let s = backend.stranded_work("ws-r", &repo, &ws);
+        assert_eq!(s.len(), 1, "the reflog orphan should be detected, got {s:?}");
+        assert!(s[0].contains("stranded feature"), "got {s:?}");
+
+        // Once it's on a branch, it's saved — no longer stranded.
+        let id = s[0].split_whitespace().next().unwrap().to_string();
+        git_c(&repo, &["branch", "rescued", &id]);
+        assert!(
+            backend.stranded_work("ws-r", &repo, &ws).is_empty(),
+            "a branched commit is saved, not stranded"
+        );
+
+        backend.forget_workspace("ws-r", &repo, &ws);
+    }
+
+    /// No double-counting: a commit still on the current HEAD stack (HEAD ahead,
+    /// unbranched) is handled by `changed_files`, so `stranded_work` must leave
+    /// it alone — otherwise teardown would branch the same work twice.
+    #[test]
+    fn stranded_work_excludes_current_stack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_remote(tmp.path());
+        let ws = tmp.path().join("wt");
+        let backend = GitBackend;
+        backend.create_workspace(&repo, &ws, "ws-c", "main").unwrap();
+
+        // Commit and stay on it (HEAD ahead, unbranched) — do NOT switch away.
+        std::fs::write(ws.join("feature.txt"), "work").unwrap();
+        git_c(&ws, &["add", "."]);
+        git_c(&ws, &["commit", "-m", "in-progress work"]);
+
+        assert!(
+            !backend.changed_files("ws-c", &repo, &ws).is_empty(),
+            "current-stack work is handled by changed_files"
+        );
+        assert!(
+            backend.stranded_work("ws-c", &repo, &ws).is_empty(),
+            "stranded_work must not also claim the current stack (would double-branch)"
+        );
+
+        backend.forget_workspace("ws-c", &repo, &ws);
+    }
+
+    #[test]
+    fn save_stranded_branches_the_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_remote(tmp.path());
+        let ws = tmp.path().join("wt");
+        let backend = GitBackend;
+        backend.create_workspace(&repo, &ws, "ws-s", "main").unwrap();
+
+        strand_via_reflog(&ws, "lost work", "stranded feature");
+        let s = backend.stranded_work("ws-s", &repo, &ws);
+        let id = s[0].split_whitespace().next().unwrap().to_string();
+
+        backend.save_stranded(&repo, "ws-s", &id).unwrap();
+        let branches = run_git_utf8(&repo, &["branch", "--list", &format!("workon/ws-s-{id}")]).unwrap();
+        assert!(branches.contains("workon/ws-s-"), "branch should exist, got {branches:?}");
+
+        backend.forget_workspace("ws-s", &repo, &ws);
     }
 }
