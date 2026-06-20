@@ -8,19 +8,10 @@ use super::{detect_git_remote, path_str, Vcs};
 pub struct GitBackend;
 
 impl GitBackend {
-    /// The remote-tracking trunk ref the worktree was branched from, e.g.
-    /// `origin/master`.
-    fn trunk_ref(&self, project_dir: &Path) -> String {
-        let remote = detect_git_remote(project_dir);
-        let trunk = self.detect_trunk(project_dir).unwrap_or_else(|_| "main".into());
-        format!("{remote}/{trunk}")
-    }
-
-    /// Whether the worktree's HEAD has commits ahead of trunk that no branch or
-    /// remote ref contains — i.e. committed work that teardown would orphan.
-    fn has_unnamed_commits(&self, project_dir: &Path, ws_dir: &Path) -> bool {
-        let trunk = self.trunk_ref(project_dir);
-        let ahead = run_git_utf8(ws_dir, &["rev-list", &format!("{trunk}..HEAD")])
+    /// Whether the worktree's HEAD has commits ahead of the pinned `base` that no
+    /// branch or remote ref contains — i.e. committed work teardown would orphan.
+    fn has_unnamed_commits(&self, base: &str, ws_dir: &Path) -> bool {
+        let ahead = run_git_utf8(ws_dir, &["rev-list", &format!("{base}..HEAD")])
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
         if !ahead {
@@ -46,22 +37,29 @@ impl Vcs for GitBackend {
         Ok(if ok { "master".into() } else { "main".into() })
     }
 
-    fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()> {
+    fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<String> {
         eprintln!("Creating git worktree {ws_id}...");
         let remote = detect_git_remote(project_dir);
+        // Pin the branch point to a SHA so teardown diffs against exactly where
+        // the worktree started, even if the remote ref advances mid-session.
+        let base = run_git_utf8(project_dir, &["rev-parse", &format!("{remote}/{trunk}")])
+            .map(|s| s.trim().to_string())
+            .with_context(|| {
+                format!("trunk ref `{remote}/{trunk}` doesn't resolve — the repo may have no commits on {trunk} yet")
+            })?;
         run_git(
             project_dir,
-            &["worktree", "add", "--detach", &path_str(ws_dir), &format!("{remote}/{trunk}")],
+            &["worktree", "add", "--detach", &path_str(ws_dir), &base],
         )
         .context("failed to create git worktree")?;
-        Ok(())
+        Ok(base)
     }
 
     fn pre_copy_sync(&self, _project_dir: &Path) {
         // git worktrees have their own index; no sync needed.
     }
 
-    fn changed_files(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String> {
+    fn changed_files(&self, _ws_id: &str, base: &str, _project_dir: &Path, ws_dir: &Path) -> Vec<String> {
         // Two sources of would-vanish work in a worktree (jj only has the
         // second, since it auto-snapshots): a dirty tree, and commits on the
         // detached HEAD that no branch or remote names.
@@ -76,12 +74,11 @@ impl Vcs for GitBackend {
         }
 
         // 2. Committed work not reachable from any branch or remote — lost when
-        // the worktree is removed (reflog only).
-        if self.has_unnamed_commits(project_dir, ws_dir) {
-            let trunk = self.trunk_ref(project_dir);
-            if let Ok(out) = run_git(ws_dir, &["diff", "--name-only", &format!("{trunk}...HEAD")]) {
-                files.extend(out.stdout_lossy().lines().map(str::to_string));
-            }
+        // the worktree is removed (reflog only). Diff against the pinned base.
+        if self.has_unnamed_commits(base, ws_dir)
+            && let Ok(out) = run_git(ws_dir, &["diff", "--name-only", &format!("{base}...HEAD")])
+        {
+            files.extend(out.stdout_lossy().lines().map(str::to_string));
         }
 
         files.sort();
@@ -89,7 +86,7 @@ impl Vcs for GitBackend {
         files
     }
 
-    fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
+    fn save_work(&self, ws_id: &str, _base: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
         // Commit any uncommitted changes; a clean tree just means the work is
         // already committed on the detached HEAD (still unnamed until we branch).
         let _ = run_git(ws_dir, &["add", "-A"]);
@@ -104,13 +101,12 @@ impl Vcs for GitBackend {
         Ok(())
     }
 
-    fn stranded_work(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String> {
+    fn stranded_work(&self, _ws_id: &str, base: &str, _project_dir: &Path, ws_dir: &Path) -> Vec<String> {
         // git's analog of jj's stranded sibling: commit on the detached HEAD,
         // then move HEAD away (e.g. `git switch -d origin/master`). The commit is
         // now reflog-only — invisible to changed_files (HEAD is no longer ahead).
         // The per-worktree HEAD reflog is the attribution source (concurrency-
         // proof: it's this worktree's own pointer history).
-        let trunk = self.trunk_ref(project_dir);
         let Ok(reflog) = run_git_utf8(ws_dir, &["reflog", "show", "--format=%H"]) else {
             return Vec::new();
         };
@@ -120,8 +116,8 @@ impl Vcs for GitBackend {
             if !seen.insert(sha) {
                 continue;
             }
-            // Still stranded? Ahead of trunk, not on the current stack, on no ref.
-            let ahead = run_git_utf8(ws_dir, &["rev-list", "-n", "1", &format!("{trunk}..{sha}")])
+            // Still stranded? Ahead of base, not on the current stack, on no ref.
+            let ahead = run_git_utf8(ws_dir, &["rev-list", "-n", "1", &format!("{base}..{sha}")])
                 .is_ok_and(|s| !s.trim().is_empty());
             let on_stack = run_git(ws_dir, &["merge-base", "--is-ancestor", sha, "HEAD"]).is_ok();
             let on_ref = run_git_utf8(
@@ -163,6 +159,11 @@ mod tests {
     use std::process::{Command, Stdio};
 
     use super::*;
+
+    /// Pinned base SHA the worktree branches from, as `create_workspace` returns.
+    fn base_of(dir: &Path, reff: &str) -> String {
+        run_git_utf8(dir, &["rev-parse", reff]).unwrap().trim().to_string()
+    }
 
     fn init_repo_with_remote(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
         let origin = tmp.join("origin.git");
@@ -239,13 +240,32 @@ mod tests {
         backend.forget_workspace("ws-test", &repo, &ws_dir);
     }
 
+    /// The git analog of the jj no-commits guard: when the trunk ref can't be
+    /// resolved (here: no commits, no remote), create_workspace fails up front —
+    /// before `git worktree add` — and leaves no worktree directory behind.
+    #[test]
+    fn create_workspace_errors_without_resolvable_trunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        Command::new("git")
+            .args(["init", "--initial-branch=main", &path_str(&repo)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        let ws = tmp.path().join("ws");
+        let err = GitBackend.create_workspace(&repo, &ws, "ws-x", "main").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("doesn't resolve"), "expected an unresolved-trunk error, got: {msg}");
+        assert!(!ws.exists(), "no worktree dir should be left behind, got one at {ws:?}");
+    }
+
     #[test]
     fn changed_files_clean_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let (_origin, repo) = init_repo_with_remote(tmp.path());
 
         let backend = GitBackend;
-        assert!(backend.changed_files("ws-test", &repo, &repo).is_empty());
+        let base = base_of(&repo, "origin/main");
+        assert!(backend.changed_files("ws-test", &base, &repo, &repo).is_empty());
     }
 
     #[test]
@@ -256,7 +276,8 @@ mod tests {
         std::fs::write(repo.join("new_file.txt"), "dirty").unwrap();
 
         let backend = GitBackend;
-        let files = backend.changed_files("ws-test", &repo, &repo);
+        let base = base_of(&repo, "origin/main");
+        let files = backend.changed_files("ws-test", &base, &repo, &repo);
         assert_eq!(files, vec!["new_file.txt"]);
     }
 
@@ -272,7 +293,8 @@ mod tests {
         std::fs::write(repo.join("README.md"), "modified content").unwrap();
 
         let backend = GitBackend;
-        let files = backend.changed_files("ws-test", &repo, &repo);
+        let base = base_of(&repo, "origin/main");
+        let files = backend.changed_files("ws-test", &base, &repo, &repo);
         assert_eq!(files, vec!["README.md"]);
     }
 
@@ -299,12 +321,13 @@ mod tests {
         std::fs::write(repo.join(".env.test.local"), "DATABASE_URL=postgresql://localhost/x").unwrap();
         // Before excluding, the generated file shows up as a change.
         let backend = GitBackend;
-        assert_eq!(backend.changed_files("ws-test", &repo, &repo), vec![".env.test.local"]);
+        let base = base_of(&repo, "origin/main");
+        assert_eq!(backend.changed_files("ws-test", &base, &repo, &repo), vec![".env.test.local"]);
 
         backend.ignore_generated_file(&repo, &repo, ".env.test.local");
 
         assert!(
-            backend.changed_files("ws-test", &repo, &repo).is_empty(),
+            backend.changed_files("ws-test", &base, &repo, &repo).is_empty(),
             "excluded file should not surface in git status"
         );
     }
@@ -334,7 +357,8 @@ mod tests {
 
         std::fs::write(ws_dir.join("work.txt"), "important work").unwrap();
 
-        backend.save_work("ws-abc123", &repo, &ws_dir).unwrap();
+        let base = base_of(&repo, "origin/main");
+        backend.save_work("ws-abc123", &base, &repo, &ws_dir).unwrap();
 
         let output = Command::new("git")
             .args(["-C", &path_str(&repo), "branch", "--list", "workon/ws-abc123"])
@@ -367,11 +391,12 @@ mod tests {
         let backend = GitBackend;
         backend.create_workspace(&repo, &ws, "ws-x", "main").unwrap();
 
+        let base = base_of(&repo, "origin/main");
         std::fs::write(ws.join("feature.txt"), "work").unwrap();
         git_c(&ws, &["add", "."]);
         git_c(&ws, &["commit", "-m", "feature work"]);
 
-        let changed = backend.changed_files("ws-x", &repo, &ws);
+        let changed = backend.changed_files("ws-x", &base, &repo, &ws);
         assert!(changed.contains(&"feature.txt".to_string()), "unnamed committed work should be detected, got {changed:?}");
 
         backend.forget_workspace("ws-x", &repo, &ws);
@@ -387,12 +412,13 @@ mod tests {
         let backend = GitBackend;
         backend.create_workspace(&repo, &ws, "ws-x", "main").unwrap();
 
+        let base = base_of(&repo, "origin/main");
         std::fs::write(ws.join("feature.txt"), "work").unwrap();
         git_c(&ws, &["add", "."]);
         git_c(&ws, &["commit", "-m", "feature work"]);
         git_c(&ws, &["checkout", "-b", "feature"]);
 
-        assert!(backend.changed_files("ws-x", &repo, &ws).is_empty(), "work on a branch is saved");
+        assert!(backend.changed_files("ws-x", &base, &repo, &ws).is_empty(), "work on a branch is saved");
 
         backend.forget_workspace("ws-x", &repo, &ws);
     }
@@ -412,7 +438,8 @@ mod tests {
         git_c(&ws, &["commit", "-m", "feature work"]);
         let head = run_git_utf8(&ws, &["rev-parse", "HEAD"]).unwrap();
 
-        backend.save_work("ws-y", &repo, &ws).unwrap();
+        let base = base_of(&repo, "origin/main");
+        backend.save_work("ws-y", &base, &repo, &ws).unwrap();
 
         let branch_sha = run_git_utf8(&repo, &["rev-parse", "workon/ws-y"]).unwrap();
         assert_eq!(branch_sha.trim(), head.trim(), "branch should point at the committed work");
@@ -438,8 +465,9 @@ mod tests {
         let backend = GitBackend;
         backend.create_workspace(&repo, &ws, "ws-r", "main").unwrap();
 
+        let base = base_of(&repo, "origin/main");
         strand_via_reflog(&ws, "lost work", "stranded feature");
-        let s = backend.stranded_work("ws-r", &repo, &ws);
+        let s = backend.stranded_work("ws-r", &base, &repo, &ws);
         assert_eq!(s.len(), 1, "the reflog orphan should be detected, got {s:?}");
         assert!(s[0].contains("stranded feature"), "got {s:?}");
 
@@ -447,7 +475,7 @@ mod tests {
         let id = s[0].split_whitespace().next().unwrap().to_string();
         git_c(&repo, &["branch", "rescued", &id]);
         assert!(
-            backend.stranded_work("ws-r", &repo, &ws).is_empty(),
+            backend.stranded_work("ws-r", &base, &repo, &ws).is_empty(),
             "a branched commit is saved, not stranded"
         );
 
@@ -465,17 +493,18 @@ mod tests {
         let backend = GitBackend;
         backend.create_workspace(&repo, &ws, "ws-c", "main").unwrap();
 
+        let base = base_of(&repo, "origin/main");
         // Commit and stay on it (HEAD ahead, unbranched) — do NOT switch away.
         std::fs::write(ws.join("feature.txt"), "work").unwrap();
         git_c(&ws, &["add", "."]);
         git_c(&ws, &["commit", "-m", "in-progress work"]);
 
         assert!(
-            !backend.changed_files("ws-c", &repo, &ws).is_empty(),
+            !backend.changed_files("ws-c", &base, &repo, &ws).is_empty(),
             "current-stack work is handled by changed_files"
         );
         assert!(
-            backend.stranded_work("ws-c", &repo, &ws).is_empty(),
+            backend.stranded_work("ws-c", &base, &repo, &ws).is_empty(),
             "stranded_work must not also claim the current stack (would double-branch)"
         );
 
@@ -490,8 +519,9 @@ mod tests {
         let backend = GitBackend;
         backend.create_workspace(&repo, &ws, "ws-s", "main").unwrap();
 
+        let base = base_of(&repo, "origin/main");
         strand_via_reflog(&ws, "lost work", "stranded feature");
-        let s = backend.stranded_work("ws-s", &repo, &ws);
+        let s = backend.stranded_work("ws-s", &base, &repo, &ws);
         let id = s[0].split_whitespace().next().unwrap().to_string();
 
         backend.save_stranded(&repo, "ws-s", &id).unwrap();
