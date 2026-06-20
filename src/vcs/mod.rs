@@ -11,17 +11,24 @@ pub use self::jj::JjBackend;
 
 pub trait Vcs: Send + Sync {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String>;
-    fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()>;
+
+    /// Create the workspace branched from `trunk` and return the **immutable
+    /// commit id** it was branched from. Teardown diffs against this pinned base
+    /// rather than re-resolving `trunk` — a long session can outlive several
+    /// fetches, and a trunk bookmark that moved would otherwise make unrelated
+    /// upstream commits show up as the workspace's own "changed" files.
+    fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<String>;
     fn pre_copy_sync(&self, project_dir: &Path);
 
     /// Files in the workspace whose work would be lost on teardown — i.e.
     /// changes not already reachable from a bookmark/branch or a remote. Work
     /// you've already named or pushed is excluded, so a clean "finish, bookmark,
-    /// leave" flow reports nothing and the save prompt stays silent.
-    fn changed_files(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String>;
+    /// leave" flow reports nothing and the save prompt stays silent. `base` is
+    /// the pinned branch-point commit returned by `create_workspace`.
+    fn changed_files(&self, ws_id: &str, base: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String>;
 
     /// Bookmark/branch the unsaved in-stack work under `workon/<ws_id>`.
-    fn save_work(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
+    fn save_work(&self, ws_id: &str, base: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
     fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path);
 
     /// One-line `<commit-id>  <desc>` rows for non-empty commits that **this
@@ -29,8 +36,8 @@ pub trait Vcs: Send + Sync {
     /// bookmark/branch, not pushed, unreachable). Attribution is per-workspace
     /// via the workspace's own pointer history — jj's operation log, git's
     /// per-worktree HEAD reflog — so a concurrent workspace's orphans are never
-    /// misattributed here. Default: none.
-    fn stranded_work(&self, _ws_id: &str, _project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
+    /// misattributed here. `base` is the pinned branch point. Default: none.
+    fn stranded_work(&self, _ws_id: &str, _base: &str, _project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
         Vec::new()
     }
 

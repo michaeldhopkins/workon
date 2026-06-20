@@ -51,7 +51,7 @@ pub fn run_workspace(
     std::fs::create_dir_all(home_dir()?.join(".worktrees"))?;
 
     let trunk = vcs.detect_trunk(project_dir)?;
-    vcs.create_workspace(project_dir, &ws_dir, &ws_id, &trunk)?;
+    let base = vcs.create_workspace(project_dir, &ws_dir, &ws_id, &trunk)?;
 
     if !skip_copy_ignored {
         vcs.pre_copy_sync(project_dir);
@@ -90,7 +90,7 @@ pub fn run_workspace(
     }
     session::launch(&tab_name, ws_layout.path(), &ws_dir, &mise_vars)?;
 
-    cleanup(&ws_id, &claude_session_id, project_dir, &ws_dir, created_db.as_deref(), vcs)
+    cleanup(&ws_id, &base, &claude_session_id, project_dir, &ws_dir, created_db.as_deref(), vcs)
 }
 
 /// Default-yes save prompt: empty input (bare Enter, or EOF from a closed
@@ -103,6 +103,7 @@ fn is_affirmative(answer: &str) -> bool {
 
 fn cleanup(
     ws_id: &str,
+    base: &str,
     claude_session_id: &str,
     project_dir: &Path,
     ws_dir: &Path,
@@ -119,9 +120,9 @@ fn cleanup(
     // bookmarked or pushed is excluded), and commits this workspace stranded
     // off its stack via `jj new` (attributed through the op log — concurrency-
     // proof, so a sibling workspace's orphans are never swept in here).
-    let changed = vcs.changed_files(ws_id, project_dir, ws_dir);
+    let changed = vcs.changed_files(ws_id, base, project_dir, ws_dir);
     let meaningful: Vec<&String> = changed.iter().filter(|f| !GENERATED_FILES.contains(&f.as_str())).collect();
-    let stranded = vcs.stranded_work(ws_id, project_dir, ws_dir);
+    let stranded = vcs.stranded_work(ws_id, base, project_dir, ws_dir);
 
     if !meaningful.is_empty() || !stranded.is_empty() {
         eprintln!("Workspace has unsaved work that won't survive teardown:");
@@ -141,7 +142,7 @@ fn cleanup(
 
         if is_affirmative(&answer) {
             if !meaningful.is_empty()
-                && let Err(e) = vcs.save_work(ws_id, project_dir, ws_dir)
+                && let Err(e) = vcs.save_work(ws_id, base, project_dir, ws_dir)
             {
                 eprintln!("Warning: failed to save work: {e}");
             }
@@ -380,24 +381,45 @@ fn trust_mise_configs(ws_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Warn if mise shims aren't on PATH. Without shims, non-interactive shells
-/// (like those spawned by Claude Code) won't resolve the correct tool versions.
+/// Whether `mise activate` is live in the current environment. Activation exports
+/// these markers; their presence means mise is already managing PATH (the install
+/// bin dirs are injected directly), so the shims check below would be a false
+/// alarm — `which ruby` resolves correctly without shims on PATH.
+fn mise_activated() -> bool {
+    ["MISE_SHELL", "__MISE_DIFF", "__MISE_SESSION"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+}
+
+/// Warn only when tool versions could actually go unresolved: adding shims to
+/// PATH would help (the dir exists and isn't already on PATH) *and* `mise
+/// activate` isn't already handling it. Pure so the (otherwise I/O-bound)
+/// decision can be tested directly.
+fn should_warn_mise_shims(activated: bool, shims_would_help: bool) -> bool {
+    !activated && shims_would_help
+}
+
+/// Warn if mise shims aren't on PATH *and* `mise activate` isn't handling it.
+/// Without either, non-interactive shells (like those spawned by Claude Code)
+/// won't resolve the correct tool versions.
 fn warn_mise_shims() {
     let shims_dir = match home_dir() {
         Ok(h) => h.join(".local/share/mise/shims"),
         Err(_) => return,
     };
-    if !shims_dir.is_dir() {
-        return;
-    }
-
-    let path = std::env::var("PATH").unwrap_or_default();
     let shims_str = path_str(&shims_dir);
-    if !path.split(':').any(|p| p == shims_str) {
+    let on_path = std::env::var("PATH").unwrap_or_default().split(':').any(|p| p == shims_str);
+    let shims_would_help = shims_dir.is_dir() && !on_path;
+
+    if should_warn_mise_shims(mise_activated(), shims_would_help) {
         eprintln!();
-        eprintln!("Warning: mise shims directory is not on your PATH.");
-        eprintln!("Non-interactive shells (e.g. Claude Code) may not pick up");
-        eprintln!("the correct tool versions. Add this to your shell profile:");
+        eprintln!("Warning: mise shims directory is not on your PATH, and");
+        eprintln!("`mise activate` isn't set up either. Non-interactive shells");
+        eprintln!("(e.g. Claude Code) may not pick up the correct tool versions.");
+        eprintln!();
+        // .zshenv, not .zshrc: only .zshenv is sourced by non-interactive zsh,
+        // which is exactly the context this warning is about.
+        eprintln!("Add this to ~/.zshenv (sourced by non-interactive shells too):");
         eprintln!();
         eprintln!("  export PATH=\"$HOME/.local/share/mise/shims:$PATH\"");
         eprintln!();
@@ -931,6 +953,17 @@ mod tests {
 
         assert!(rel.contains(&"a/b/c/.mise.toml".to_string()));
         assert!(!rel.contains(&"a/b/c/d/.mise.toml".to_string()), "should not scan beyond depth 3");
+    }
+
+    #[test]
+    fn should_warn_mise_shims_only_when_genuinely_missing() {
+        // The fix: `mise activate` being live suppresses the warning even when
+        // shims would otherwise help — that was the false alarm being reported.
+        assert!(!should_warn_mise_shims(true, true), "activated => never warn");
+        assert!(!should_warn_mise_shims(true, false), "activated => never warn");
+        // Without activation, warn only when adding shims to PATH would help.
+        assert!(should_warn_mise_shims(false, true), "shims would help => warn");
+        assert!(!should_warn_mise_shims(false, false), "shims wouldn't help => no warn");
     }
 
     #[test]

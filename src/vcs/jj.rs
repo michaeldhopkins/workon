@@ -1,18 +1,76 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use vcs_runner::{parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8};
+use anyhow::{bail, Context, Result};
+use vcs_runner::{parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8, RunError};
 
 use super::{detect_git_remote, path_str, Vcs};
 
 pub struct JjBackend;
 
 impl JjBackend {
-    /// Trunk revision for range queries, falling back to the `trunk()` revset
-    /// if detection somehow fails. Mirrors the trunk the workspace was branched
-    /// from, so `trunk()..ws@` is exactly the work done in the workspace.
-    fn trunk_or_default(&self, project_dir: &Path) -> String {
-        self.detect_trunk(project_dir).unwrap_or_else(|_| "trunk()".into())
+    /// Resolve a revset to a single immutable commit id. Read-only
+    /// (`--ignore-working-copy`), so it works even when the working copy is
+    /// stale and returns nothing when the revset matches no commit — which is
+    /// how we distinguish "no trunk yet" from other failures.
+    fn resolve_commit(&self, project_dir: &Path, revset: &str) -> Result<String> {
+        let out = run_jj_utf8(
+            project_dir,
+            &["log", "--ignore-working-copy", "--no-graph", "-r", revset,
+              "-T", "commit_id ++ \"\\n\"", "--limit", "1"],
+        )?;
+        let id = out.lines().next().unwrap_or("").trim().to_string();
+        if id.is_empty() {
+            bail!("revision `{revset}` resolved to no commit");
+        }
+        Ok(id)
+    }
+
+    /// `jj workspace add`, recovering once from a stale main working copy.
+    ///
+    /// `jj workspace add` snapshots the source working copy, so it aborts with
+    /// "working copy is stale" when the main repo hasn't been refreshed since an
+    /// operation elsewhere. It also creates the workspace entry *before* hitting
+    /// that error, leaving an orphan behind — so on any failure we forget the
+    /// partial workspace, and on the stale case we run `update-stale` and retry.
+    fn add_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, rev: &str) -> Result<()> {
+        let add = || self.run_workspace_add(project_dir, ws_dir, ws_id, rev);
+
+        match add() {
+            Ok(()) => Ok(()),
+            Err(e) if is_stale_working_copy(&e) => {
+                eprintln!("Main repo working copy is stale; recovering with `jj workspace update-stale`...");
+                self.cleanup_partial_workspace(ws_id, project_dir, ws_dir);
+                run_jj(project_dir, &["workspace", "update-stale"])
+                    .context("failed to refresh stale working copy")?;
+                add().map_err(|e2| {
+                    self.cleanup_partial_workspace(ws_id, project_dir, ws_dir);
+                    anyhow::Error::new(e2).context("failed to create jj workspace after update-stale")
+                })
+            }
+            Err(e) => {
+                self.cleanup_partial_workspace(ws_id, project_dir, ws_dir);
+                Err(anyhow::Error::new(e).context("failed to create jj workspace"))
+            }
+        }
+    }
+
+    fn run_workspace_add(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, rev: &str) -> Result<(), RunError> {
+        run_jj(
+            project_dir,
+            &["workspace", "add", &path_str(ws_dir), "--name", ws_id, "-r", rev],
+        )
+        .map(|_| ())
+    }
+
+    /// Remove a workspace `jj workspace add` left half-created on failure: forget
+    /// the entry, drop the git worktree plumbing, and delete the directory so a
+    /// retry (or the next run) starts clean. Every step is best-effort.
+    fn cleanup_partial_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) {
+        let _ = run_jj(project_dir, &["workspace", "forget", ws_id]);
+        if let Some(git_dir) = absolute_git_dir(project_dir) {
+            let _ = std::fs::remove_dir_all(format!("{git_dir}/worktrees/{ws_id}"));
+        }
+        let _ = std::fs::remove_dir_all(ws_dir);
     }
 
     /// Whether `revset` matches at least one commit. Read-only.
@@ -117,13 +175,25 @@ impl Vcs for JjBackend {
         Ok("main".into())
     }
 
-    fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()> {
+    fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<String> {
         eprintln!("Creating jj workspace {ws_id}...");
-        run_jj(
-            project_dir,
-            &["workspace", "add", &path_str(ws_dir), "--name", ws_id, "-r", trunk],
-        )
-        .context("failed to create jj workspace")?;
+
+        // Pin the base before creating the workspace. Resolving here also gives a
+        // far better error than jj's bare "Revision doesn't exist" when the repo
+        // has no commits yet — the only way `trunk` fails to resolve.
+        let base = self.resolve_commit(project_dir, trunk).with_context(|| {
+            format!(
+                "trunk revision `{trunk}` doesn't resolve to a commit — the repo \
+                 likely has no commits yet. Create one, e.g.\n    \
+                 jj describe -m \"Initial commit\" && jj bookmark create {trunk} -r @ && jj new\n\
+                 then re-run."
+            )
+        })?;
+
+        // Branch from the pinned commit, not the `trunk` name — so the workspace's
+        // actual branch point is provably the same commit teardown diffs against,
+        // with no window where a moving trunk could desync the two.
+        self.add_workspace(project_dir, ws_dir, ws_id, &base)?;
 
         // jj workspaces don't have a .git directory, so git commands
         // (branchdiff, git log, etc.) fail inside the workspace. Set up a
@@ -132,7 +202,7 @@ impl Vcs for JjBackend {
             eprintln!("Warning: could not set up git worktree for workspace: {e}");
         }
 
-        Ok(())
+        Ok(base)
     }
 
     fn pre_copy_sync(&self, project_dir: &Path) {
@@ -142,23 +212,25 @@ impl Vcs for JjBackend {
         let _ = run_jj(project_dir, &["status"]);
     }
 
-    fn changed_files(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
-        let trunk = self.trunk_or_default(project_dir);
+    fn changed_files(&self, ws_id: &str, base: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
         let ws_head = format!("{ws_id}@");
         // Is there non-empty work in the stack that no bookmark or remote names?
         // Excluding ancestors(bookmarks | remote_bookmarks) means a stack you've
         // already bookmarked or pushed reports nothing — no spurious prompt.
         // (The whole-stack range also catches work parked on an ancestor of ws@
         // by `jj commit`, which a point query at ws@ would miss.)
+        //
+        // `base` is the pinned branch point, not a re-resolved trunk bookmark, so
+        // a fetch that advanced trunk mid-session can't leak upstream commits in.
         let unsaved = format!(
-            "({trunk}..{ws_head}) & ~empty() & ~ancestors(bookmarks() | remote_bookmarks())"
+            "({base}..{ws_head}) & ~empty() & ~ancestors(bookmarks() | remote_bookmarks())"
         );
         if !self.revset_nonempty(project_dir, &unsaved) {
             return Vec::new();
         }
         run_jj_utf8(
             project_dir,
-            &["diff", "--ignore-working-copy", "--from", &trunk, "--to", &ws_head, "--summary"],
+            &["diff", "--ignore-working-copy", "--from", base, "--to", &ws_head, "--summary"],
         )
         .map(|stdout| {
             parse_diff_summary(&stdout)
@@ -169,8 +241,7 @@ impl Vcs for JjBackend {
         .unwrap_or_default()
     }
 
-    fn save_work(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Result<()> {
-        let trunk = self.trunk_or_default(project_dir);
+    fn save_work(&self, ws_id: &str, base: &str, project_dir: &Path, _ws_dir: &Path) -> Result<()> {
         // Bookmark the tip of the non-empty stack, not ws@ — ws@ is empty
         // whenever the agent committed its work, so bookmarking it would save
         // nothing. Fall back to ws@ if (defensively) the stack is all-empty.
@@ -178,7 +249,7 @@ impl Vcs for JjBackend {
         let target = run_jj_utf8(
             project_dir,
             &["log", "--ignore-working-copy", "--no-graph", "-T", "commit_id ++ \"\\n\"",
-              "-r", &format!("heads(({trunk}..{ws_head}) & ~empty())")],
+              "-r", &format!("heads(({base}..{ws_head}) & ~empty())")],
         )
         .ok()
         .and_then(|s| s.lines().next().map(str::to_string))
@@ -193,7 +264,7 @@ impl Vcs for JjBackend {
         Ok(())
     }
 
-    fn stranded_work(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
+    fn stranded_work(&self, ws_id: &str, _base: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
         // Candidates: commits this workspace's @ moved away from, recovered from
         // the operation log. `jj op log --op-diff` prints, per operation, a
         // "Changed working copy <ws>@:" block whose `-` line is the commit @ left
@@ -251,6 +322,19 @@ impl Vcs for JjBackend {
             eprintln!("Warning: could not untrack {relpath} in jj: {e}");
         }
     }
+}
+
+/// Whether a failed jj invocation aborted because the working copy is stale —
+/// recoverable with `jj workspace update-stale`. (Newer jj auto-recovers on
+/// access; older versions, like the one that surfaced this bug, hard-error.)
+fn is_stale_working_copy(err: &RunError) -> bool {
+    err.stderr().is_some_and(stderr_reports_stale)
+}
+
+/// jj's stale-working-copy abort always carries this phrase, e.g.
+/// "Error: The working copy is stale (not updated since operation abc123)."
+fn stderr_reports_stale(stderr: &str) -> bool {
+    stderr.contains("working copy is stale")
 }
 
 fn absolute_git_dir(project_dir: &Path) -> Option<String> {
@@ -446,6 +530,18 @@ mod tests {
         (repo, ws)
     }
 
+    /// The pinned base commit id (master) the workspaces in these tests branch
+    /// from — the value `create_workspace` returns in production.
+    fn jj_base(repo: &Path) -> String {
+        run_jj_utf8(
+            repo,
+            &["log", "--ignore-working-copy", "--no-graph", "-r", "master", "-T", "commit_id", "--limit", "1"],
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    }
+
     /// Regression: an agent that commits its work leaves ws@ empty, so the old
     /// point query `-r ws@` reported nothing and the work was silently dropped.
     /// The range query must see it.
@@ -456,10 +552,11 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (repo, ws) = setup_ws(tmp.path(), "wsa");
+        let base = jj_base(&repo);
         std::fs::write(ws.join("app.rb"), "agent change").unwrap();
         run_jj(&ws, &["commit", "-m", "implement feature"]).unwrap();
 
-        let changed = JjBackend.changed_files("wsa", &repo, &ws);
+        let changed = JjBackend.changed_files("wsa", &base, &repo, &ws);
         assert!(changed.contains(&"app.rb".to_string()), "should detect committed work, got {changed:?}");
     }
 
@@ -472,10 +569,11 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (repo, ws) = setup_ws(tmp.path(), "wsb");
+        let base = jj_base(&repo);
         std::fs::write(ws.join("app.rb"), "agent change").unwrap();
         run_jj(&ws, &["commit", "-m", "implement feature"]).unwrap();
 
-        JjBackend.save_work("wsb", &repo, &ws).unwrap();
+        JjBackend.save_work("wsb", &base, &repo, &ws).unwrap();
 
         let out = run_jj_utf8(
             &repo,
@@ -496,12 +594,13 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (repo, ws) = setup_ws(tmp.path(), "wse");
+        let base = jj_base(&repo);
         std::fs::write(ws.join("app.rb"), "agent change").unwrap();
         run_jj(&ws, &["commit", "-m", "finish the PR"]).unwrap();
         run_jj(&ws, &["bookmark", "set", "my-feature", "-r", "@-"]).unwrap();
 
         assert!(
-            JjBackend.changed_files("wse", &repo, &ws).is_empty(),
+            JjBackend.changed_files("wse", &base, &repo, &ws).is_empty(),
             "bookmarked work is already saved and must not prompt"
         );
     }
@@ -524,8 +623,9 @@ mod tests {
         std::fs::write(ws2.join("app.rb"), "ws2 edit").unwrap();
         run_jj(&ws2, &["new", "master", "-m", "ws2 fresh"]).unwrap();
 
-        let s1 = JjBackend.stranded_work("wsone", &repo, &ws1);
-        let s2 = JjBackend.stranded_work("wstwo", &repo, &ws2);
+        let base = jj_base(&repo);
+        let s1 = JjBackend.stranded_work("wsone", &base, &repo, &ws1);
+        let s2 = JjBackend.stranded_work("wstwo", &base, &repo, &ws2);
         assert_eq!(s1.len(), 1, "wsone should see only its own orphan, got {s1:?}");
         assert_eq!(s2.len(), 1, "wstwo should see only its own orphan, got {s2:?}");
         assert_ne!(
@@ -542,18 +642,95 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let (repo, ws) = setup_ws(tmp.path(), "wsx");
-        assert!(JjBackend.stranded_work("wsx", &repo, &ws).is_empty(), "clean workspace strands nothing");
+        let base = jj_base(&repo);
+        assert!(JjBackend.stranded_work("wsx", &base, &repo, &ws).is_empty(), "clean workspace strands nothing");
 
         std::fs::write(ws.join("app.rb"), "edit").unwrap();
         run_jj(&ws, &["new", "master", "-m", "fresh"]).unwrap();
-        let s = JjBackend.stranded_work("wsx", &repo, &ws);
+        let s = JjBackend.stranded_work("wsx", &base, &repo, &ws);
         assert_eq!(s.len(), 1, "the jj-new orphan should be attributed, got {s:?}");
 
         let id = s[0].split_whitespace().next().unwrap().to_string();
         JjBackend.save_stranded(&repo, "wsx", &id).unwrap();
         assert!(
-            JjBackend.stranded_work("wsx", &repo, &ws).is_empty(),
+            JjBackend.stranded_work("wsx", &base, &repo, &ws).is_empty(),
             "a saved (bookmarked) stranded commit is no longer stranded"
         );
+    }
+
+    /// The base-pinning fix: a long session can outlive a fetch that advances
+    /// trunk. Teardown must diff against the pinned branch point, not the moved
+    /// trunk — otherwise unrelated upstream commits surface as the workspace's
+    /// own "changed" files (the "14 phantom files, only test.txt changed" bug).
+    #[test]
+    fn changed_files_uses_pinned_base_not_moved_trunk() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _other) = setup_ws(tmp.path(), "wsother");
+        let ws = tmp.path().join("ws-pin");
+        let base = JjBackend.create_workspace(&repo, &ws, "wspin", "master").unwrap();
+
+        // Trunk advances in the main repo, as a mid-session fetch would.
+        std::fs::write(repo.join("upstream.rb"), "upstream change").unwrap();
+        run_jj(&repo, &["commit", "-m", "upstream work"]).unwrap();
+        run_jj(&repo, &["bookmark", "set", "master", "-r", "@-"]).unwrap();
+        let moved_trunk = jj_base(&repo);
+        assert_ne!(base, moved_trunk, "precondition: trunk moved off the branch point");
+
+        // The workspace does its own, unrelated work. The repo op above left this
+        // workspace's copy stale — refresh it, just as the teardown path does.
+        run_jj(&ws, &["workspace", "update-stale"]).unwrap();
+        std::fs::write(ws.join("app.rb"), "agent change").unwrap();
+        run_jj(&ws, &["commit", "-m", "agent work"]).unwrap();
+
+        let pinned = JjBackend.changed_files("wspin", &base, &repo, &ws);
+        assert!(pinned.contains(&"app.rb".to_string()), "own work must be reported, got {pinned:?}");
+        assert!(
+            !pinned.contains(&"upstream.rb".to_string()),
+            "pinned base must not leak upstream changes, got {pinned:?}"
+        );
+
+        // Regression guard: re-resolving the now-moved trunk is exactly the old bug.
+        let leaked = JjBackend.changed_files("wspin", &moved_trunk, &repo, &ws);
+        assert!(
+            leaked.contains(&"upstream.rb".to_string()),
+            "sanity: a moved-trunk base leaks upstream.rb (the bug), got {leaked:?}"
+        );
+    }
+
+    /// A repo with no commits has no `main` to branch from. create_workspace must
+    /// fail with an actionable hint (not jj's bare "Revision doesn't exist") and
+    /// leave no half-created workspace behind.
+    #[test]
+    fn create_workspace_errors_helpfully_without_commits() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("empty");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+
+        let ws = tmp.path().join("ws-empty");
+        let err = JjBackend.create_workspace(&repo, &ws, "wsempty", "main").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no commits"), "expected a no-commits hint, got: {msg}");
+        assert!(!ws.exists(), "no workspace dir should be left behind, got one at {ws:?}");
+    }
+
+    /// The stale-recovery trigger: detection keys off jj's stderr phrase. Newer
+    /// jj auto-recovers so the error can't be provoked end-to-end on every
+    /// machine; this pins the exact message we match against (and rejects others).
+    #[test]
+    fn stderr_reports_stale_matches_jj_message() {
+        assert!(stderr_reports_stale(
+            "Error: The working copy is stale (not updated since operation cd3e17046956).\n\
+             Hint: Run `jj workspace update-stale` to update it."
+        ));
+        assert!(!stderr_reports_stale("Error: Revision `main` doesn't exist"));
+        assert!(!stderr_reports_stale(""));
     }
 }
