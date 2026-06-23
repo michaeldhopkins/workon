@@ -105,11 +105,16 @@ pub(crate) fn append_git_exclude(project_dir: &Path, pattern: &str) -> Result<()
     Ok(())
 }
 
-/// Returns the name of the first git remote (usually "origin", but could be anything).
+/// The canonical git remote. Prefers `origin` when present — `git remote` lists
+/// alphabetically, so blindly taking the first would pick a deploy mirror like
+/// `heroku_test` over `origin`, whose stale `master` then poisons trunk/base
+/// resolution. Falls back to the first remote (single-remote repos with a
+/// non-`origin` name), then to `origin` as a last resort.
 pub(crate) fn detect_git_remote(project_dir: &Path) -> String {
-    run_git_utf8(project_dir, &["remote"])
-        .ok()
-        .and_then(|s| s.lines().next().map(|l| l.to_string()))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "origin".into())
+    let remotes = run_git_utf8(project_dir, &["remote"]).unwrap_or_default();
+    let names: Vec<&str> = remotes.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if names.contains(&"origin") {
+        return "origin".into();
+    }
+    names.first().map(|s| (*s).to_string()).unwrap_or_else(|| "origin".into())
 }

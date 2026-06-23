@@ -197,8 +197,9 @@ impl Vcs for JjBackend {
 
         // jj workspaces don't have a .git directory, so git commands
         // (branchdiff, git log, etc.) fail inside the workspace. Set up a
-        // git worktree reference so git works alongside jj.
-        if let Err(e) = setup_git_worktree(project_dir, ws_dir, ws_id, trunk) {
+        // git worktree reference, detached at the same pinned base, so git works
+        // alongside jj and the two can't disagree on where the workspace started.
+        if let Err(e) = setup_git_worktree(project_dir, ws_dir, ws_id, &base) {
             eprintln!("Warning: could not set up git worktree for workspace: {e}");
         }
 
@@ -349,7 +350,14 @@ fn absolute_git_dir(project_dir: &Path) -> Option<String> {
 /// branchdiff, and tools that expect a git repo all fail inside the workspace.
 /// This creates the minimal git worktree plumbing: a `.git` file pointing to a
 /// worktree entry under the main repo's `.git/worktrees/` directory.
-fn setup_git_worktree(project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<()> {
+///
+/// `base` is the pinned commit jj branched the workspace from. We detach git's
+/// HEAD at exactly that commit — *not* a re-resolved `<remote>/<trunk>` — so the
+/// git and jj views can't diverge. Guessing a remote was an active bug: on a repo
+/// whose first remote is a stale deploy mirror (e.g. a heroku remote ordered
+/// before origin), `<remote>/master` resolved to a ref ~1000 commits behind, and
+/// branchdiff/git tooling showed that stale state instead of jj's real `@`.
+fn setup_git_worktree(project_dir: &Path, ws_dir: &Path, ws_id: &str, base: &str) -> Result<()> {
     let git_dir = absolute_git_dir(project_dir)
         .context("could not determine .git directory")?;
     let wt_git_dir = format!("{git_dir}/worktrees/{ws_id}");
@@ -357,19 +365,7 @@ fn setup_git_worktree(project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &st
     std::fs::create_dir_all(&wt_git_dir)?;
     std::fs::write(format!("{wt_git_dir}/gitdir"), format!("{}/.git\n", path_str(ws_dir)))?;
     std::fs::write(format!("{wt_git_dir}/commondir"), "../..\n")?;
-
-    let trunk_branch = trunk.split('@').next().unwrap_or(trunk);
-    let remote = detect_git_remote(project_dir);
-
-    let head_output = run_git_utf8(project_dir, &["rev-parse", &format!("{remote}/{trunk_branch}")])
-        .ok()
-        .filter(|s| !s.is_empty());
-
-    let head = head_output.unwrap_or_else(|| {
-        run_git_utf8(project_dir, &["rev-parse", "HEAD"]).unwrap_or_default()
-    });
-
-    std::fs::write(format!("{wt_git_dir}/HEAD"), format!("{head}\n"))?;
+    std::fs::write(format!("{wt_git_dir}/HEAD"), format!("{base}\n"))?;
 
     // Point the workspace at this worktree so git commands work.
     std::fs::write(ws_dir.join(".git"), format!("gitdir: {wt_git_dir}\n"))?;
@@ -491,7 +487,8 @@ mod tests {
             .args(["-C", &path_str(&project), "commit", "-m", "init"])
             .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
 
-        setup_git_worktree(&project, &ws, "test-ws", "main").unwrap();
+        let base = run_git_utf8(&project, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        setup_git_worktree(&project, &ws, "test-ws", &base).unwrap();
 
         assert!(ws.join(".git").is_file(), ".git file should exist in workspace");
 
@@ -504,6 +501,40 @@ mod tests {
         assert!(log.status.success(), "git log should work in workspace");
         let output = String::from_utf8_lossy(&log.stdout);
         assert!(output.contains("init"), "should see the commit");
+    }
+
+    /// Regression for the heroku-remote bug: the git worktree HEAD must be the
+    /// exact pinned base commit, never a re-resolved `<remote>/<trunk>`. A repo
+    /// whose first-listed remote is a stale deploy mirror froze every worktree's
+    /// git HEAD ~1000 commits behind jj's real `@`. setup_git_worktree no longer
+    /// consults remotes at all; this proves the written HEAD equals `base`.
+    #[test]
+    fn setup_git_worktree_pins_head_to_base_not_a_remote_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main", &path_str(&project)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        git(&project, &["config", "user.email", "t@t.com"]);
+        git(&project, &["config", "user.name", "T"]);
+        std::fs::write(project.join("README"), "hi").unwrap();
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "-m", "init"]);
+
+        // A stale "deploy mirror" ref that a buggy remote-guess could pick up.
+        git(&project, &["update-ref", "refs/remotes/heroku/master", "HEAD"]);
+        std::fs::write(project.join("README"), "real master moved on").unwrap();
+        git(&project, &["commit", "-am", "advance real master"]);
+        let base = run_git_utf8(&project, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        setup_git_worktree(&project, &ws, "ws-pin", &base).unwrap();
+
+        let git_dir = run_git_utf8(&project, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        let head = std::fs::read_to_string(format!("{}/worktrees/ws-pin/HEAD", git_dir.trim())).unwrap();
+        assert_eq!(head.trim(), base, "worktree HEAD must equal the pinned base commit");
     }
 
     /// Colocated jj repo with an origin remote (so `trunk()` resolves) and a
