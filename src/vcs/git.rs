@@ -217,6 +217,35 @@ mod tests {
         (origin, repo)
     }
 
+    /// The heroku-remote bug: `git remote` lists alphabetically, so a deploy
+    /// mirror like `heroku_test` sorts ahead of `origin`. detect_git_remote must
+    /// still pick `origin` when it exists, not the first-listed remote.
+    #[test]
+    fn detect_git_remote_prefers_origin_over_alphabetically_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        Command::new("git").args(["init", &path_str(&repo)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "remote", "add", "heroku_test", "https://git.heroku.com/x.git"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "remote", "add", "origin", "git@github.com:o/r.git"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        assert_eq!(detect_git_remote(&repo), "origin");
+    }
+
+    #[test]
+    fn detect_git_remote_falls_back_to_sole_remote_when_no_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        Command::new("git").args(["init", &path_str(&repo)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(["-C", &path_str(&repo), "remote", "add", "heroku", "https://git.heroku.com/x.git"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+
+        assert_eq!(detect_git_remote(&repo), "heroku");
+    }
+
     #[test]
     fn detect_trunk_with_non_origin_remote() {
         let tmp = tempfile::tempdir().unwrap();
