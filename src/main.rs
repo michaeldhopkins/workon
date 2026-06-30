@@ -5,6 +5,7 @@ mod home;
 mod layout;
 mod resolve;
 mod session;
+mod trust;
 mod vcs;
 mod workspace;
 
