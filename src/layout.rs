@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use tempfile::NamedTempFile;
 
+use crate::trust;
+
 const EMBEDDED_LAYOUT: &str = include_str!("../layouts/workon.kdl");
 
 const CREATING_A_CONFIG_URL: &str =
@@ -145,12 +147,14 @@ fn read_config_from(workon_dir: &Path, config: Option<&str>) -> Result<String> {
         None | Some("default") => {
             let default_path = configs_dir.join("default.kdl");
             if default_path.is_file() {
-                return Ok(std::fs::read_to_string(&default_path)?);
+                return trust::read_trusted(workon_dir, &default_path);
             }
             let legacy = workon_dir.join("layout.kdl");
             if legacy.is_file() {
-                return Ok(std::fs::read_to_string(&legacy)?);
+                return trust::read_trusted(workon_dir, &legacy);
             }
+            // The embedded layout ships inside the binary — nothing on disk can
+            // tamper with it, so it needs no trust pin.
             Ok(EMBEDDED_LAYOUT.to_string())
         }
         Some(name) => {
@@ -168,7 +172,7 @@ fn read_config_from(workon_dir: &Path, config: Option<&str>) -> Result<String> {
                     CREATING_A_CONFIG_URL,
                 );
             }
-            Ok(std::fs::read_to_string(&path)?)
+            trust::read_trusted(workon_dir, &path)
         }
     }
 }
@@ -214,6 +218,25 @@ fn config_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Append a `[[trusted]]` pin for an on-disk config so `read_config_from`
+    /// will load it — the test-side equivalent of a user hand-editing
+    /// `trusted.toml`. `body` must equal the file's exact bytes on disk.
+    fn bless(workon_dir: &Path, file: &Path, body: &str) {
+        use std::io::Write;
+        let canon = std::fs::canonicalize(file).unwrap();
+        let entry = format!(
+            "[[trusted]]\npath = {:?}\nsha256 = \"{}\"\n",
+            canon.to_string_lossy(),
+            trust::sha256_hex(body.as_bytes()),
+        );
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(workon_dir.join("trusted.toml"))
+            .unwrap();
+        f.write_all(entry.as_bytes()).unwrap();
+    }
+
     #[test]
     fn default_uses_embedded_when_nothing_present() {
         let tmp = tempfile::tempdir().unwrap();
@@ -226,7 +249,9 @@ mod tests {
     #[test]
     fn default_uses_legacy_layout_kdl_when_no_configs_default() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("layout.kdl"), "LEGACY").unwrap();
+        let legacy = tmp.path().join("layout.kdl");
+        std::fs::write(&legacy, "LEGACY").unwrap();
+        bless(tmp.path(), &legacy, "LEGACY");
 
         let content = read_config_from(tmp.path(), None).unwrap();
         assert_eq!(content, "LEGACY");
@@ -237,7 +262,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("layout.kdl"), "LEGACY").unwrap();
         std::fs::create_dir_all(tmp.path().join("configs")).unwrap();
-        std::fs::write(tmp.path().join("configs/default.kdl"), "NEW_DEFAULT").unwrap();
+        let default_path = tmp.path().join("configs/default.kdl");
+        std::fs::write(&default_path, "NEW_DEFAULT").unwrap();
+        bless(tmp.path(), &default_path, "NEW_DEFAULT");
 
         let content = read_config_from(tmp.path(), None).unwrap();
         assert_eq!(content, "NEW_DEFAULT");
@@ -246,7 +273,9 @@ mod tests {
     #[test]
     fn explicit_default_name_uses_same_resolution_as_none() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("layout.kdl"), "LEGACY").unwrap();
+        let legacy = tmp.path().join("layout.kdl");
+        std::fs::write(&legacy, "LEGACY").unwrap();
+        bless(tmp.path(), &legacy, "LEGACY");
 
         let content = read_config_from(tmp.path(), Some("default")).unwrap();
         assert_eq!(content, "LEGACY");
@@ -256,10 +285,33 @@ mod tests {
     fn named_config_loads_from_configs_dir() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("configs")).unwrap();
-        std::fs::write(tmp.path().join("configs/opencode.kdl"), "OPENCODE_LAYOUT").unwrap();
+        let path = tmp.path().join("configs/opencode.kdl");
+        std::fs::write(&path, "OPENCODE_LAYOUT").unwrap();
+        bless(tmp.path(), &path, "OPENCODE_LAYOUT");
 
         let content = read_config_from(tmp.path(), Some("opencode")).unwrap();
         assert_eq!(content, "OPENCODE_LAYOUT");
+    }
+
+    #[test]
+    fn named_config_refused_until_blessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("configs")).unwrap();
+        std::fs::write(tmp.path().join("configs/evil.kdl"), "OPENCODE_LAYOUT").unwrap();
+
+        let err = read_config_from(tmp.path(), Some("evil")).unwrap_err().to_string();
+        assert!(err.contains("untrusted config"), "{err}");
+        assert!(err.contains("[[trusted]]"), "{err}");
+    }
+
+    #[test]
+    fn default_kdl_refused_until_blessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("configs")).unwrap();
+        std::fs::write(tmp.path().join("configs/default.kdl"), "NEW_DEFAULT").unwrap();
+
+        let err = read_config_from(tmp.path(), None).unwrap_err().to_string();
+        assert!(err.contains("untrusted config"), "{err}");
     }
 
     #[test]
@@ -319,7 +371,9 @@ mod tests {
     fn accepts_valid_config_name_with_dash_and_underscore() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("configs")).unwrap();
-        std::fs::write(tmp.path().join("configs/my-cfg_2.kdl"), "OK").unwrap();
+        let path = tmp.path().join("configs/my-cfg_2.kdl");
+        std::fs::write(&path, "OK").unwrap();
+        bless(tmp.path(), &path, "OK");
         let content = read_config_from(tmp.path(), Some("my-cfg_2")).unwrap();
         assert_eq!(content, "OK");
     }
@@ -340,11 +394,10 @@ mod tests {
     fn resolve_workspace_layout_from_reads_named_config_and_injects_session_id() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("configs")).unwrap();
-        std::fs::write(
-            tmp.path().join("configs/myclaude.kdl"),
-            "pane command=\"claude\" size=\"80%\"\n",
-        )
-        .unwrap();
+        let path = tmp.path().join("configs/myclaude.kdl");
+        let body = "pane command=\"claude\" size=\"80%\"\n";
+        std::fs::write(&path, body).unwrap();
+        bless(tmp.path(), &path, body);
 
         let resolved = resolve_workspace_layout_from(tmp.path(), Some("myclaude"), "abc-123").unwrap();
         let content = std::fs::read_to_string(resolved.path()).unwrap();
@@ -356,11 +409,10 @@ mod tests {
     fn resolve_resume_layout_from_reads_named_config_and_injects_resume_args() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("configs")).unwrap();
-        std::fs::write(
-            tmp.path().join("configs/myclaude.kdl"),
-            "pane command=\"claude\" size=\"80%\"\n",
-        )
-        .unwrap();
+        let path = tmp.path().join("configs/myclaude.kdl");
+        let body = "pane command=\"claude\" size=\"80%\"\n";
+        std::fs::write(&path, body).unwrap();
+        bless(tmp.path(), &path, body);
 
         let resolved = resolve_resume_layout_from(tmp.path(), Some("myclaude"), "uuid-xyz").unwrap();
         let content = std::fs::read_to_string(resolved.path()).unwrap();

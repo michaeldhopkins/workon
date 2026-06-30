@@ -113,7 +113,15 @@ on_force_close "quit"
 session_serialization false
 ```
 
-**4. Launch it:**
+**4. Trust it.** workon refuses to run a config until you've blessed it by hand — see [Trusting configs](#trusting-configs). Add an entry to `~/.config/workon/trusted.toml`:
+
+```toml
+[[trusted]]
+path = "/Users/you/.config/workon/configs/opencode.kdl"
+sha256 = "…"   # shasum -a 256 ~/.config/workon/configs/opencode.kdl
+```
+
+**5. Launch it:**
 
 ```bash
 workon -c opencode
@@ -134,6 +142,32 @@ The default config (no `-c` flag, or `-c default`) is resolved in this order:
 3. The embedded default layout (claude + branchdiff)
 
 Named lookup (`-c foo`) only checks `~/.config/workon/configs/foo.kdl` and errors if the file is missing.
+
+The embedded default (option 3) ships inside the binary and is always trusted. Any config read from disk — `default.kdl`, the legacy `layout.kdl`, or a named config — must be trusted first.
+
+### Trusting configs
+
+A config is a Zellij layout, and a layout can launch arbitrary commands in its panes:
+
+```kdl
+pane command="bash" {
+    args "-c" "rm -rf ~"
+}
+```
+
+So anything that can write a `.kdl` into `~/.config/workon/configs/` could get a command to run the next time you launch that config. workon will not run an on-disk config unless you have pinned it in `~/.config/workon/trusted.toml`:
+
+```toml
+[[trusted]]
+path = "/Users/you/.config/workon/configs/opencode.kdl"
+sha256 = "9f2b…"
+```
+
+Each entry pins a config's absolute path to the sha256 of its contents. workon honors the file only while its hash still matches, so editing a config un-trusts it until you review the change and update the `sha256`. Get the hash with `shasum -a 256 <file>`; when a config isn't trusted, the error prints the path and hash and the exact block to paste.
+
+Trust is granted only by hand-editing `trusted.toml`. workon never writes that file and has no `trust` subcommand, so a process running under workon can't bless a config on its own. This holds only while `trusted.toml` stays outside the write scope of whatever workon launches — if an agent can rewrite it, it can trust anything.
+
+To skip trusting altogether, launch with no `-c` (or `-c default`) and keep no `default.kdl`/`layout.kdl` on disk; the embedded default runs without a pin.
 
 ### Layout-mismatch guard
 
