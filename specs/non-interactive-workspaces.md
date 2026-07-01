@@ -1,7 +1,14 @@
 # Non-interactive workspaces
 
 Status: proposed (for review)
-Target version: 0.17.0
+Target version: 0.19.0
+
+> Reconciled 2026-07-01 against the shipped tree. The design is unchanged; the
+> substantive correction is that `.workon.json` must also persist the pinned
+> `base` commit (see below) — a consequence of base pinning (0.17.x), which
+> landed after the first draft. Version target moved to 0.19.0 (0.18.0 shipped
+> the config trust gate), and provision's step list picked up `pre_copy_sync`
+> and `claude_trust::approve_workspace`.
 
 ## Goal
 
@@ -90,6 +97,7 @@ Holds **only** what provision chose or did — i.e. what can't be inferred later
 
 ```json
 {
+  "base": "a1b2c3d4…",                  // pinned base commit provision branched from
   "config": "opencode",                 // layout used; null = default
   "name": "fix bug",                    // original (un-slugified) label; null if none
   "created_db": "mbc_ws_abc123_test"    // the db provision created; null if none
@@ -97,6 +105,15 @@ Holds **only** what provision chose or did — i.e. what can't be inferred later
 ```
 
 Why each is here rather than inferred:
+- `base` — the commit `create_workspace` pinned as the branch point (0.17.x).
+  `teardown`'s VCS calls (`changed_files`, `stranded_work`, `save_work`) all
+  diff against it, and in the interactive flow it's held in memory from
+  provision to cleanup. A fresh-process `destroy` has no such handle, and it is
+  **not** re-derivable: re-resolving `trunk` at destroy time yields wherever
+  trunk moved to since, not the commit this workspace actually branched from —
+  which is the exact desync base pinning exists to prevent. Unlike an orphan
+  baseline (below), it's an immutable historical fact, so persisting it can't go
+  stale.
 - `config` — the layout choice; not derivable from jj/git state.
 - `name` — the slug is in the dir name, but the original label isn't.
 - `created_db` — records that *we* created it. A probe ("does a db named
@@ -133,9 +150,10 @@ observable behavior as today, now through the extracted phases.
 
 `provision` is today's steps minus the claude session id, layout, and
 `session::launch`: ws_id, ensure `~/.worktrees`, `detect_trunk`,
-`create_workspace` (jj/git + git plumbing), `copy_gitignored_files` (unless
-`--skip-copy-ignored`), `trust_mise_configs`, `setup_rails_db`, write
-`.workon.json` + `ignore_generated_file` for it and the env file.
+`create_workspace` (jj/git + git plumbing) — capturing the returned `base`,
+`pre_copy_sync` + `copy_gitignored_files` (unless `--skip-copy-ignored`),
+`trust_mise_configs`, `setup_rails_db`, `claude_trust::approve_workspace`, write
+`.workon.json` (with `base`) + `ignore_generated_file` for it and the env file.
 
 ### `workon attach [REF]`
 
@@ -188,8 +206,8 @@ A small `discover` module. All verified against jj 0.39 / git.
 | `ws_id` from a worktree | `ws_dir.basename().strip_prefix(format!("{project_name}-"))` |
 | `trunk`, `vcs` | existing `detect_trunk` / `vcs::detect` |
 | age | working-copy commit timestamp, or `ws_dir` mtime |
-| stranded commits (for rescue) | `Vcs::stranded_work(ws_id, project_dir, ws_dir)` — op-log / reflog attribution (0.16.1) |
-| `config`, `name`, `created_db` | read `<ws_dir>/.workon.json` |
+| stranded commits (for rescue) | `Vcs::stranded_work(ws_id, base, project_dir, ws_dir)` — op-log / reflog attribution (0.16.1); `base` from `.workon.json` |
+| `base`, `config`, `name`, `created_db` | read `<ws_dir>/.workon.json` |
 
 ### `load_workspace(ref) -> Result<Workspace>`
 
@@ -205,9 +223,15 @@ ws_dir =
 project_dir  = git_common_parent(ws_dir)
 project_name = project_dir.file_name()
 ws_id        = strip_prefix(ws_dir.basename(), project_name + "-")
-trunk        = detect_trunk(project_dir)
-meta         = read .workon.json (config, name, created_db)
+trunk        = detect_trunk(project_dir)   // for display/context only, not teardown diffs
+meta         = read .workon.json (base, config, name, created_db)
 ```
+
+`trunk` is inferred fresh for context (e.g. `list`), but teardown never diffs
+against it — it uses `meta.base`, the pinned commit. If `.workon.json` is
+missing or has no `base` (a workspace from before this field, or a partial
+`create`), teardown can't safely detect unsaved work; it warns and treats the
+workspace as having nothing to save rather than diffing against a moved trunk.
 
 ## Refactor
 
@@ -222,6 +246,7 @@ pub struct Workspace {
     project_dir: PathBuf,
     project_name: String,
     ws_dir: PathBuf,
+    base: String,              // pinned branch point; from .workon.json on reload
     created_db: Option<String>,
     trunk: String,
 }
@@ -245,9 +270,12 @@ fn cmd_destroy(ref) { let ws = load_workspace(ref)?; assert_under_worktrees(&ws.
 
 `teardown` rescues stranded commits via `Vcs::stranded_work` (op-log / reflog
 attribution, 0.16.1), which works the same in any process — so orphan rescue is
-uniform across interactive and non-interactive with no baseline to thread.
-`SaveMode` only governs the in-stack save decision (Prompt = `[Y/n]`, Save =
-default-yes, NoSave = skip).
+uniform across interactive and non-interactive with no *orphan baseline* to
+thread. It does take the pinned `base` (from `ws.base`), like the other teardown
+diffs; that's a fixed historical commit, not a repo-wide snapshot, so it doesn't
+have the staleness problem the dropped `orphans_before` did. `SaveMode` only
+governs the in-stack save decision (Prompt = `[Y/n]`, Save = default-yes,
+NoSave = skip).
 
 ## Save semantics
 
@@ -274,15 +302,21 @@ default-yes, NoSave = skip).
 Pure unit:
 - ref/token classification (path vs id vs nickname).
 - `ws_id_of` (strip `{project}-` prefix), incl. a nickname suffix.
-- `.workon.json` (de)serialization round-trip.
+- `.workon.json` (de)serialization round-trip, including `base`.
 - `SaveMode` selection from flags.
+- `load_workspace` on a `.workon.json` with no `base` (pre-field / partial
+  `create`) yields a workspace teardown treats as nothing-to-save, not a
+  trunk-diff.
 
 Integration (jj/git temp repos, gated on `jj_available()` where needed):
 - `provision` creates a worktree and writes/excludes `.workon.json`;
   `load_workspace` from cwd recovers `project_dir`, `ws_id`, and metadata.
 - ref resolution by id, nickname, cwd; ambiguous nickname errors.
-- `destroy` in-stack save -> `workon/<id>` bookmark; stranded rescue via
+- `destroy` in-stack save -> `workon/<id>` bookmark, diffing against the
+  persisted `base` (not a re-resolved trunk); stranded rescue via
   `stranded_work`; `--no-save` skips; forget + rm happen.
+- `destroy` still detects in-stack work after `trunk` has advanced past `base`
+  since `create` — the regression base pinning fixed, now across processes.
 - `destroy` safety: refuses a path outside `~/.worktrees/`.
 - `list`: in a repo shows its workspaces; in a parent dir shows descendants';
   flags a stale dir.
