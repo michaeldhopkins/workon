@@ -505,6 +505,19 @@ pub fn cmd_attach(reference: Option<&str>, config_override: Option<&str>) -> Res
     Ok(())
 }
 
+/// `workon path [REF]`: print a workspace's directory to stdout so a shell can
+/// enter it (`cd "$(workon path REF)"`). No session, no changes — a child
+/// process can't change the parent shell's cwd, so this is the print half of
+/// that idiom.
+pub fn cmd_path(reference: Option<&str>) -> Result<()> {
+    // Just resolve the directory — no project inference or naming check. That
+    // keeps `path` working for a stale workspace (project dir gone), which is
+    // exactly when you'd want to cd in and look around.
+    let ws_dir = resolve_ws_dir(reference)?;
+    println!("{}", path_str(&ws_dir));
+    Ok(())
+}
+
 /// `workon destroy [REF]`: tear down a workspace. Saves rescued work by default;
 /// `--no-save` discards it.
 pub fn cmd_destroy(reference: Option<&str>, no_save: bool, json: bool) -> Result<()> {
