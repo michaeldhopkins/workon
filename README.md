@@ -69,6 +69,26 @@ The primary session (plain `workon`) is unaffected — it works directly in the 
 - The workspace shares the development database with the primary session. Don't run migrations or the Rails server from a workspace.
 - `parallel_rspec` uses shared test databases. Use `bundle exec rspec` in the workspace for isolated specs.
 
+## Headless workspaces
+
+`-w` is the interactive shorthand: create, attach, and destroy on quit. The same machinery is exposed as subcommands so scripts and agents can drive a workspace without a Zellij TUI. The lifecycle is `create → (attach ⇄ quit)* → destroy`; quitting an `attach` session detaches, and the workspace survives until `destroy`.
+
+```bash
+WS=$(workon create --name fix-bug)   # provision; prints the worktree path to stdout
+workon list                          # workspaces at or under the cwd
+workon attach fix-bug                # open it in a session (survives on quit)
+workon destroy fix-bug               # tear down, saving rescued work
+```
+
+- `create` provisions the worktree (jj/git workspace, gitignored-file copy, Rails DB, mise) and prints its path to stdout. It does not start a session. `--json` prints `{ ws_id, path, db }`.
+- `attach [REF]` opens an existing workspace and returns when the session quits — no teardown. `REF` is a ws_id, a `--name` nickname (given as stored or slugified), or a path; omit it to use the workspace the cwd is inside.
+- `destroy [REF]` bookmarks rescued work under `workon/<ws_id>` and removes the worktree. `--no-save` discards instead. `--json` prints `{ ws_id, saved, dropped_db }`. It refuses any path that isn't under `~/.worktrees`.
+- `list` shows workspaces whose project is at or under the cwd, plus any `stale` worktrees (a leaked `create` with no matching `destroy`), which are shown from anywhere. `--json` prints an array.
+
+Structure is inferred live from jj/git and the `~/.worktrees/<project>-<ws_id>` layout — there's no registry to go stale. The only persisted state is a small `.workon.json` inside each worktree recording what can't be inferred (the pinned base commit, the config, the nickname, the created DB); `rm -rf` on the worktree takes it with it.
+
+A workspace whose project directory has been deleted can't be removed with `destroy` (its structure is no longer inferable) — remove its `~/.worktrees/` directory by hand.
+
 ## Custom configs
 
 A "config" is a named Zellij layout file. Pick one with `-c <name>`; the default is used when `-c` is omitted (or `-c default` is passed explicitly).
