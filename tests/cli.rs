@@ -37,6 +37,50 @@ fn help_lists_config_flag() {
         .stdout(predicate::str::contains("--config"));
 }
 
+#[test]
+fn help_lists_subcommands() {
+    cargo_bin_cmd!("workon")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("create"))
+        .stdout(predicate::str::contains("attach"))
+        .stdout(predicate::str::contains("destroy"))
+        .stdout(predicate::str::contains("list"));
+}
+
+#[test]
+fn create_help_lists_its_flags() {
+    cargo_bin_cmd!("workon")
+        .args(["create", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--name"))
+        .stdout(predicate::str::contains("--skip-copy-ignored"))
+        .stdout(predicate::str::contains("--json"));
+}
+
+#[test]
+fn destroy_help_lists_no_save() {
+    cargo_bin_cmd!("workon")
+        .args(["destroy", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-save"));
+}
+
+/// A bare token (no slash) is a ws_id/nickname; with no matching workspace it
+/// should fail cleanly rather than be misread as a flag or path. Proves the
+/// subcommand + positional parse and reaches lookup.
+#[test]
+fn destroy_unknown_reference_fails_cleanly() {
+    cargo_bin_cmd!("workon")
+        .args(["destroy", "definitely-no-such-ws"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("definitely-no-such-ws"));
+}
+
 /// `--resume` is workspace-only. Guards the `requires = "workspace"` constraint
 /// across the change of `-w` from an optional-value arg to a plain bool flag.
 #[test]
