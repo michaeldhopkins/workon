@@ -43,6 +43,7 @@ fn run_subcommand(command: cli::Command) -> Result<()> {
             workspace::cmd_destroy(reference.as_deref(), no_save, json)
         }
         cli::Command::List { json } => workspace::cmd_list(json),
+        cli::Command::Path { reference } => workspace::cmd_path(reference.as_deref()),
     }
 }
 

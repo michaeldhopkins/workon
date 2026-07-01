@@ -46,7 +46,8 @@ fn help_lists_subcommands() {
         .stdout(predicate::str::contains("create"))
         .stdout(predicate::str::contains("attach"))
         .stdout(predicate::str::contains("destroy"))
-        .stdout(predicate::str::contains("list"));
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("path"));
 }
 
 #[test]
@@ -58,6 +59,15 @@ fn create_help_lists_its_flags() {
         .stdout(predicate::str::contains("--name"))
         .stdout(predicate::str::contains("--skip-copy-ignored"))
         .stdout(predicate::str::contains("--json"));
+}
+
+#[test]
+fn path_unknown_reference_fails_cleanly() {
+    cargo_bin_cmd!("workon")
+        .args(["path", "definitely-no-such-ws"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("definitely-no-such-ws"));
 }
 
 #[test]

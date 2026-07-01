@@ -93,4 +93,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print a workspace's directory, for `cd "$(workon path REF)"` (no session)
+    Path {
+        /// Workspace id, --name nickname, or path; omit for the cwd's workspace
+        reference: Option<String>,
+    },
 }

@@ -84,6 +84,18 @@ workon destroy fix-bug               # tear down, saving rescued work
 - `attach [REF]` opens an existing workspace and returns when the session quits — no teardown. `REF` is a ws_id, a `--name` nickname (given as stored or slugified), or a path; omit it to use the workspace the cwd is inside.
 - `destroy [REF]` bookmarks rescued work under `workon/<ws_id>` and removes the worktree. `--no-save` discards instead. `--json` prints `{ ws_id, saved, dropped_db }`. It refuses any path that isn't under `~/.worktrees`.
 - `list` shows workspaces whose project is at or under the cwd, plus any `stale` worktrees (a leaked `create` with no matching `destroy`), which are shown from anywhere. `--json` prints an array.
+- `path [REF]` prints a workspace's directory. A process can't change its parent shell's directory, so to browse or hand-edit a workspace without a session, `cd` to the printed path:
+
+  ```bash
+  cd "$(workon path fix-bug)"     # existing workspace
+  cd "$(workon create)"           # a fresh one (create prints its path too)
+  ```
+
+  For a shortcut, add a shell function to your `~/.zshrc`:
+
+  ```bash
+  wcd() { local d; d=$(workon path "$@") && cd "$d"; }
+  ```
 
 Structure is inferred live from jj/git and the `~/.worktrees/<project>-<ws_id>` layout — there's no registry to go stale. The only persisted state is a small `.workon.json` inside each worktree recording what can't be inferred (the pinned base commit, the config, the nickname, the created DB); `rm -rf` on the worktree takes it with it.
 
