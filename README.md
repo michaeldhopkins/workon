@@ -99,23 +99,42 @@ workon destroy fix-bug               # tear down, saving rescued work
 
 ### Shell completion
 
-`workon` completes subcommands, flags, and — for `attach`/`path`/`destroy` — your live workspace ids and `--name` nicknames, read from `~/.worktrees` at the moment you press Tab. Enable it by sourcing the generated completer in your shell rc:
+`workon` completes subcommands and flags, and — for `attach`/`path`/`destroy` — your live workspace ids and `--name` nicknames, read from `~/.worktrees` when you press Tab.
+
+Set it up once: generate the completion script to a file, then load it from your shell's startup file. Open a new shell afterward.
+
+**zsh**
+
+```zsh
+mkdir -p ~/.config/workon
+COMPLETE=zsh workon > ~/.config/workon/completion.zsh
+echo 'source ~/.config/workon/completion.zsh' >> ~/.zshrc
+```
+
+**bash**
 
 ```bash
-# ~/.zshrc
-source <(COMPLETE=zsh workon)
+mkdir -p ~/.config/workon
+COMPLETE=bash workon > ~/.config/workon/completion.bash
+echo 'source ~/.config/workon/completion.bash' >> ~/.bashrc
+```
 
-# ~/.bashrc
-source <(COMPLETE=bash workon)
+**fish** (auto-loaded — no startup-file edit needed)
 
-# ~/.config/fish/config.fish
-COMPLETE=fish workon | source
+```fish
+COMPLETE=fish workon > ~/.config/fish/completions/workon.fish
 ```
 
 ```console
 $ workon attach <TAB>
 ws-27eeec       ws-a1b2c3-fix-bug       fix-bug
 ```
+
+`COMPLETE=zsh workon` prints a small registration script instead of running normally; saving it and sourcing it registers completion for every new shell. The saved script is only the Tab-time hook — it calls `workon` for fresh candidates on each completion, so ids stay live as you create and destroy workspaces. It rarely needs regenerating; re-run the generate line after a `workon` upgrade only if new subcommands or flags don't show up.
+
+Prefer not to keep a file around? Put `source <(COMPLETE=zsh workon)` directly in `~/.zshrc` — same result, at the cost of re-running `workon` on each shell startup.
+
+If a package manager installed `workon`'s shipped completion files into your shell's completion directory, subcommand and flag completion already works with no setup; the steps above add the live ws_id/nickname completion on top.
 
 Structure is inferred live from jj/git and the `~/.worktrees/<project>-<ws_id>` layout — there's no registry to go stale. The only persisted state is a small `.workon.json` inside each worktree recording what can't be inferred (the pinned base commit, the config, the nickname, the created DB); `rm -rf` on the worktree takes it with it.
 
