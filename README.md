@@ -97,6 +97,26 @@ workon destroy fix-bug               # tear down, saving rescued work
   wcd() { local d; d=$(workon path "$@") && cd "$d"; }
   ```
 
+### Shell completion
+
+`workon` completes subcommands, flags, and — for `attach`/`path`/`destroy` — your live workspace ids and `--name` nicknames, read from `~/.worktrees` at the moment you press Tab. Enable it by sourcing the generated completer in your shell rc:
+
+```bash
+# ~/.zshrc
+source <(COMPLETE=zsh workon)
+
+# ~/.bashrc
+source <(COMPLETE=bash workon)
+
+# ~/.config/fish/config.fish
+COMPLETE=fish workon | source
+```
+
+```console
+$ workon attach <TAB>
+ws-27eeec       ws-a1b2c3-fix-bug       fix-bug
+```
+
 Structure is inferred live from jj/git and the `~/.worktrees/<project>-<ws_id>` layout — there's no registry to go stale. The only persisted state is a small `.workon.json` inside each worktree recording what can't be inferred (the pinned base commit, the config, the nickname, the created DB); `rm -rf` on the worktree takes it with it.
 
 A workspace whose project directory has been deleted can't be removed with `destroy` (its structure is no longer inferable) — remove its `~/.worktrees/` directory by hand.

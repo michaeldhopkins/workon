@@ -1,5 +1,51 @@
+use std::path::Path;
+use std::process::{Command, Stdio};
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?} failed");
+}
+
+/// End-to-end shell-completion check: with HOME pointed at a tempdir holding one
+/// worktree, the dynamic completer must surface that workspace's id when
+/// completing `workon attach <TAB>`. Guards the `add = ArgValueCandidates`
+/// wiring and the CompleteEnv shim, not just the candidate function.
+#[test]
+fn dynamic_completion_offers_workspace_ids() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path();
+
+    let proj = root.join("proj");
+    std::fs::create_dir(&proj).unwrap();
+    git(&proj, &["init", "-q"]);
+    git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+
+    let worktrees = root.join(".worktrees");
+    std::fs::create_dir_all(&worktrees).unwrap();
+    let wt = worktrees.join("proj-ws-abc123");
+    git(&proj, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "HEAD"]);
+
+    // clap_complete's request protocol: `workon -- workon attach <cursor>` with
+    // the cursor word index in _CLAP_COMPLETE_INDEX.
+    cargo_bin_cmd!("workon")
+        .env("HOME", root)
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .args(["--", "workon", "attach", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ws-abc123"));
+}
 
 #[test]
 fn version_flag() {

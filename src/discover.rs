@@ -60,13 +60,19 @@ pub fn project_dir_of(ws_dir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("git common dir {} has no parent", common.display()))
 }
 
-/// The immediate directory-name entries under `~/.worktrees` (each a workspace).
+/// The immediate directory entries under `~/.worktrees` (each a workspace).
 /// Empty when the directory doesn't exist yet.
 pub fn list_worktree_dirs() -> Result<Vec<PathBuf>> {
-    let root = worktrees_dir()?;
-    let entries = match std::fs::read_dir(&root) {
+    Ok(list_dirs_in(&worktrees_dir()?))
+}
+
+/// Immediate subdirectories of `root`, sorted. Empty if `root` is missing.
+/// Split from `list_worktree_dirs` so callers (and tests) can scan an arbitrary
+/// worktrees root.
+pub fn list_dirs_in(root: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(root) {
         Ok(e) => e,
-        Err(_) => return Ok(Vec::new()),
+        Err(_) => return Vec::new(),
     };
     let mut dirs: Vec<PathBuf> = entries
         .flatten()
@@ -74,7 +80,7 @@ pub fn list_worktree_dirs() -> Result<Vec<PathBuf>> {
         .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
-    Ok(dirs)
+    dirs
 }
 
 /// Refuse any path that isn't a proper subdirectory of the canonicalized

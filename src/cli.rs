@@ -1,4 +1,7 @@
 use clap::{Args, Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
+
+use crate::workspace;
 
 #[derive(Parser)]
 #[command(name = "workon", version, about = "Development workspace launcher with Zellij")]
@@ -71,6 +74,7 @@ pub enum Command {
     /// Open an existing workspace in a session (workspace survives on quit)
     Attach {
         /// Workspace id, --name nickname, or path; omit for the cwd's workspace
+        #[arg(add = ArgValueCandidates::new(workspace::ref_candidates))]
         reference: Option<String>,
         /// Override the recorded config
         #[arg(short = 'c', long = "config")]
@@ -79,6 +83,7 @@ pub enum Command {
     /// Tear down a workspace, saving rescued work unless --no-save
     Destroy {
         /// Workspace id, --name nickname, or path; omit for the cwd's workspace
+        #[arg(add = ArgValueCandidates::new(workspace::ref_candidates))]
         reference: Option<String>,
         /// Discard unsaved work instead of bookmarking it
         #[arg(long)]
@@ -96,6 +101,7 @@ pub enum Command {
     /// Print a workspace's directory, for `cd "$(workon path REF)"` (no session)
     Path {
         /// Workspace id, --name nickname, or path; omit for the cwd's workspace
+        #[arg(add = ArgValueCandidates::new(workspace::ref_candidates))]
         reference: Option<String>,
     },
 }
