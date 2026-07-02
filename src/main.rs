@@ -1,21 +1,14 @@
-mod claude_trust;
-mod cli;
-mod deps;
-mod discover;
-mod home;
-mod layout;
-mod resolve;
-mod session;
-mod trust;
-mod vcs;
-mod workspace;
-
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
-use crate::workspace::WorkspaceOptions;
+use workon::workspace::{self, WorkspaceOptions};
+use workon::{cli, deps, layout, resolve, session, vcs};
 
 fn main() -> Result<()> {
+    // Serve shell-completion requests (COMPLETE=<shell> workon …) and exit;
+    // a no-op on a normal invocation. Enables dynamic ws_id/nickname candidates.
+    clap_complete::CompleteEnv::with_factory(cli::Cli::command).complete();
+
     let cli = cli::Cli::parse();
     match cli.command {
         Some(command) => run_subcommand(command),

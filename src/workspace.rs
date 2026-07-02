@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
+use clap_complete::engine::CompletionCandidate;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use vcs_runner::{binary_available, run_git_utf8, Cmd};
@@ -509,6 +510,41 @@ pub fn cmd_attach(reference: Option<&str>, config_override: Option<&str>) -> Res
 /// enter it (`cd "$(workon path REF)"`). No session, no changes — a child
 /// process can't change the parent shell's cwd, so this is the print half of
 /// that idiom.
+/// Shell-completion candidates for a workspace reference: every worktree's
+/// ws_id and, where set, its `--name` nickname (slugified), each helped by its
+/// project name. Feeds the `add = ArgValueCandidates::new(...)` on `reference`.
+pub fn ref_candidates() -> Vec<CompletionCandidate> {
+    match discover::worktrees_dir() {
+        Ok(root) => ref_candidates_from(&root),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn ref_candidates_from(worktrees: &Path) -> Vec<CompletionCandidate> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for ws_dir in discover::list_dirs_in(worktrees) {
+        let project_name = discover::project_dir_of(&ws_dir)
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        let help = || project_name.clone().map(Into::into);
+
+        if let Some(pn) = project_name.as_deref()
+            && let Some(id) = discover::ws_id_of(&ws_dir, pn)
+            && seen.insert(id.clone())
+        {
+            out.push(CompletionCandidate::new(id).help(help()));
+        }
+        if let Some(name) = read_meta(&ws_dir).name {
+            let slug = slugify(&name);
+            if !slug.is_empty() && seen.insert(slug.clone()) {
+                out.push(CompletionCandidate::new(slug).help(help()));
+            }
+        }
+    }
+    out
+}
+
 pub fn cmd_path(reference: Option<&str>) -> Result<()> {
     // Just resolve the directory — no project inference or naming check. That
     // keeps `path` working for a stale workspace (project dir gone), which is
@@ -1241,6 +1277,28 @@ mod tests {
         assert!(outcome.saved.is_empty());
         let branch = format!("workon/{}", ws.ws_id);
         assert!(!git_out(&repo, &["branch", "--list", &branch]).contains(&branch), "no branch created");
+    }
+
+    #[test]
+    fn ref_candidates_offers_ws_id_and_nickname_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        let worktrees = tmp.path().join("worktrees");
+        let ws = provision_in(&worktrees, &repo, "proj", true, Some("fix bug"), None, &crate::vcs::GitBackend).unwrap();
+
+        let values: Vec<String> = ref_candidates_from(&worktrees)
+            .iter()
+            .map(|c| c.get_value().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(values.contains(&ws.ws_id), "ws_id offered: {values:?}");
+        assert!(values.iter().any(|v| v == "fix-bug"), "nickname slug offered: {values:?}");
+    }
+
+    #[test]
+    fn ref_candidates_empty_for_missing_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(ref_candidates_from(&tmp.path().join("nope")).is_empty());
     }
 
     #[test]
