@@ -15,6 +15,7 @@ mod alembic;
 mod django;
 mod ef_core;
 mod laravel;
+mod phoenix;
 mod prisma;
 mod python_venv;
 mod rails;
@@ -209,6 +210,7 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
         Box::new(django::Django),
         Box::new(laravel::Laravel),
         Box::new(ef_core::EfCore),
+        Box::new(phoenix::Phoenix),
     ]
 }
 
