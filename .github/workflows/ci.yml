@@ -84,5 +84,11 @@ jobs:
       - name: set up the Django fixture's venv (so the cycle test runs)
         working-directory: tests/fixtures/django
         run: python3 -m venv .venv && ./.venv/bin/pip install -q -r requirements.txt
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+      - name: set up the Laravel fixture (so the cycle test runs)
+        working-directory: tests/fixtures/laravel
+        run: composer install --no-interaction --quiet && cp .env.example .env && php artisan key:generate --force
       - name: cargo test (DB-gated cycles run here)
         run: cargo test --locked

@@ -225,16 +225,19 @@ fn provision_in(
             match p.setup(&ctx) {
                 Ok(s) => {
                     resources.extend(s.resources);
-                    env.extend(s.env);
+                    if !s.env.is_empty() {
+                        // Each provisioner names the env file its framework loads
+                        // (Rails/dotenv -> .env.test.local, Laravel -> .env.testing).
+                        let file = s.env_file.as_deref().unwrap_or(ENV_TEST_LOCAL);
+                        let body = s.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
+                        if std::fs::write(ws_dir.join(file), body).is_ok() {
+                            vcs.ignore_generated_file(project_dir, &ws_dir, file);
+                        }
+                        env.extend(s.env);
+                    }
                 }
                 Err(e) => eprintln!("Warning: {} provisioning failed: {e}", p.name()),
             }
-        }
-    }
-    if !env.is_empty() {
-        let body = env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
-        if std::fs::write(ws_dir.join(ENV_TEST_LOCAL), body).is_ok() {
-            vcs.ignore_generated_file(project_dir, &ws_dir, ENV_TEST_LOCAL);
         }
     }
 
@@ -1276,6 +1279,7 @@ mod tests {
             Ok(provision::Setup {
                 resources: vec![Resource::PostgresDb { name: format!("mock_{}_test", ctx.ws_id) }],
                 env: vec![("DATABASE_URL".to_string(), "postgresql://localhost/mock".to_string())],
+                env_file: None,
             })
         }
     }

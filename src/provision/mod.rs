@@ -13,6 +13,7 @@ use vcs_runner::Cmd;
 
 mod alembic;
 mod django;
+mod laravel;
 mod prisma;
 mod python_venv;
 mod rails;
@@ -43,9 +44,12 @@ pub struct ProvisionCtx<'a> {
 pub struct Setup {
     /// External resources teardown must undo (empty when framework-managed).
     pub resources: Vec<Resource>,
-    /// Vars written to the workspace's generated env file (`.env.test.local`),
-    /// which frameworks load only in their test environment.
+    /// Vars to write to the workspace's generated env file, which the framework
+    /// loads only in its test environment.
     pub env: Vec<(String, String)>,
+    /// Which generated env file the vars go in. `None` = `.env.test.local`
+    /// (Rails/dotenv default); Laravel needs `.env.testing`, etc.
+    pub env_file: Option<String>,
 }
 
 /// Something a provisioner created that teardown must undo. Serialized into
@@ -162,6 +166,7 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
         Box::new(prisma::Prisma),
         Box::new(alembic::Alembic),
         Box::new(django::Django),
+        Box::new(laravel::Laravel),
     ]
 }
 
