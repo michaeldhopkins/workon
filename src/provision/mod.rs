@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use vcs_runner::Cmd;
 
+mod python_venv;
 mod rails;
 
 pub trait Provisioner: Send + Sync {
@@ -123,7 +124,9 @@ pub fn test_db_name(project_name: &str, ws_id: &str) -> String {
 /// The ordered provisioner registry. Order matters (future: venv repair before
 /// Python DB frameworks).
 pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
-    vec![Box::new(rails::Rails)]
+    // Order matters: venv repair before any Python DB framework, which needs a
+    // working interpreter.
+    vec![Box::new(python_venv::PythonVenv), Box::new(rails::Rails)]
 }
 
 #[cfg(test)]
