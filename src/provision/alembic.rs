@@ -51,7 +51,7 @@ impl Provisioner for Alembic {
         }
         let _ = cmd.run();
 
-        Ok(Setup { resources: vec![resource], env: vec![("DATABASE_URL".to_string(), url)] })
+        Ok(Setup { resources: vec![resource], env: vec![("DATABASE_URL".to_string(), url)], env_file: None })
     }
 }
 

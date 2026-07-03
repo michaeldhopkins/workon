@@ -54,6 +54,7 @@ impl Provisioner for Rails {
         Ok(Setup {
             resources: vec![resource],
             env: vec![("DATABASE_URL".to_string(), url)],
+            env_file: None, // .env.test.local — dotenv-rails loads it under RAILS_ENV=test
         })
     }
 }
