@@ -1,6 +1,12 @@
 # Workspace provisioners
 
-Status: proposed (for review)
+Status: implemented (v0.21.0). All eight provisioners land with fixtures + gated
+cycle tests: Rails, Python venv repair, Prisma, Alembic, Django, Laravel, EF Core,
+Phoenix. Postgres and MySQL/MariaDB engines; SQLite is a no-op. Two follow-ups
+remain (see Out of scope): session-env auto-delivery (needed for Phoenix's
+`MIX_TEST_PARTITION` to reach the user's `mix test`) and per-framework MySQL cycle
+fixtures (the engine + per-provisioner selection are covered; only Postgres has
+end-to-end cycle fixtures so far).
 Target version: 0.21.0
 
 ## Goal
@@ -321,6 +327,12 @@ gate; see Out of scope.)
 - **Parallel test databases** (`..._test-0/-1/…`, Rails `parallelize`, Laravel
   `--parallel`, pytest-xdist): provisioners make the single test DB only; the
   single-process workaround stays documented.
+- **Session-env auto-delivery**: a channel for provisioners to inject vars into
+  the workspace session (not just a test env file). Phoenix needs it so
+  `MIX_TEST_PARTITION` reaches the user's `mix test`; today workon prepares the
+  isolated DB and writes the var to `.env.test.local` for the user to export.
+- **Per-framework MySQL cycle fixtures**: the MySQL engine and each provisioner's
+  engine selection are covered, but the end-to-end cycle fixtures are Postgres.
 - **Directory-scoped env** for polyglot repos; **per-workspace service isolation**
   (docker-compose, Redis) with allocated ports.
 - **`.workon/setup`** trust-gated project hook for unrecognized stacks.
