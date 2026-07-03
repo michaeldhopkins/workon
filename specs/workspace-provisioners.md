@@ -116,21 +116,26 @@ The engine is read from the framework's config (adapter in `database.yml`,
 `provider` in `schema.prisma`, provider package in `*.csproj`, …), so a
 sqlite/in-memory project is recognized and left alone.
 
-### Env delivery (the linchpin)
+### Env delivery (per framework)
 
-An injected `DATABASE_URL` / `MIX_TEST_PARTITION` only isolates the DB if it
-reaches the user's `rails test` / `mix test` **in the workspace session**, not
-just a file. So:
+An injected DB identity only isolates the DB if it reaches the user's test run —
+but *how* differs by framework, and using the wrong channel breaks things:
 
-- `Setup.env` is persisted in `.workon.json` (`env: { K: V }`) and **merged into
-  the workspace session environment** — alongside mise env — at both `launch` and
-  `attach`. `attach` re-reads it from `.workon.json`, so a fresh-process attach
-  still gets the isolation. This requires `session::launch`/`attach` to take the
-  merged env (a small change to today's mise-only env).
-- `.env.test.local` (dotenv) is *also* written for the subset frameworks
-  auto-load from dotenv (Rails+dotenv, Laravel, Prisma, Node) — this preserves
-  today's behavior — but the session env is the source of truth. It stays in
-  `GENERATED_FILES` + VCS-ignored, as now.
+- **Dotenv file, test-scoped** (Rails): write `DATABASE_URL` to `.env.test.local`,
+  which dotenv-rails loads **only** under `RAILS_ENV=test`. Putting it in the
+  *session* env would be wrong — every `rails console`/`server` in the workspace
+  would then hit the test DB instead of dev. This is what workon does today and
+  is preserved. `.env.test.local` stays in `GENERATED_FILES` + VCS-ignored.
+- **Session env, test-only var** (Phoenix): `MIX_TEST_PARTITION` only affects
+  `MIX_ENV=test`, so it's safe to put in the workspace session env; a dotenv file
+  wouldn't reach `mix`. This needs `session::launch`/`attach` to merge a persisted
+  env map (from `.workon.json`) with mise env — deferred to the Phoenix step.
+
+So `Setup.env` is written to `.env.test.local` (the step-1 mechanism, correct for
+Rails) and persisted in `.workon.json` (`env: {K:V}`) for reference and for the
+future session-env path. Each provisioner declares which channel its vars need;
+the framework's own env-scoping (Rails' `.env.test.local`, Phoenix's
+`MIX_ENV=test`) is what keeps dev commands unaffected.
 
 ### Registry, ordering, conflicts
 

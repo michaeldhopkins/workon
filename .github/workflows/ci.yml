@@ -34,3 +34,37 @@ jobs:
 
       - name: cargo deny check licenses
         run: cargo deny check licenses
+
+  # DB-backed provisioner tests. Their cycles self-skip when no server is
+  # reachable (like the jj tests gate on jj_available), so they run for real
+  # here and are no-ops in the main job. One job per ecosystem will grow here as
+  # provisioners land (Ruby/Rails, Node, Python) — see
+  # specs/workspace-provisioners.md.
+  provisioners:
+    name: Provisioner tests (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install postgres client (createdb/dropdb)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: cargo test (DB-gated cycles run here)
+        run: cargo test --locked
