@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use vcs_runner::Cmd;
 
+mod prisma;
 mod python_venv;
 mod rails;
 
@@ -91,9 +92,24 @@ impl DbEngine {
         }
     }
 
+    /// A connection URL for the test DB. Built from the `PG*` environment
+    /// (`PGHOST`/`PGUSER`/`PGPASSWORD`) with an OS-user fallback, because
+    /// URL-driven clients (Prisma, dj-database-url, …) don't apply libpq's
+    /// implicit OS-user default the way the pg/pg-gem clients do — a userless URL
+    /// is rejected. A socket-path `PGHOST` becomes `localhost` for the URL form.
     pub fn url(&self, name: &str) -> String {
         match self {
-            DbEngine::Postgres => format!("postgresql://localhost/{name}"),
+            DbEngine::Postgres => {
+                let host = std::env::var("PGHOST").unwrap_or_default();
+                let host = if host.is_empty() || host.starts_with('/') { "localhost".to_string() } else { host };
+                let user = std::env::var("PGUSER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_default();
+                let auth = match (user.is_empty(), std::env::var("PGPASSWORD").ok()) {
+                    (false, Some(pass)) if !pass.is_empty() => format!("{user}:{pass}@"),
+                    (false, _) => format!("{user}@"),
+                    (true, _) => String::new(),
+                };
+                format!("postgresql://{auth}{host}/{name}")
+            }
         }
     }
 
@@ -126,7 +142,11 @@ pub fn test_db_name(project_name: &str, ws_id: &str) -> String {
 pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
     // Order matters: venv repair before any Python DB framework, which needs a
     // working interpreter.
-    vec![Box::new(python_venv::PythonVenv), Box::new(rails::Rails)]
+    vec![
+        Box::new(python_venv::PythonVenv),
+        Box::new(rails::Rails),
+        Box::new(prisma::Prisma),
+    ]
 }
 
 #[cfg(test)]

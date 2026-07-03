@@ -72,5 +72,11 @@ jobs:
       - name: install the Rails fixture's gems (so the cycle test runs)
         working-directory: tests/fixtures/rails
         run: bundle install --jobs 4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install the Prisma fixture's deps (so the cycle test runs)
+        working-directory: tests/fixtures/prisma
+        run: npm install --no-audit --no-fund
       - name: cargo test (DB-gated cycles run here)
         run: cargo test --locked

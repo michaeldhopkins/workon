@@ -106,7 +106,9 @@ mod tests {
         Resource::PostgresDb { name: name.clone() }.teardown(); // clean up before asserting
 
         assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
-        assert_eq!(setup.env, vec![("DATABASE_URL".to_string(), format!("postgresql://localhost/{name}"))]);
+        assert_eq!(setup.env.len(), 1);
+        assert_eq!(setup.env[0].0, "DATABASE_URL");
+        assert!(setup.env[0].1.contains(&name), "url targets the db: {}", setup.env[0].1);
     }
 
     /// Full cycle against the real Rails fixture: provision it, then assert the
