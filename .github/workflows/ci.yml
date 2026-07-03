@@ -78,5 +78,8 @@ jobs:
       - name: install the Prisma fixture's deps (so the cycle test runs)
         working-directory: tests/fixtures/prisma
         run: npm install --no-audit --no-fund
+      - name: set up the Alembic fixture's venv (so the cycle test runs)
+        working-directory: tests/fixtures/alembic
+        run: python3 -m venv .venv && ./.venv/bin/pip install -q -r requirements.txt
       - name: cargo test (DB-gated cycles run here)
         run: cargo test --locked
