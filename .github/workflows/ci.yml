@@ -56,16 +56,30 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     env:
       PGHOST: localhost
       PGUSER: postgres
       PGPASSWORD: postgres
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_TCP_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PWD: root
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: install postgres client (createdb/dropdb)
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: install db clients (createdb/dropdb, mysqladmin)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"

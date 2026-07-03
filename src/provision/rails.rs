@@ -26,7 +26,16 @@ impl Provisioner for Rails {
     }
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
-        let engine = DbEngine::Postgres;
+        let yml = std::fs::read_to_string(ctx.ws_dir.join("config/database.yml")).unwrap_or_default();
+        let engine = match adapter(&yml).as_deref() {
+            Some("postgresql") | None => DbEngine::Postgres,
+            Some("mysql2") | Some("mysql") | Some("trilogy") => DbEngine::Mysql,
+            Some("sqlite3") => return Ok(Setup::default()), // file-based, copied with the worktree
+            Some(other) => {
+                eprintln!("Rails adapter `{other}` not supported; skipping DB setup");
+                return Ok(Setup::default());
+            }
+        };
         let db = test_db_name(ctx.project_name, ctx.ws_id);
 
         eprintln!("Creating test database {db}...");
@@ -59,9 +68,25 @@ impl Provisioner for Rails {
     }
 }
 
+/// The first `adapter:` value in `database.yml` (usually under `default:`),
+/// e.g. `postgresql`, `mysql2`, `sqlite3`.
+fn adapter(database_yml: &str) -> Option<String> {
+    database_yml.lines().find_map(|l| {
+        let v = l.trim().strip_prefix("adapter:")?.trim();
+        (!v.is_empty()).then(|| v.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_reads_first_adapter_line() {
+        assert_eq!(adapter("default: &default\n  adapter: postgresql\n").as_deref(), Some("postgresql"));
+        assert_eq!(adapter("test:\n  adapter: mysql2\n").as_deref(), Some("mysql2"));
+        assert_eq!(adapter("test:\n  database: x\n"), None);
+    }
 
     #[test]
     fn detects_a_rails_app_by_database_yml() {

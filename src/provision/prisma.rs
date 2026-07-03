@@ -28,17 +28,17 @@ impl Provisioner for Prisma {
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
         let schema = std::fs::read_to_string(ctx.ws_dir.join("prisma/schema.prisma"))?;
-        match datasource_provider(&schema).as_deref() {
-            Some("postgresql") => {}
+        let engine = match datasource_provider(&schema).as_deref() {
+            Some("postgresql") => DbEngine::Postgres,
+            Some("mysql") => DbEngine::Mysql,
             Some("sqlite") | None => return Ok(Setup::default()), // file-based / self-managed
             Some(other) => {
                 eprintln!("Prisma provider `{other}` not supported yet; skipping DB setup");
                 return Ok(Setup::default());
             }
-        }
+        };
         let env_var = url_env_var(&schema).unwrap_or_else(|| "DATABASE_URL".to_string());
 
-        let engine = DbEngine::Postgres;
         let db = test_db_name(ctx.project_name, ctx.ws_id);
         eprintln!("Creating test database {db}...");
         if engine.create(&db).is_err() {

@@ -58,7 +58,7 @@ pub struct Setup {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Resource {
     PostgresDb { name: String },
-    // MysqlDb / others land with the provisioners that create them.
+    MysqlDb { name: String },
 }
 
 impl Resource {
@@ -68,21 +68,26 @@ impl Resource {
                 let _ = Cmd::new("dropdb").arg(name).run();
                 eprintln!("Dropped test database {name}");
             }
+            Resource::MysqlDb { name } => {
+                let _ = mysqladmin(&["--force", "drop", name]).run();
+                eprintln!("Dropped test database {name}");
+            }
         }
     }
 
     /// The DB name, for reporting (`destroy --json`).
     pub fn db_name(&self) -> &str {
         match self {
-            Resource::PostgresDb { name } => name,
+            Resource::PostgresDb { name } | Resource::MysqlDb { name } => name,
         }
     }
 }
 
-/// A test-database engine. Only Postgres today; MySQL/SQLite land with the
-/// provisioners that need them.
+/// A test-database engine. SQLite is never a `DbEngine` — it's a file, handled by
+/// each provisioner as a no-op.
 pub enum DbEngine {
     Postgres,
+    Mysql,
 }
 
 impl DbEngine {
@@ -95,26 +100,35 @@ impl DbEngine {
                     bail!("createdb {name} failed (is the Postgres server running?)")
                 }
             }
+            DbEngine::Mysql => {
+                if mysqladmin(&["create", name]).run().is_ok() {
+                    Ok(())
+                } else {
+                    bail!("mysqladmin create {name} failed (is the MySQL server running?)")
+                }
+            }
         }
     }
 
-    /// A connection URL for the test DB. Built from the `PG*` environment
-    /// (`PGHOST`/`PGUSER`/`PGPASSWORD`) with an OS-user fallback, because
-    /// URL-driven clients (Prisma, dj-database-url, …) don't apply libpq's
-    /// implicit OS-user default the way the pg/pg-gem clients do — a userless URL
-    /// is rejected. A socket-path `PGHOST` becomes `localhost` for the URL form.
+    /// A connection URL for the test DB, built from the client environment with
+    /// OS-user fallback, because URL-driven clients (Prisma, dj-database-url, …)
+    /// don't apply libpq/libmysql's implicit user default — a userless URL is
+    /// rejected. `PG*` for Postgres; `MYSQL_HOST`/`MYSQL_TCP_PORT`/`MYSQL_USER`/
+    /// `MYSQL_PWD` for MySQL. A socket-path host becomes `localhost`.
     pub fn url(&self, name: &str) -> String {
         match self {
             DbEngine::Postgres => {
-                let host = std::env::var("PGHOST").unwrap_or_default();
-                let host = if host.is_empty() || host.starts_with('/') { "localhost".to_string() } else { host };
+                let host = env_host("PGHOST", "localhost");
                 let user = std::env::var("PGUSER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_default();
-                let auth = match (user.is_empty(), std::env::var("PGPASSWORD").ok()) {
-                    (false, Some(pass)) if !pass.is_empty() => format!("{user}:{pass}@"),
-                    (false, _) => format!("{user}@"),
-                    (true, _) => String::new(),
-                };
+                let auth = auth_prefix(&user, std::env::var("PGPASSWORD").ok());
                 format!("postgresql://{auth}{host}/{name}")
+            }
+            DbEngine::Mysql => {
+                let host = env_host("MYSQL_HOST", "127.0.0.1");
+                let port = std::env::var("MYSQL_TCP_PORT").unwrap_or_else(|_| "3306".into());
+                let user = mysql_user();
+                let auth = auth_prefix(&user, std::env::var("MYSQL_PWD").ok());
+                format!("mysql://{auth}{host}:{port}/{name}")
             }
         }
     }
@@ -122,8 +136,34 @@ impl DbEngine {
     pub fn resource(&self, name: &str) -> Resource {
         match self {
             DbEngine::Postgres => Resource::PostgresDb { name: name.to_string() },
+            DbEngine::Mysql => Resource::MysqlDb { name: name.to_string() },
         }
     }
+}
+
+fn env_host(var: &str, default: &str) -> String {
+    let host = std::env::var(var).unwrap_or_default();
+    if host.is_empty() || host.starts_with('/') { default.to_string() } else { host }
+}
+
+fn auth_prefix(user: &str, password: Option<String>) -> String {
+    match (user.is_empty(), password) {
+        (false, Some(p)) if !p.is_empty() => format!("{user}:{p}@"),
+        (false, _) => format!("{user}@"),
+        (true, _) => String::new(),
+    }
+}
+
+/// MySQL clients don't read a user env var natively (unlike host/port/password),
+/// so workon reads `MYSQL_USER`, falling back to the OS user then `root`.
+fn mysql_user() -> String {
+    std::env::var("MYSQL_USER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "root".into())
+}
+
+/// `mysqladmin` with the resolved user in front of the subcommand; host, port,
+/// and password are read from the environment natively.
+fn mysqladmin(args: &[&str]) -> Cmd {
+    Cmd::new("mysqladmin").arg("-u").arg(mysql_user()).args(args)
 }
 
 /// A collision-free test DB name that stays within Postgres's 63-byte identifier
@@ -213,5 +253,20 @@ mod tests {
         let recreated = DbEngine::Postgres.create(name).is_ok();
         Resource::PostgresDb { name: name.into() }.teardown(); // final cleanup
         assert!(recreated, "dropdb should have removed the DB so createdb succeeds again");
+    }
+
+    /// Real create + drop against MySQL. Skips unless a server is reachable
+    /// (needs `mysqladmin` + MYSQL_* env pointing at it). Runs in CI's MySQL job.
+    #[test]
+    fn mysql_create_and_drop_roundtrip() {
+        let name = "workon_provision_selftest_mysql";
+        Resource::MysqlDb { name: name.into() }.teardown();
+        if DbEngine::Mysql.create(name).is_err() {
+            return; // no reachable MySQL server
+        }
+        Resource::MysqlDb { name: name.into() }.teardown();
+        let recreated = DbEngine::Mysql.create(name).is_ok();
+        Resource::MysqlDb { name: name.into() }.teardown();
+        assert!(recreated, "mysqladmin drop should have removed the DB so create succeeds again");
     }
 }
