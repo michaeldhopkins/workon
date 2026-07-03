@@ -8,6 +8,7 @@ pub mod deps;
 pub mod discover;
 pub mod home;
 pub mod layout;
+pub mod provision;
 pub mod resolve;
 pub mod session;
 pub mod trust;

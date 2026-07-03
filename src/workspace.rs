@@ -13,6 +13,7 @@ use crate::claude_trust;
 use crate::deps;
 use crate::discover::{self, WsRef};
 use crate::layout;
+use crate::provision::{self, Provisioner, Resource};
 use crate::session;
 use crate::vcs::Vcs;
 
@@ -56,8 +57,9 @@ struct Workspace {
     /// Layout the workspace was created with; `attach` falls back to it when no
     /// `-c` is passed.
     config: Option<String>,
-    /// The test DB provision created, if any — so teardown drops only our own.
-    created_db: Option<String>,
+    /// External resources provisioners created (test DBs, …) — teardown undoes
+    /// each. Empty when nothing was provisioned.
+    resources: Vec<Resource>,
 }
 
 /// On-disk contents of `.workon.json`. Every field is written explicitly (as
@@ -72,6 +74,12 @@ struct WorkspaceMeta {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    resources: Vec<Resource>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    /// Legacy single-DB field, read for back-compat and mapped to a
+    /// `PostgresDb` resource on load; new files write `resources` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     created_db: Option<String>,
 }
 
@@ -129,8 +137,8 @@ enum SaveMode {
 struct TeardownOutcome {
     /// Bookmark/branch names created to rescue work (`workon/<ws_id>[-<id>]`).
     saved: Vec<String>,
-    /// The test DB that was dropped, if any.
-    dropped_db: Option<String>,
+    /// Test databases (and other resources) dropped.
+    dropped: Vec<String>,
 }
 
 /// Everything up to (but not including) the interactive session: create the
@@ -153,6 +161,7 @@ fn provision(
         label,
         config,
         vcs,
+        &provision::provisioners(),
     )?;
     // Trust the worktree for Claude Code. Kept out of `provision_in` (the
     // testable core) because it writes the real ~/.claude.json; covered on its
@@ -161,8 +170,10 @@ fn provision(
     Ok(ws)
 }
 
-/// `provision` against an explicit worktrees root. Split out so tests can point
-/// it at a tempdir instead of the real `~/.worktrees`.
+/// `provision` against an explicit worktrees root and provisioner list. Split
+/// out so tests can point it at a tempdir and inject a mock provisioner instead
+/// of the real `~/.worktrees` + registry.
+#[allow(clippy::too_many_arguments)]
 fn provision_in(
     worktrees: &Path,
     project_dir: &Path,
@@ -171,6 +182,7 @@ fn provision_in(
     label: Option<&str>,
     config: Option<&str>,
     vcs: &dyn Vcs,
+    provisioners: &[Box<dyn Provisioner>],
 ) -> Result<Workspace> {
     let ws_id = match label {
         Some(l) => format!("{}-{}", generate_ws_id(), slugify(l)),
@@ -196,11 +208,32 @@ fn provision_in(
 
     let mise_vars = mise_env(&ws_dir);
 
-    let mut created_db = None;
-    if ws_dir.join("config/database.yml").is_file() {
-        created_db = setup_rails_db(project_name, &ws_id, &ws_dir, &mise_vars);
-        // setup_rails_db only writes .env.test.local when the DB was created.
-        if created_db.is_some() {
+    // Run every provisioner that detects its project type, collecting the
+    // resources they created (for teardown) and the env vars they want written
+    // to the generated test-env file.
+    let ctx = provision::ProvisionCtx {
+        project_dir,
+        project_name,
+        ws_id: &ws_id,
+        ws_dir: &ws_dir,
+        mise_vars: &mise_vars,
+    };
+    let mut resources = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
+    for p in provisioners {
+        if p.detect(&ws_dir) {
+            match p.setup(&ctx) {
+                Ok(s) => {
+                    resources.extend(s.resources);
+                    env.extend(s.env);
+                }
+                Err(e) => eprintln!("Warning: {} provisioning failed: {e}", p.name()),
+            }
+        }
+    }
+    if !env.is_empty() {
+        let body = env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
+        if std::fs::write(ws_dir.join(ENV_TEST_LOCAL), body).is_ok() {
             vcs.ignore_generated_file(project_dir, &ws_dir, ENV_TEST_LOCAL);
         }
     }
@@ -209,7 +242,9 @@ fn provision_in(
         base: Some(base.clone()),
         config: config.map(String::from),
         name: label.map(String::from),
-        created_db: created_db.clone(),
+        resources: resources.clone(),
+        env: env.into_iter().collect(),
+        created_db: None,
     };
     match write_meta(&ws_dir, &meta) {
         Ok(()) => vcs.ignore_generated_file(project_dir, &ws_dir, WORKON_JSON),
@@ -224,7 +259,7 @@ fn provision_in(
         ws_dir,
         base: Some(base),
         config: config.map(String::from),
-        created_db,
+        resources,
     })
 }
 
@@ -352,11 +387,10 @@ fn teardown(
 
     vcs.forget_workspace(&ws.ws_id, &ws.project_dir, &ws.ws_dir);
 
-    let mut dropped_db = None;
-    if let Some(db) = ws.created_db.as_deref() {
-        let _ = Cmd::new("dropdb").arg(db).run();
-        eprintln!("Dropped test database {db}");
-        dropped_db = Some(db.to_string());
+    let mut dropped = Vec::new();
+    for resource in &ws.resources {
+        resource.teardown();
+        dropped.push(resource.db_name().to_string());
     }
 
     // Spawn rm -rf in the background so the user gets their shell back
@@ -369,7 +403,7 @@ fn teardown(
         }
     }
 
-    Ok(TeardownOutcome { saved, dropped_db })
+    Ok(TeardownOutcome { saved, dropped })
 }
 
 /// Rebuild a `Workspace` handle in a fresh process by inferring structure from
@@ -389,6 +423,16 @@ fn load_workspace(reference: Option<&str>) -> Result<Workspace> {
     })?;
     let meta = read_meta(&ws_dir);
 
+    // Back-compat: a workspace written before the resources list carried a
+    // single `created_db`; map it to a Postgres resource so teardown still drops it.
+    let resources = if !meta.resources.is_empty() {
+        meta.resources
+    } else if let Some(name) = meta.created_db {
+        vec![Resource::PostgresDb { name }]
+    } else {
+        Vec::new()
+    };
+
     Ok(Workspace {
         ws_id,
         name: meta.name,
@@ -397,7 +441,7 @@ fn load_workspace(reference: Option<&str>) -> Result<Workspace> {
         ws_dir,
         base: meta.base,
         config: meta.config,
-        created_db: meta.created_db,
+        resources,
     })
 }
 
@@ -474,10 +518,11 @@ pub fn cmd_create(
 ) -> Result<()> {
     let ws = provision(project_dir, project_name, args.skip_copy_ignored, args.name, args.config, vcs)?;
     if args.json {
+        let dbs: Vec<&str> = ws.resources.iter().map(Resource::db_name).collect();
         let obj = serde_json::json!({
             "ws_id": ws.ws_id,
             "path": path_str(&ws.ws_dir),
-            "db": ws.created_db,
+            "dbs": dbs,
         });
         println!("{obj}");
     } else {
@@ -566,7 +611,7 @@ pub fn cmd_destroy(reference: Option<&str>, no_save: bool, json: bool) -> Result
         let obj = serde_json::json!({
             "ws_id": ws.ws_id,
             "saved": outcome.saved,
-            "dropped_db": outcome.dropped_db,
+            "dropped": outcome.dropped,
         });
         println!("{obj}");
     }
@@ -695,37 +740,6 @@ fn humanize_age(secs: u64) -> String {
         format!("{}h", secs / HOUR)
     } else {
         format!("{}d", secs / DAY)
-    }
-}
-
-fn setup_rails_db(
-    project_name: &str,
-    ws_id: &str,
-    ws_dir: &Path,
-    mise_vars: &HashMap<String, String>,
-) -> Option<String> {
-    let db_name = format!("{}_{}_test", project_name, ws_id).replace('-', "_");
-    eprintln!("Creating test database {db_name}...");
-
-    if Cmd::new("createdb").arg(&db_name).run().is_ok() {
-        let env_content = format!("DATABASE_URL=postgresql://localhost/{db_name}");
-        let _ = std::fs::write(ws_dir.join(ENV_TEST_LOCAL), env_content);
-
-        eprintln!("Loading schema...");
-        let mut cmd = Cmd::new("bundle")
-            .args(["exec", "rails", "db:schema:load"])
-            .env("RAILS_ENV", "test")
-            .env("DATABASE_URL", format!("postgresql://localhost/{db_name}"))
-            .in_dir(ws_dir);
-        for (k, v) in mise_vars {
-            cmd = cmd.env(k, v);
-        }
-        let _ = cmd.run();
-
-        Some(db_name)
-    } else {
-        eprintln!("Warning: could not create test database {db_name}");
-        None
     }
 }
 
@@ -1089,16 +1103,37 @@ mod tests {
             base: Some("a1b2c3".to_string()),
             config: Some("opencode".to_string()),
             name: Some("fix bug".to_string()),
-            created_db: Some("mbc_ws_abc_test".to_string()),
+            resources: vec![Resource::PostgresDb { name: "mbc_ws_abc_test".into() }],
+            env: HashMap::from([("DATABASE_URL".to_string(), "postgresql://localhost/mbc_ws_abc_test".to_string())]),
+            created_db: None,
         };
         write_meta(tmp.path(), &meta).unwrap();
 
         let raw = std::fs::read_to_string(tmp.path().join(WORKON_JSON)).unwrap();
+        // Legacy field omitted from new writes.
+        assert!(!raw.contains("created_db"), "{raw}");
         let back: WorkspaceMeta = serde_json::from_str(&raw).unwrap();
         assert_eq!(back.base.as_deref(), Some("a1b2c3"));
         assert_eq!(back.config.as_deref(), Some("opencode"));
         assert_eq!(back.name.as_deref(), Some("fix bug"));
-        assert_eq!(back.created_db.as_deref(), Some("mbc_ws_abc_test"));
+        assert_eq!(back.resources, vec![Resource::PostgresDb { name: "mbc_ws_abc_test".into() }]);
+        assert_eq!(back.env.get("DATABASE_URL").map(String::as_str), Some("postgresql://localhost/mbc_ws_abc_test"));
+    }
+
+    #[test]
+    fn read_meta_maps_legacy_created_db_to_a_resource() {
+        // A workspace written before the resources list still tears down its DB.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(WORKON_JSON),
+            r#"{"base":"x","config":null,"name":null,"created_db":"old_ws_test"}"#,
+        )
+        .unwrap();
+        let meta = read_meta(tmp.path());
+        assert!(meta.resources.is_empty());
+        assert_eq!(meta.created_db.as_deref(), Some("old_ws_test"));
+        // load_workspace turns that into a PostgresDb resource (asserted via the
+        // git-worktree integration test below).
     }
 
     #[test]
@@ -1207,6 +1242,7 @@ mod tests {
             Some("fix bug"),
             Some("opencode"),
             &crate::vcs::GitBackend,
+            &provision::provisioners(),
         )
         .unwrap();
 
@@ -1215,7 +1251,7 @@ mod tests {
         assert!(ws.base.is_some(), "base pinned from trunk");
         assert_eq!(ws.name.as_deref(), Some("fix bug"));
         assert_eq!(ws.config.as_deref(), Some("opencode"));
-        assert!(ws.created_db.is_none());
+        assert!(ws.resources.is_empty(), "no database.yml -> no DB provisioned");
 
         // .workon.json on disk carries the same provenance, so a fresh-process
         // load_workspace would recover it.
@@ -1225,17 +1261,71 @@ mod tests {
         assert_eq!(meta.name.as_deref(), Some("fix bug"));
     }
 
+    /// A provisioner that always fires and returns a canned resource + env, so
+    /// the orchestration (collect resources, write env, persist, teardown) is
+    /// testable without a real database or toolchain.
+    struct MockProvisioner;
+    impl Provisioner for MockProvisioner {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn detect(&self, _ws_dir: &Path) -> bool {
+            true
+        }
+        fn setup(&self, ctx: &provision::ProvisionCtx<'_>) -> Result<provision::Setup> {
+            Ok(provision::Setup {
+                resources: vec![Resource::PostgresDb { name: format!("mock_{}_test", ctx.ws_id) }],
+                env: vec![("DATABASE_URL".to_string(), "postgresql://localhost/mock".to_string())],
+            })
+        }
+    }
+
+    #[test]
+    fn provision_collects_resources_and_writes_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        let worktrees = tmp.path().join("worktrees");
+        let mock: Vec<Box<dyn Provisioner>> = vec![Box::new(MockProvisioner)];
+
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &mock).unwrap();
+
+        assert_eq!(ws.resources.len(), 1);
+        assert!(ws.resources[0].db_name().starts_with("mock_"));
+        // env landed in the generated dotenv file...
+        let envfile = std::fs::read_to_string(ws.ws_dir.join(ENV_TEST_LOCAL)).unwrap();
+        assert!(envfile.contains("DATABASE_URL=postgresql://localhost/mock"), "{envfile}");
+        // ...and in .workon.json, so a fresh-process teardown can undo it.
+        let meta = read_meta(&ws.ws_dir);
+        assert_eq!(meta.resources, ws.resources);
+        assert_eq!(meta.env.get("DATABASE_URL").map(String::as_str), Some("postgresql://localhost/mock"));
+    }
+
+    #[test]
+    fn teardown_reports_dropped_resources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        let worktrees = tmp.path().join("worktrees");
+        let mock: Vec<Box<dyn Provisioner>> = vec![Box::new(MockProvisioner)];
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &mock).unwrap();
+
+        // The dropdb itself no-ops without a server, but teardown must still
+        // iterate the resources and report them.
+        let outcome = teardown(&ws, None, SaveMode::NoSave, &crate::vcs::GitBackend).unwrap();
+        assert_eq!(outcome.dropped.len(), 1);
+        assert!(outcome.dropped[0].starts_with("mock_"));
+    }
+
     #[test]
     fn teardown_no_save_forgets_worktree_and_reports_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend).unwrap();
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
         let ws_dir = ws.ws_dir.clone();
 
         let outcome = teardown(&ws, None, SaveMode::NoSave, &crate::vcs::GitBackend).unwrap();
         assert!(outcome.saved.is_empty());
-        assert!(outcome.dropped_db.is_none());
+        assert!(outcome.dropped.is_empty());
         // forget_workspace removes the git worktree synchronously.
         assert!(!git_out(&repo, &["worktree", "list"]).contains(ws_dir.to_str().unwrap()));
     }
@@ -1245,7 +1335,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend).unwrap();
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
 
         // Commit work on the detached HEAD that no branch names — exactly what
         // would be lost on teardown.
@@ -1266,7 +1356,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend).unwrap();
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
 
         std::fs::write(ws.ws_dir.join("new.txt"), "work").unwrap();
         git(&ws.ws_dir, &["add", "-A"]);
@@ -1284,7 +1374,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, Some("fix bug"), None, &crate::vcs::GitBackend).unwrap();
+        let ws = provision_in(&worktrees, &repo, "proj", true, Some("fix bug"), None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
 
         let values: Vec<String> = ref_candidates_from(&worktrees)
             .iter()
@@ -1311,7 +1401,9 @@ mod tests {
                 base: Some("deadbeef".into()),
                 config: Some("opencode".into()),
                 name: Some("Fix Bug".into()),
-                created_db: Some("myproj_ws_abc123_test".into()),
+                resources: vec![Resource::PostgresDb { name: "myproj_ws_abc123_test".into() }],
+                env: HashMap::new(),
+                created_db: None,
             },
         )
         .unwrap();
@@ -1323,7 +1415,22 @@ mod tests {
         assert_eq!(ws.base.as_deref(), Some("deadbeef"));
         assert_eq!(ws.config.as_deref(), Some("opencode"));
         assert_eq!(ws.name.as_deref(), Some("Fix Bug"));
-        assert_eq!(ws.created_db.as_deref(), Some("myproj_ws_abc123_test"));
+        assert_eq!(ws.resources, vec![Resource::PostgresDb { name: "myproj_ws_abc123_test".into() }]);
+    }
+
+    #[test]
+    fn load_workspace_maps_legacy_created_db_to_a_resource() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_project, ws_dir) = repo_with_worktree(tmp.path(), "ws-legacy");
+        // A .workon.json from before the resources list.
+        std::fs::write(
+            ws_dir.join(WORKON_JSON),
+            r#"{"base":"x","config":null,"name":null,"created_db":"myproj_ws_legacy_test"}"#,
+        )
+        .unwrap();
+
+        let ws = load_workspace(Some(ws_dir.to_str().unwrap())).unwrap();
+        assert_eq!(ws.resources, vec![Resource::PostgresDb { name: "myproj_ws_legacy_test".into() }]);
     }
 
     #[test]
