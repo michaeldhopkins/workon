@@ -1,0 +1,11 @@
+{
+  "name": "workon-prisma-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "devDependencies": {
+    "prisma": "^6"
+  },
+  "dependencies": {
+    "@prisma/client": "^6"
+  }
+}
