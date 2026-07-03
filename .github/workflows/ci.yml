@@ -110,5 +110,12 @@ jobs:
       - name: restore the EF Core fixture (so the cycle test runs)
         working-directory: tests/fixtures/efcore
         run: dotnet restore && dotnet tool restore
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
+      - name: set up the Phoenix fixture's deps (so the cycle test runs)
+        working-directory: tests/fixtures/phoenix
+        run: mix local.hex --force && mix deps.get && mix compile
       - name: cargo test (DB-gated cycles run here)
         run: cargo test --locked
