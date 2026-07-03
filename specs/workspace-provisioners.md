@@ -333,6 +333,15 @@ gate; see Out of scope.)
   isolated DB and writes the var to `.env.test.local` for the user to export.
 - **Per-framework MySQL cycle fixtures**: the MySQL engine and each provisioner's
   engine selection are covered, but the end-to-end cycle fixtures are Postgres.
+- **Special-char credential escaping**: `DbEngine::url` (userinfo) and EF's Npgsql
+  key=value string don't encode a password containing `@`/`:`/`;`/`'`. Fine for
+  the common local case (empty password / OS-user peer auth); harden if a real
+  password with reserved chars surfaces.
+- **Robustness of two config parsers**: Phoenix `app_name` takes the first `app:`
+  substring (a leading comment containing `app:` would mislead it; umbrella roots
+  with only `apps_path:` no-op), and EF's InMemory/Sqlite/Testcontainers skip is a
+  substring match (a comment mentioning them would falsely no-op). Both are
+  low-likelihood; tighten to structural parses if they bite.
 - **Directory-scoped env** for polyglot repos; **per-workspace service isolation**
   (docker-compose, Redis) with allocated ports.
 - **`.workon/setup`** trust-gated project hook for unrecognized stacks.

@@ -38,9 +38,7 @@ impl Provisioner for Phoenix {
             return Ok(Setup::default());
         };
 
-        // MIX_TEST_PARTITION is appended straight into the DB name, so make it a
-        // valid identifier suffix derived from the (unique) ws_id.
-        let partition = format!("_{}", ctx.ws_id.replace(['-', '.'], "_"));
+        let partition = partition_for(&app, ctx.ws_id);
         let db = format!("{app}_test{partition}");
 
         eprintln!("Creating test database {db} (MIX_TEST_PARTITION={partition})...");
@@ -77,6 +75,24 @@ impl Provisioner for Phoenix {
     }
 }
 
+/// The `MIX_TEST_PARTITION` value for this workspace. Phoenix's config forms the
+/// DB name as `{app}_test{partition}`, so the partition must be identifier-safe
+/// and short enough that the whole stays within Postgres's 63-byte limit —
+/// otherwise Postgres silently truncates the created name and the (full) name we
+/// record for teardown no longer matches it, breaking isolation. workon owns the
+/// partition, so capping it keeps the created and recorded names identical.
+fn partition_for(app: &str, ws_id: &str) -> String {
+    let sanitized: String =
+        ws_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    let raw = format!("_{sanitized}");
+    let budget = 63usize.saturating_sub(app.len() + "_test".len());
+    if raw.len() > budget {
+        raw[..budget].to_string() // sanitized to ASCII, so a byte slice is char-safe
+    } else {
+        raw
+    }
+}
+
 /// The OTP app atom from `mix.exs` (`app: :my_app` -> `my_app`).
 fn app_name(mix: &str) -> Option<String> {
     let after = mix.split("app:").nth(1)?;
@@ -98,6 +114,17 @@ mod tests {
         assert!(!Phoenix.detect(tmp.path()), "phoenix without ecto -> not detected");
         std::fs::write(tmp.path().join("mix.exs"), "defp deps do [{:ecto_sql, \"~> 3.10\"}] end").unwrap();
         assert!(Phoenix.detect(tmp.path()));
+    }
+
+    #[test]
+    fn partition_keeps_db_name_within_63_bytes() {
+        // Short names pass through unchanged (and match the cycle test's DB).
+        assert_eq!(partition_for("phx_fixture", "ws-cycle"), "_ws_cycle");
+        // A long umbrella app + branch-slug ws_id would overflow 63 bytes.
+        let app = "my_umbrella_application_service";
+        let ws = "feature-add-new-billing-integration-flow-and-then-some-more";
+        let db = format!("{app}_test{}", partition_for(app, ws));
+        assert!(db.len() <= 63, "len {}: {db}", db.len());
     }
 
     #[test]

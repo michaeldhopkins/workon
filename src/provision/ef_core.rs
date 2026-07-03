@@ -27,9 +27,11 @@ impl Provisioner for EfCore {
     }
 
     fn detect(&self, ws_dir: &Path) -> bool {
-        csprojs(ws_dir).iter().any(|p| {
-            std::fs::read_to_string(p).map(|s| s.contains("Microsoft.EntityFrameworkCore")).unwrap_or(false)
-        })
+        // Match any `*.EntityFrameworkCore*` package (Microsoft.*, Npgsql.*, …) —
+        // a provider-only csproj may not name the Microsoft package explicitly.
+        csprojs(ws_dir)
+            .iter()
+            .any(|p| std::fs::read_to_string(p).map(|s| s.contains("EntityFrameworkCore")).unwrap_or(false))
     }
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
@@ -73,27 +75,35 @@ impl Provisioner for EfCore {
     }
 }
 
-/// `*.csproj` files at the repo root and one level down.
+/// `*.csproj` files within a few levels of the repo root. The canonical .NET
+/// solution layout nests projects two deep (`src/MyApp.Api/MyApp.Api.csproj`,
+/// `tests/MyApp.Tests/…`), so a root-only or one-deep scan misses most real
+/// repos. Build output (`bin`/`obj`) and vendored trees are skipped.
 fn csprojs(ws_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut dirs = vec![ws_dir.to_path_buf()];
-    if let Ok(entries) = std::fs::read_dir(ws_dir) {
-        for e in entries.flatten() {
-            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                dirs.push(e.path());
-            }
-        }
-    }
-    for dir in dirs {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().extension().is_some_and(|x| x == "csproj") {
-                    out.push(e.path());
-                }
-            }
-        }
-    }
+    collect_csprojs(ws_dir, 0, &mut out);
     out
+}
+
+fn collect_csprojs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let name = e.file_name();
+            if matches!(name.to_string_lossy().as_ref(), "bin" | "obj" | ".git" | "node_modules") {
+                continue;
+            }
+            collect_csprojs(&path, depth + 1, out);
+        } else if path.extension().is_some_and(|x| x == "csproj") {
+            out.push(path);
+        }
+    }
 }
 
 /// A Npgsql `Host=…;Port=…;Database=…;Username=…[;Password=…]` string from the
@@ -124,6 +134,20 @@ mod tests {
         )
         .unwrap();
         assert!(EfCore.detect(tmp.path()));
+    }
+
+    #[test]
+    fn detects_efcore_in_nested_src_layout() {
+        // The default `dotnet new` solution layout nests two deep.
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("src/MyApp.Api");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("MyApp.Api.csproj"),
+            "<Project><PackageReference Include=\"Npgsql.EntityFrameworkCore.PostgreSQL\"/></Project>",
+        )
+        .unwrap();
+        assert!(EfCore.detect(tmp.path()), "src/App/App.csproj should be detected");
     }
 
     #[test]
