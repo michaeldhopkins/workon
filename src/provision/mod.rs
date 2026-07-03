@@ -13,6 +13,7 @@ use vcs_runner::Cmd;
 
 mod alembic;
 mod django;
+mod ef_core;
 mod laravel;
 mod prisma;
 mod python_venv;
@@ -207,6 +208,7 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
         Box::new(alembic::Alembic),
         Box::new(django::Django),
         Box::new(laravel::Laravel),
+        Box::new(ef_core::EfCore),
     ]
 }
 
