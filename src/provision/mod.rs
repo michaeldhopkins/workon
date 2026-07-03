@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use vcs_runner::Cmd;
 
 mod alembic;
+mod django;
 mod prisma;
 mod python_venv;
 mod rails;
@@ -160,6 +161,7 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
         Box::new(rails::Rails),
         Box::new(prisma::Prisma),
         Box::new(alembic::Alembic),
+        Box::new(django::Django),
     ]
 }
 

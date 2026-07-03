@@ -81,5 +81,8 @@ jobs:
       - name: set up the Alembic fixture's venv (so the cycle test runs)
         working-directory: tests/fixtures/alembic
         run: python3 -m venv .venv && ./.venv/bin/pip install -q -r requirements.txt
+      - name: set up the Django fixture's venv (so the cycle test runs)
+        working-directory: tests/fixtures/django
+        run: python3 -m venv .venv && ./.venv/bin/pip install -q -r requirements.txt
       - name: cargo test (DB-gated cycles run here)
         run: cargo test --locked
