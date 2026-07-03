@@ -5,12 +5,13 @@
 //! the `vcs` trait + backend registry. See specs/workspace-provisioners.md.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use vcs_runner::Cmd;
 
+mod alembic;
 mod prisma;
 mod python_venv;
 mod rails;
@@ -137,6 +138,18 @@ pub fn test_db_name(project_name: &str, ws_id: &str) -> String {
     format!("{proj}{suffix}")
 }
 
+/// The Python interpreter to run project tools with: the workspace's `.venv`
+/// (which `PythonVenv` has already repaired, since it runs first) if present,
+/// else `python3` on `PATH`.
+pub fn venv_python(ws_dir: &Path) -> PathBuf {
+    let venv = ws_dir.join(".venv/bin/python");
+    if venv.is_file() {
+        venv
+    } else {
+        PathBuf::from("python3")
+    }
+}
+
 /// The ordered provisioner registry. Order matters (future: venv repair before
 /// Python DB frameworks).
 pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
@@ -146,6 +159,7 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
         Box::new(python_venv::PythonVenv),
         Box::new(rails::Rails),
         Box::new(prisma::Prisma),
+        Box::new(alembic::Alembic),
     ]
 }
 
