@@ -108,4 +108,63 @@ mod tests {
         assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
         assert_eq!(setup.env, vec![("DATABASE_URL".to_string(), format!("postgresql://localhost/{name}"))]);
     }
+
+    /// Full cycle against the real Rails fixture: provision it, then assert the
+    /// schema was actually loaded into the isolated DB (the `widgets` table
+    /// exists), then drop it. Gated on a reachable Postgres AND the fixture's
+    /// bundle being installed (CI installs Ruby + runs `bundle install`; this
+    /// machine has both), skips otherwise.
+    #[test]
+    fn rails_cycle_loads_schema_into_isolated_db() {
+        use crate::provision::Resource;
+        use std::collections::HashMap;
+        use std::process::Command;
+
+        let name = test_db_name("railsfix", "ws-cycle");
+        Resource::PostgresDb { name: name.clone() }.teardown();
+        if DbEngine::Postgres.create(&name).is_err() {
+            return; // no reachable Postgres server
+        }
+        Resource::PostgresDb { name: name.clone() }.teardown();
+
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails");
+        let bundle_ready = Command::new("bundle")
+            .arg("check")
+            .current_dir(fixture)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !bundle_ready {
+            return; // fixture gems not installed
+        }
+
+        // Provision runs `bundle exec rails db:schema:load` in ws_dir, so give it
+        // its own copy of the fixture.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("railsfix-ws-cycle");
+        assert!(
+            Command::new("cp").args(["-R", fixture, ws_dir.to_str().unwrap()]).status().unwrap().success(),
+            "copy fixture",
+        );
+
+        let mise = HashMap::new();
+        let ctx = ProvisionCtx {
+            project_dir: &ws_dir,
+            project_name: "railsfix",
+            ws_id: "ws-cycle",
+            ws_dir: &ws_dir,
+            mise_vars: &mise,
+        };
+        let setup = Rails.setup(&ctx).unwrap();
+        assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
+
+        let out = Command::new("psql")
+            .args(["-tAc", "select to_regclass('public.widgets')", &name])
+            .output()
+            .unwrap();
+        let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Resource::PostgresDb { name: name.clone() }.teardown(); // clean up before asserting
+
+        assert_eq!(table, "widgets", "db:schema:load should have created the widgets table");
+    }
 }
