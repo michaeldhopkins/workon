@@ -66,5 +66,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install postgres client (createdb/dropdb)
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: install the Rails fixture's gems (so the cycle test runs)
+        working-directory: tests/fixtures/rails
+        run: bundle install --jobs 4
       - name: cargo test (DB-gated cycles run here)
         run: cargo test --locked
