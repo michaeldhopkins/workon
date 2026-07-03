@@ -27,16 +27,14 @@ impl Provisioner for Laravel {
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
         let xml = std::fs::read_to_string(ctx.ws_dir.join("phpunit.xml")).unwrap_or_default();
-        match phpunit_db_connection(&xml).as_deref() {
-            Some("pgsql") => {}
-            Some("mysql") | Some("mariadb") => {
-                eprintln!("Laravel mysql test DB not supported yet; skipping");
-                return Ok(Setup::default());
-            }
+        let connection = phpunit_db_connection(&xml);
+        let engine = match connection.as_deref() {
+            Some("pgsql") => DbEngine::Postgres,
+            Some("mysql") | Some("mariadb") => DbEngine::Mysql,
             _ => return Ok(Setup::default()), // sqlite / :memory: / unset -> self-managed
-        }
+        };
+        let connection = connection.unwrap();
 
-        let engine = DbEngine::Postgres;
         let db = test_db_name(ctx.project_name, ctx.ws_id);
         eprintln!("Creating test database {db}...");
         if engine.create(&db).is_err() {
@@ -49,7 +47,7 @@ impl Provisioner for Laravel {
         eprintln!("Migrating (php artisan migrate)...");
         let mut cmd = Cmd::new("php")
             .args(["artisan", "migrate", "--force"])
-            .env("DB_CONNECTION", "pgsql")
+            .env("DB_CONNECTION", &connection)
             .env("DB_URL", &url)
             .in_dir(ctx.ws_dir);
         for (k, v) in ctx.mise_vars {
@@ -59,7 +57,7 @@ impl Provisioner for Laravel {
 
         Ok(Setup {
             resources: vec![resource],
-            env: vec![("DB_CONNECTION".to_string(), "pgsql".to_string()), ("DB_URL".to_string(), url)],
+            env: vec![("DB_CONNECTION".to_string(), connection), ("DB_URL".to_string(), url)],
             env_file: Some(".env.testing".to_string()),
         })
     }
