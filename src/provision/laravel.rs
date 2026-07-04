@@ -147,4 +147,58 @@ mod tests {
         Resource::PostgresDb { name: name.clone() }.teardown();
         assert_eq!(table, "migrations", "artisan migrate should have created the migrations table");
     }
+
+    /// The same cycle against MySQL. Laravel's migrations are DB-portable, so the
+    /// fixture install is reused as-is; only `phpunit.xml`'s `DB_CONNECTION` is
+    /// retargeted to `mysql`. Exercises `DbEngine::Mysql` + Laravel's `DB_URL`
+    /// mysql path. Gated on a reachable MySQL AND the fixture's vendor + .env.
+    #[test]
+    fn laravel_cycle_migrates_isolated_mysql_db() {
+        use crate::provision::Resource;
+        use std::collections::HashMap;
+        use std::process::Command;
+
+        let name = test_db_name("laravelmysql", "ws-cycle");
+        Resource::MysqlDb { name: name.clone() }.teardown();
+        if DbEngine::Mysql.create(&name).is_err() {
+            return; // no reachable MySQL
+        }
+        Resource::MysqlDb { name: name.clone() }.teardown();
+
+        let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/laravel"));
+        if !fixture.join("vendor/autoload.php").exists() || !fixture.join(".env").exists() {
+            return; // composer install / key:generate not done
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("laravelmysql-ws-cycle");
+        assert!(Command::new("cp").args(["-R", fixture.to_str().unwrap(), ws_dir.to_str().unwrap()]).status().unwrap().success());
+        // Retarget the copy at mysql.
+        let phpunit = ws_dir.join("phpunit.xml");
+        let xml = std::fs::read_to_string(&phpunit).unwrap().replace(
+            "<env name=\"DB_CONNECTION\" value=\"pgsql\"/>",
+            "<env name=\"DB_CONNECTION\" value=\"mysql\"/>",
+        );
+        std::fs::write(&phpunit, xml).unwrap();
+
+        let mise = HashMap::new();
+        let ctx = ProvisionCtx {
+            project_dir: &ws_dir,
+            project_name: "laravelmysql",
+            ws_id: "ws-cycle",
+            ws_dir: &ws_dir,
+            mise_vars: &mise,
+        };
+        let setup = Laravel.setup(&ctx).unwrap();
+        assert_eq!(setup.resources, vec![Resource::MysqlDb { name: name.clone() }]);
+
+        let user = std::env::var("MYSQL_USER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "root".into());
+        let query = format!(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{name}' AND table_name='migrations'"
+        );
+        let out = Command::new("mysql").args(["-u", &user, "-N", "-e", &query]).output().unwrap();
+        let found = String::from_utf8_lossy(&out.stdout).trim() == "1";
+        Resource::MysqlDb { name: name.clone() }.teardown();
+        assert!(found, "artisan migrate should have created the migrations table in mysql");
+    }
 }
