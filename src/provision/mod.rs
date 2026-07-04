@@ -157,6 +157,9 @@ fn env_host(var: &str, default: &str) -> String {
 
 fn auth_prefix(user: &str, password: Option<String>) -> String {
     if user.is_empty() {
+        // No username (PG*/MYSQL* user and $USER all unset) → no userinfo. Any
+        // password is intentionally dropped: a password without a user isn't a
+        // valid URL credential, and libpq/libmysql wouldn't emit one either.
         return String::new();
     }
     let user = percent_encode_userinfo(user);
