@@ -96,13 +96,27 @@ fn partition_for(app: &str, ws_id: &str) -> String {
     }
 }
 
-/// The OTP app atom from `mix.exs` (`app: :my_app` -> `my_app`).
+/// The OTP app atom from `mix.exs` (`app: :my_app` -> `my_app`). Reads `app:` as
+/// a real key: line comments are stripped (an `app:` in a comment must not win)
+/// and the match must be at a token boundary (so `myapp:`/`apps_path:` don't
+/// count). An umbrella root, which has only `apps_path:`, yields `None` — a
+/// graceful no-op.
 fn app_name(mix: &str) -> Option<String> {
-    let after = mix.split("app:").nth(1)?;
-    let atom = after.trim_start().trim_start_matches(':');
-    let end = atom.find(|c: char| !c.is_ascii_alphanumeric() && c != '_')?;
-    let name = &atom[..end];
-    (!name.is_empty()).then(|| name.to_string())
+    for raw in mix.lines() {
+        let line = raw.split('#').next().unwrap_or(raw); // drop a trailing/whole-line comment
+        for (idx, _) in line.match_indices("app:") {
+            // Reject a `app:` glued to a preceding word char (`myapp:`, `apps:`).
+            if line[..idx].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let atom = line[idx + "app:".len()..].trim_start().trim_start_matches(':');
+            let name: String = atom.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -134,6 +148,12 @@ mod tests {
     fn app_name_reads_the_otp_atom() {
         assert_eq!(app_name("def project do\n[app: :my_app,\n version: \"0.1.0\"]\nend").as_deref(), Some("my_app"));
         assert_eq!(app_name("no app here"), None);
+        // A leading comment mentioning app: must not win over the real key.
+        assert_eq!(app_name("# set app: :fake here\ndef project do [app: :real] end").as_deref(), Some("real"));
+        // Umbrella root (only apps_path:) -> no app -> graceful None.
+        assert_eq!(app_name("def project do [apps_path: \"apps\"] end"), None);
+        // `app:` glued to a word char isn't the key.
+        assert_eq!(app_name("[myapp: :x, app: :good]").as_deref(), Some("good"));
     }
 
     /// Full cycle against the real fixture: provision it and assert
