@@ -136,16 +136,40 @@ fn npgsql_connection_string(name: &str) -> String {
     let host = if host.is_empty() || host.starts_with('/') { "localhost".to_string() } else { host };
     let port = std::env::var("PGPORT").unwrap_or_else(|_| "5432".into());
     let user = std::env::var("PGUSER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_default();
-    let mut conn = format!("Host={host};Port={port};Database={name};Username={user}");
+    let mut conn = format!("Host={host};Port={port};Database={name};Username={}", npgsql_value(&user));
     if let Some(pass) = std::env::var("PGPASSWORD").ok().filter(|p| !p.is_empty()) {
-        conn.push_str(&format!(";Password={pass}"));
+        conn.push_str(&format!(";Password={}", npgsql_value(&pass)));
     }
     conn
+}
+
+/// Quote a value for an ADO.NET/Npgsql `key=value;…` connection string. A value
+/// with `;`, `=`, a quote, or surrounding space would otherwise terminate the
+/// pair early or be trimmed; wrap it in single quotes (doubling any embedded
+/// single quote), which Npgsql parses back verbatim.
+fn npgsql_value(v: &str) -> String {
+    let needs_quoting =
+        v.is_empty() || v.starts_with(' ') || v.ends_with(' ') || v.chars().any(|c| matches!(c, ';' | '=' | '\'' | '"'));
+    if needs_quoting {
+        format!("'{}'", v.replace('\'', "''"))
+    } else {
+        v.to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npgsql_value_quotes_only_when_needed() {
+        assert_eq!(npgsql_value("simplepass"), "simplepass");
+        // A `;` would otherwise start a new key; a `'` is doubled inside quotes.
+        assert_eq!(npgsql_value("pa;ss"), "'pa;ss'");
+        assert_eq!(npgsql_value("pa'ss"), "'pa''ss'");
+        assert_eq!(npgsql_value(" leading"), "' leading'");
+        assert_eq!(npgsql_value("a=b"), "'a=b'");
+    }
 
     #[test]
     fn detects_by_efcore_csproj() {

@@ -156,11 +156,30 @@ fn env_host(var: &str, default: &str) -> String {
 }
 
 fn auth_prefix(user: &str, password: Option<String>) -> String {
-    match (user.is_empty(), password) {
-        (false, Some(p)) if !p.is_empty() => format!("{user}:{p}@"),
-        (false, _) => format!("{user}@"),
-        (true, _) => String::new(),
+    if user.is_empty() {
+        return String::new();
     }
+    let user = percent_encode_userinfo(user);
+    match password {
+        Some(p) if !p.is_empty() => format!("{user}:{}@", percent_encode_userinfo(&p)),
+        _ => format!("{user}@"),
+    }
+}
+
+/// Percent-encode a URL userinfo component (username or password). A credential
+/// containing `@`, `:`, `/`, `#`, `?`, `%`, … would otherwise be misparsed —
+/// the `:` splits user/pass and the `@` ends the userinfo. Encodes every byte
+/// outside the RFC 3986 unreserved set, which is always safe (over-encoding a
+/// sub-delim just decodes back).
+fn percent_encode_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// MySQL clients don't read a user env var natively (unlike host/port/password),
@@ -224,6 +243,17 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn userinfo_is_percent_encoded_in_urls() {
+        assert_eq!(percent_encode_userinfo("p@ss:w0/d#x"), "p%40ss%3Aw0%2Fd%23x");
+        assert_eq!(percent_encode_userinfo("plain-user_1.2~3"), "plain-user_1.2~3");
+        // auth_prefix encodes both components while keeping the `:` and `@` that
+        // structure the userinfo, so a credential with reserved chars is safe.
+        assert_eq!(auth_prefix("us er", Some("p@w:d".to_string())), "us%20er:p%40w%3Ad@");
+        assert_eq!(auth_prefix("bob", None), "bob@");
+        assert_eq!(auth_prefix("", Some("x".to_string())), "");
+    }
 
     #[test]
     fn test_db_name_matches_legacy_for_normal_names() {
