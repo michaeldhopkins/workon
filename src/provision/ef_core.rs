@@ -29,21 +29,22 @@ impl Provisioner for EfCore {
     fn detect(&self, ws_dir: &Path) -> bool {
         // Match any `*.EntityFrameworkCore*` package (Microsoft.*, Npgsql.*, …) —
         // a provider-only csproj may not name the Microsoft package explicitly.
-        csprojs(ws_dir)
-            .iter()
-            .any(|p| std::fs::read_to_string(p).map(|s| s.contains("EntityFrameworkCore")).unwrap_or(false))
+        // Keyed on actual package references, not raw text, so a comment can't
+        // trigger it.
+        package_refs(ws_dir).iter().any(|p| p.contains("EntityFrameworkCore"))
     }
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
-        let refs: String = csprojs(ctx.ws_dir).iter().filter_map(|p| std::fs::read_to_string(p).ok()).collect();
+        let packages = package_refs(ctx.ws_dir);
+        let references = |needle: &str| packages.iter().any(|p| p.contains(needle));
         // Self-managing test setups own their DB — stay out.
-        if refs.contains("EntityFrameworkCore.InMemory")
-            || refs.contains("EntityFrameworkCore.Sqlite")
-            || refs.contains("Testcontainers")
+        if references("EntityFrameworkCore.InMemory")
+            || references("EntityFrameworkCore.Sqlite")
+            || references("Testcontainers")
         {
             return Ok(Setup::default());
         }
-        if !refs.contains("Npgsql") {
+        if !references("Npgsql") {
             eprintln!("EF Core: no supported provider (Npgsql) detected; skipping DB setup");
             return Ok(Setup::default());
         }
@@ -86,6 +87,23 @@ fn csprojs(ws_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_csprojs(ws_dir, 0, &mut out);
     out
+}
+
+/// Package IDs referenced across the repo's csproj files — the `Include="…"`
+/// values (`<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />`).
+/// Reading the attribute rather than raw text keeps a comment or a stray mention
+/// from being mistaken for a real dependency.
+fn package_refs(ws_dir: &Path) -> Vec<String> {
+    csprojs(ws_dir)
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .flat_map(|c| {
+            c.split("Include=\"")
+                .skip(1)
+                .filter_map(|s| s.split('"').next().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Directory names that hold vendored deps or sample/fixture projects, never the
@@ -169,6 +187,23 @@ mod tests {
         assert_eq!(npgsql_value("pa'ss"), "'pa''ss'");
         assert_eq!(npgsql_value(" leading"), "' leading'");
         assert_eq!(npgsql_value("a=b"), "'a=b'");
+    }
+
+    #[test]
+    fn package_refs_come_from_include_attrs_not_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("app.csproj"),
+            "<Project>\n<!-- considered Testcontainers and EntityFrameworkCore.InMemory -->\n\
+             <PackageReference Include=\"Npgsql.EntityFrameworkCore.PostgreSQL\" Version=\"9.0\" />\n</Project>",
+        )
+        .unwrap();
+        let pkgs = package_refs(tmp.path());
+        assert_eq!(pkgs, vec!["Npgsql.EntityFrameworkCore.PostgreSQL".to_string()]);
+        // The self-managed markers appear only in a comment, so they must not be
+        // read as dependencies (which would wrongly make setup a no-op).
+        assert!(!pkgs.iter().any(|p| p.contains("Testcontainers") || p.contains("InMemory")));
+        assert!(EfCore.detect(tmp.path()), "a real EF package reference is detected");
     }
 
     #[test]
