@@ -49,7 +49,7 @@ impl Provisioner for Django {
         // so teardown drops whatever survives (default runner drops test_<name>
         // itself; --keepdb or an interrupted run leaves it).
         let resources = vec![engine.resource(&base), engine.resource(&format!("test_{base}"))];
-        Ok(Setup { resources, env: vec![("DATABASE_URL".to_string(), url)], env_file: None })
+        Ok(Setup { resources, env: vec![("DATABASE_URL".to_string(), url)], ..Setup::default() })
     }
 }
 

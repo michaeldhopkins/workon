@@ -49,6 +49,13 @@ pub struct Setup {
     /// Vars to write to the workspace's generated env file, which the framework
     /// loads only in its test environment.
     pub env: Vec<(String, String)>,
+    /// Vars to inject into the workspace *session* (merged with mise env on
+    /// attach), for a framework whose test var is safe session-wide because it
+    /// only takes effect under that framework's test env — Phoenix's
+    /// `MIX_TEST_PARTITION` (read only under `MIX_ENV=test`). Distinct from `env`:
+    /// a session-wide `DATABASE_URL` would wrongly point every dev command at the
+    /// test DB, so URLs go in `env` (test-file-scoped) and never here.
+    pub session_env: Vec<(String, String)>,
     /// Which generated env file the vars go in. `None` = `.env.test.local`
     /// (Rails/dotenv default); Laravel needs `.env.testing`, etc.
     pub env_file: Option<String>,

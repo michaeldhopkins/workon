@@ -77,6 +77,10 @@ struct WorkspaceMeta {
     resources: Vec<Resource>,
     #[serde(default)]
     env: HashMap<String, String>,
+    /// Vars a provisioner asked to inject into the workspace session (not a
+    /// file); merged with mise env on attach. See `provision::Setup::session_env`.
+    #[serde(default)]
+    session_env: HashMap<String, String>,
     /// Legacy single-DB field, read for back-compat and mapped to a
     /// `PostgresDb` resource on load; new files write `resources` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,11 +224,13 @@ fn provision_in(
     };
     let mut resources = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
+    let mut session_env: Vec<(String, String)> = Vec::new();
     for p in provisioners {
         if p.detect(&ws_dir) {
             match p.setup(&ctx) {
                 Ok(s) => {
                     resources.extend(s.resources);
+                    session_env.extend(s.session_env);
                     if !s.env.is_empty() {
                         // Each provisioner names the env file its framework loads
                         // (Rails/dotenv -> .env.test.local, Laravel -> .env.testing).
@@ -247,6 +253,7 @@ fn provision_in(
         name: label.map(String::from),
         resources: resources.clone(),
         env: env.into_iter().collect(),
+        session_env: session_env.into_iter().collect(),
         created_db: None,
     };
     match write_meta(&ws_dir, &meta) {
@@ -271,7 +278,10 @@ fn provision_in(
 /// session id so the caller can surface the resume hint. Recomputes mise env
 /// from the worktree so it works the same in a fresh process.
 fn attach(ws: &Workspace, config: Option<&str>, resume: Option<&str>) -> Result<String> {
-    let mise_vars = mise_env(&ws.ws_dir);
+    // mise env + any provisioner session env (Phoenix's MIX_TEST_PARTITION, …),
+    // read fresh from `.workon.json` so a headless `attach` in a new process
+    // behaves identically, so the user's own test runs hit the isolated DB.
+    let mise_vars = session_launch_env(&ws.ws_dir);
     let tab_name = match ws.name.as_deref() {
         Some(l) => capitalize(l),
         None => format!("{}-{}", ws.project_name, ws.ws_id),
@@ -884,6 +894,16 @@ fn mise_env(dir: &Path) -> HashMap<String, String> {
     }
 }
 
+/// The environment handed to the workspace session: mise env plus any provisioner
+/// session env recorded in `.workon.json`. Session env wins on conflict — it
+/// carries the workspace's test-DB isolation identity (Phoenix's
+/// `MIX_TEST_PARTITION`), which must not be shadowed by an inherited mise value.
+fn session_launch_env(ws_dir: &Path) -> HashMap<String, String> {
+    let mut vars = mise_env(ws_dir);
+    vars.extend(read_meta(ws_dir).session_env);
+    vars
+}
+
 fn parse_mise_env_output(output: &str) -> HashMap<String, String> {
     output
         .lines()
@@ -1108,6 +1128,7 @@ mod tests {
             name: Some("fix bug".to_string()),
             resources: vec![Resource::PostgresDb { name: "mbc_ws_abc_test".into() }],
             env: HashMap::from([("DATABASE_URL".to_string(), "postgresql://localhost/mbc_ws_abc_test".to_string())]),
+            session_env: HashMap::from([("MIX_TEST_PARTITION".to_string(), "_ws_abc".to_string())]),
             created_db: None,
         };
         write_meta(tmp.path(), &meta).unwrap();
@@ -1121,6 +1142,25 @@ mod tests {
         assert_eq!(back.name.as_deref(), Some("fix bug"));
         assert_eq!(back.resources, vec![Resource::PostgresDb { name: "mbc_ws_abc_test".into() }]);
         assert_eq!(back.env.get("DATABASE_URL").map(String::as_str), Some("postgresql://localhost/mbc_ws_abc_test"));
+        assert_eq!(back.session_env.get("MIX_TEST_PARTITION").map(String::as_str), Some("_ws_abc"));
+    }
+
+    /// The delivery path attach uses: a provisioner's session env (persisted in
+    /// `.workon.json`) is present in the environment handed to the session, so a
+    /// framework like Phoenix reads the isolated-DB partition at `mix test` time.
+    #[test]
+    fn session_launch_env_includes_persisted_session_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_meta(
+            tmp.path(),
+            &WorkspaceMeta {
+                session_env: HashMap::from([("MIX_TEST_PARTITION".to_string(), "_ws_abc".to_string())]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let env = session_launch_env(tmp.path());
+        assert_eq!(env.get("MIX_TEST_PARTITION").map(String::as_str), Some("_ws_abc"));
     }
 
     #[test]
@@ -1279,7 +1319,8 @@ mod tests {
             Ok(provision::Setup {
                 resources: vec![Resource::PostgresDb { name: format!("mock_{}_test", ctx.ws_id) }],
                 env: vec![("DATABASE_URL".to_string(), "postgresql://localhost/mock".to_string())],
-                env_file: None,
+                session_env: vec![("MOCK_SESSION_VAR".to_string(), ctx.ws_id.to_string())],
+                ..Default::default()
             })
         }
     }
@@ -1302,6 +1343,10 @@ mod tests {
         let meta = read_meta(&ws.ws_dir);
         assert_eq!(meta.resources, ws.resources);
         assert_eq!(meta.env.get("DATABASE_URL").map(String::as_str), Some("postgresql://localhost/mock"));
+        // session_env is persisted separately (attach merges it into the session
+        // env, not a file), so it is not written to the dotenv file.
+        assert_eq!(meta.session_env.get("MOCK_SESSION_VAR").map(String::as_str), Some(ws.ws_id.as_str()));
+        assert!(!envfile.contains("MOCK_SESSION_VAR"), "session_env must not leak into the dotenv file: {envfile}");
     }
 
     #[test]
@@ -1407,6 +1452,7 @@ mod tests {
                 name: Some("Fix Bug".into()),
                 resources: vec![Resource::PostgresDb { name: "myproj_ws_abc123_test".into() }],
                 env: HashMap::new(),
+                session_env: HashMap::new(),
                 created_db: None,
             },
         )

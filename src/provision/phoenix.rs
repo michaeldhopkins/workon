@@ -7,11 +7,11 @@
 //! so the DB exists at provision time, and records the resulting name for
 //! teardown.
 //!
-//! Delivery caveat: for the user's own `mix test` to hit the same DB,
-//! `MIX_TEST_PARTITION` must be in the session env. Until workon injects it there
-//! (a tracked follow-up), it's written to `.env.test.local` for reference and the
-//! user exports it. Detection keys on `:ecto_sql` (a `--no-ecto` Phoenix app has
-//! no DB).
+//! For the user's own `mix test` to reach the same DB, `MIX_TEST_PARTITION` has
+//! to be set when they run it, so it's returned as `Setup.session_env` and
+//! injected into the workspace session on attach (safe session-wide — it's read
+//! only under `MIX_ENV=test`). Detection keys on `:ecto_sql` (a `--no-ecto`
+//! Phoenix app has no DB).
 
 use std::path::Path;
 
@@ -67,10 +67,13 @@ impl Provisioner for Phoenix {
         }
         let _ = migrate.run();
 
+        // Session env, not a file: MIX_TEST_PARTITION must be set when the user
+        // runs `mix test` in the workspace, and it's safe session-wide because it
+        // only takes effect under MIX_ENV=test.
         Ok(Setup {
             resources: vec![resource],
-            env: vec![("MIX_TEST_PARTITION".to_string(), partition)],
-            env_file: None,
+            session_env: vec![("MIX_TEST_PARTITION".to_string(), partition)],
+            ..Setup::default()
         })
     }
 }
@@ -164,6 +167,10 @@ mod tests {
         let setup = Phoenix.setup(&ctx).unwrap();
         // ws_id "ws-cycle" -> partition "_ws_cycle" -> db "phx_fixture_test_ws_cycle".
         assert_eq!(setup.resources, vec![Resource::PostgresDb { name: db.clone() }]);
+        // The partition is delivered via the session env (so `mix test` reads it),
+        // never a dotenv file.
+        assert_eq!(setup.session_env, vec![("MIX_TEST_PARTITION".to_string(), "_ws_cycle".to_string())]);
+        assert!(setup.env.is_empty(), "Phoenix uses session_env, not the dotenv file");
 
         let out = Command::new("psql").args(["-tAc", "select to_regclass('public.widgets')", &db]).output().unwrap();
         let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
