@@ -1,13 +1,14 @@
 # Workspace provisioners
 
-Status: implemented (v0.21.0). All eight provisioners land with fixtures + gated
+Status: implemented (v0.22.0). All eight provisioners land with fixtures + gated
 cycle tests: Rails, Python venv repair, Prisma, Alembic, Django, Laravel, EF Core,
-Phoenix. Postgres and MySQL/MariaDB engines; SQLite is a no-op. Two follow-ups
-remain (see Out of scope): session-env auto-delivery (needed for Phoenix's
-`MIX_TEST_PARTITION` to reach the user's `mix test`) and per-framework MySQL cycle
-fixtures (the engine + per-provisioner selection are covered; only Postgres has
-end-to-end cycle fixtures so far).
-Target version: 0.21.0
+Phoenix. Postgres and MySQL/MariaDB engines; SQLite is a no-op. Session-env
+auto-delivery is in (Phoenix's `MIX_TEST_PARTITION` reaches the user's `mix test`
+via `Setup.session_env`, merged into the session on attach). MySQL is covered
+end-to-end by the Prisma and Laravel cycles; the other frameworks' engine
+selection is unit-tested (adding their mysql cycle fixtures is optional). Credential
+escaping and the config parsers were hardened.
+Target version: 0.22.0
 
 ## Goal
 
@@ -327,21 +328,9 @@ gate; see Out of scope.)
 - **Parallel test databases** (`..._test-0/-1/…`, Rails `parallelize`, Laravel
   `--parallel`, pytest-xdist): provisioners make the single test DB only; the
   single-process workaround stays documented.
-- **Session-env auto-delivery**: a channel for provisioners to inject vars into
-  the workspace session (not just a test env file). Phoenix needs it so
-  `MIX_TEST_PARTITION` reaches the user's `mix test`; today workon prepares the
-  isolated DB and writes the var to `.env.test.local` for the user to export.
-- **Per-framework MySQL cycle fixtures**: the MySQL engine and each provisioner's
-  engine selection are covered, but the end-to-end cycle fixtures are Postgres.
-- **Special-char credential escaping**: `DbEngine::url` (userinfo) and EF's Npgsql
-  key=value string don't encode a password containing `@`/`:`/`;`/`'`. Fine for
-  the common local case (empty password / OS-user peer auth); harden if a real
-  password with reserved chars surfaces.
-- **Robustness of two config parsers**: Phoenix `app_name` takes the first `app:`
-  substring (a leading comment containing `app:` would mislead it; umbrella roots
-  with only `apps_path:` no-op), and EF's InMemory/Sqlite/Testcontainers skip is a
-  substring match (a comment mentioning them would falsely no-op). Both are
-  low-likelihood; tighten to structural parses if they bite.
+- **Remaining frameworks' MySQL cycle fixtures**: Prisma and Laravel have
+  end-to-end mysql cycles; Rails/Django/Alembic/EF exercise the mysql engine only
+  through unit-tested engine selection. Adding their mysql cycles is optional.
 - **Directory-scoped env** for polyglot repos; **per-workspace service isolation**
   (docker-compose, Redis) with allocated ports.
 - **`.workon/setup`** trust-gated project hook for unrecognized stacks.
