@@ -89,21 +89,32 @@ fn csprojs(ws_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Package IDs referenced across the repo's csproj files — the `Include="…"`
-/// values (`<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />`).
-/// Reading the attribute rather than raw text keeps a comment or a stray mention
-/// from being mistaken for a real dependency.
+/// Package IDs referenced across the repo's csproj files — the `Include` value of
+/// each `<PackageReference>` (`Npgsql.EntityFrameworkCore.PostgreSQL`). Scoped to
+/// the `PackageReference` element and its tag so a `<ProjectReference>` path (which
+/// may embed one of these library names) or a comment isn't read as a dependency;
+/// handles both quote styles MSBuild allows.
 fn package_refs(ws_dir: &Path) -> Vec<String> {
     csprojs(ws_dir)
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
         .flat_map(|c| {
-            c.split("Include=\"")
+            c.split("<PackageReference")
                 .skip(1)
-                .filter_map(|s| s.split('"').next().map(str::to_string))
+                .filter_map(|el| include_value(el.split('>').next().unwrap_or(el)))
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// The `Include="…"` / `Include='…'` attribute value within a single element's tag.
+fn include_value(tag: &str) -> Option<String> {
+    let after = tag.split("Include=").nth(1)?.trim_start();
+    let quote = after.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    after[1..].split(quote).next().map(str::to_string) // `after` starts with an ASCII quote, so [1..] is char-safe
 }
 
 /// Directory names that hold vendored deps or sample/fixture projects, never the
@@ -190,20 +201,26 @@ mod tests {
     }
 
     #[test]
-    fn package_refs_come_from_include_attrs_not_comments() {
+    fn package_refs_only_read_packagereference_across_quote_styles() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("app.csproj"),
-            "<Project>\n<!-- considered Testcontainers and EntityFrameworkCore.InMemory -->\n\
-             <PackageReference Include=\"Npgsql.EntityFrameworkCore.PostgreSQL\" Version=\"9.0\" />\n</Project>",
+            "<Project>\n\
+             <!-- considered Testcontainers and EntityFrameworkCore.InMemory -->\n\
+             <ItemGroup>\n\
+             <ProjectReference Include=\"../Acme.Testcontainers.Data/Acme.csproj\" />\n\
+             <PackageReference Include='Npgsql.EntityFrameworkCore.PostgreSQL' Version=\"9.0\" />\n\
+             </ItemGroup>\n</Project>",
         )
         .unwrap();
         let pkgs = package_refs(tmp.path());
         assert_eq!(pkgs, vec!["Npgsql.EntityFrameworkCore.PostgreSQL".to_string()]);
-        // The self-managed markers appear only in a comment, so they must not be
-        // read as dependencies (which would wrongly make setup a no-op).
+        // Neither the comment nor the ProjectReference path (which embeds
+        // "Testcontainers") is a dependency — matching either would wrongly make
+        // setup a no-op.
         assert!(!pkgs.iter().any(|p| p.contains("Testcontainers") || p.contains("InMemory")));
-        assert!(EfCore.detect(tmp.path()), "a real EF package reference is detected");
+        // The real package is single-quoted, which MSBuild allows.
+        assert!(EfCore.detect(tmp.path()), "a single-quoted EF package reference is detected");
     }
 
     #[test]
