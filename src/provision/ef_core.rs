@@ -71,7 +71,7 @@ impl Provisioner for EfCore {
         }
         let _ = cmd.run();
 
-        Ok(Setup { resources: vec![resource], env: vec![(env_key, conn)], env_file: None })
+        Ok(Setup { resources: vec![resource], env: vec![(env_key, conn)], ..Setup::default() })
     }
 }
 

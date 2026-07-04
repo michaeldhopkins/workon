@@ -70,7 +70,7 @@ impl Provisioner for Prisma {
         }
         let _ = generate.run();
 
-        Ok(Setup { resources: vec![resource], env: vec![(env_var, url)], env_file: None })
+        Ok(Setup { resources: vec![resource], env: vec![(env_var, url)], ..Setup::default() })
     }
 }
 

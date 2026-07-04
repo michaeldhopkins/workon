@@ -59,6 +59,7 @@ impl Provisioner for Laravel {
             resources: vec![resource],
             env: vec![("DB_CONNECTION".to_string(), connection), ("DB_URL".to_string(), url)],
             env_file: Some(".env.testing".to_string()),
+            ..Setup::default()
         })
     }
 }
