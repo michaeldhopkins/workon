@@ -78,11 +78,35 @@ impl Provisioner for EfCore {
 /// `*.csproj` files within a few levels of the repo root. The canonical .NET
 /// solution layout nests projects two deep (`src/MyApp.Api/MyApp.Api.csproj`,
 /// `tests/MyApp.Tests/…`), so a root-only or one-deep scan misses most real
-/// repos. Build output (`bin`/`obj`) and vendored trees are skipped.
+/// repos. Build output (`bin`/`obj`), vendored trees, and directories that
+/// conventionally hold *sample* projects rather than the repo's own (`fixtures`,
+/// `examples`, …) are skipped — otherwise a bundled sample .NET project (like
+/// workon's own EF test fixture) is mistaken for the workspace's project.
 fn csprojs(ws_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_csprojs(ws_dir, 0, &mut out);
     out
+}
+
+/// Directory names that hold vendored deps or sample/fixture projects, never the
+/// repo's own project — the recursive scan doesn't descend into them.
+fn skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "bin" | "obj"
+            | ".git"
+            | "node_modules"
+            | "vendor"
+            | "fixtures"
+            | "fixture"
+            | "testdata"
+            | "test-data"
+            | "__fixtures__"
+            | "examples"
+            | "example"
+            | "samples"
+            | "sample"
+    )
 }
 
 fn collect_csprojs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -95,8 +119,7 @@ fn collect_csprojs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     for e in entries.flatten() {
         let path = e.path();
         if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            let name = e.file_name();
-            if matches!(name.to_string_lossy().as_ref(), "bin" | "obj" | ".git" | "node_modules") {
+            if skip_dir(&e.file_name().to_string_lossy()) {
                 continue;
             }
             collect_csprojs(&path, depth + 1, out);
@@ -148,6 +171,21 @@ mod tests {
         )
         .unwrap();
         assert!(EfCore.detect(tmp.path()), "src/App/App.csproj should be detected");
+    }
+
+    #[test]
+    fn ignores_csproj_under_a_fixtures_dir() {
+        // A repo (like workon itself) that bundles a sample EF project under
+        // tests/fixtures must not be mistaken for a .NET project.
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = tmp.path().join("tests/fixtures/efcore");
+        std::fs::create_dir_all(&fixture).unwrap();
+        std::fs::write(
+            fixture.join("efcore.csproj"),
+            "<Project><PackageReference Include=\"Npgsql.EntityFrameworkCore.PostgreSQL\"/></Project>",
+        )
+        .unwrap();
+        assert!(!EfCore.detect(tmp.path()), "a fixture-nested csproj must not trigger detection");
     }
 
     #[test]
