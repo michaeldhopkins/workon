@@ -152,23 +152,66 @@ fn detect_trunk_git(project_dir: &Path) -> (String, String) {
     (branch.into(), remote)
 }
 
+/// Revset matching a bookmark by exact name on the `origin` remote only, so a
+/// stale deploy-mirror remote can't shadow the canonical trunk.
+fn remote_scoped(name: &str) -> String {
+    format!(r#"remote_bookmarks(exact:"{name}", remote=exact:"origin")"#)
+}
+
+/// Resolve a single trunk revset to its first real bookmark, or `None` when the
+/// revset is empty / errors. Kept separate so `detect_trunk` reads as a plain
+/// priority list of candidates.
+fn jj_trunk_bookmark(project_dir: &Path, revset: &str) -> Option<String> {
+    let output = run_jj_utf8(
+        project_dir,
+        &["log", "-r", revset, "--no-graph", "-T", "bookmarks", "--limit", "1"],
+    )
+    .ok()?;
+    let bookmark = first_real_bookmark(&output);
+    (!bookmark.is_empty()).then(|| bookmark.to_string())
+}
+
 impl Vcs for JjBackend {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String> {
-        // trunk() works when the remote is named "origin"; fall back to
-        // searching all remotes for repos with non-standard remote names.
-        let revsets = [
-            "trunk()",
-            r#"latest(remote_bookmarks("master") | remote_bookmarks("main"))"#,
+        // Candidates in priority order. Every jj step is origin-scoped so a
+        // deploy-mirror remote can never win: the old fallback ranked
+        // `remote_bookmarks("master") | remote_bookmarks("main")` across *all*
+        // remotes with `latest()`, i.e. by commit timestamp, so a deploy mirror
+        // (e.g. a heroku remote) whose `main` was pushed after origin's `master`
+        // froze every workspace on the wrong trunk. `trunk()` covers the common
+        // case; the explicit origin/main|master|trunk lookups rescue repos where
+        // jj's `trunk()` alias doesn't resolve but the bookmarks are known.
+        let origin_revsets = [
+            "trunk()".to_string(),
+            remote_scoped("main"),
+            remote_scoped("master"),
+            remote_scoped("trunk"),
         ];
-        for revset in &revsets {
-            if let Ok(output) = run_jj_utf8(
-                project_dir,
-                &["log", "-r", revset, "--no-graph", "-T", "bookmarks", "--limit", "1"],
-            ) {
-                let bookmark = first_real_bookmark(&output);
-                if !bookmark.is_empty() {
-                    return Ok(bookmark.to_string());
-                }
+        for revset in &origin_revsets {
+            if let Some(bookmark) = jj_trunk_bookmark(project_dir, revset) {
+                return Ok(bookmark);
+            }
+        }
+
+        // jj's bookmark view can lag git's: a repo first initialized against a
+        // deploy mirror never learned origin's bookmark, so none of the revsets
+        // above resolve. Consult git's remote-tracking refs directly
+        // (origin-preferring, via detect_trunk_git) and pin to the commit id,
+        // which resolves in jj even when the bookmark was never tracked.
+        let (branch, remote) = detect_trunk_git(project_dir);
+        if let Ok(cid) = run_git_utf8(project_dir, &["rev-parse", "--verify", &format!("{remote}/{branch}")]) {
+            let cid = cid.trim();
+            if !cid.is_empty() {
+                return Ok(cid.to_string());
+            }
+        }
+
+        // Last resort — any remote's master, then main. Only reached when
+        // neither jj nor git can point at an origin/deploy trunk; a
+        // single-non-origin-remote repo whose git refs weren't consulted above.
+        for revset in [r#"latest(remote_bookmarks(exact:"master"))"#, r#"latest(remote_bookmarks(exact:"main"))"#] {
+            if let Some(bookmark) = jj_trunk_bookmark(project_dir, revset) {
+                return Ok(bookmark);
             }
         }
 
@@ -559,6 +602,41 @@ mod tests {
         run_jj(&repo, &["bookmark", "track", "master@origin"]).unwrap();
         run_jj(&repo, &["workspace", "add", &path_str(&ws), "--name", ws_id, "-r", "master"]).unwrap();
         (repo, ws)
+    }
+
+    /// Regression for the deploy-mirror bug: a mirror remote (heroku) whose
+    /// `main` was pushed *after* origin's `master` must not be chosen as trunk.
+    /// The old fallback ranked `remote_bookmarks("master") | ("main")` across
+    /// all remotes by commit timestamp, so the newer mirror `main` won. Here we
+    /// disable jj's `trunk()` alias to force the fallback path (a repo where jj
+    /// can't derive trunk from origin) and assert origin still wins over the
+    /// newer mirror.
+    #[test]
+    fn detect_trunk_prefers_origin_over_newer_deploy_mirror() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _ws) = setup_ws(tmp.path(), "wtrunk");
+
+        // A deploy mirror with a `main` bookmark advanced past origin's master.
+        let heroku = tmp.path().join("heroku.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main", &path_str(&heroku)])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        git(&repo, &["checkout", "-b", "main"]);
+        std::fs::write(repo.join("app.rb"), "mirror is newer").unwrap();
+        git(&repo, &["commit", "-am", "newer on mirror main"]);
+        git(&repo, &["remote", "add", "heroku", &path_str(&heroku)]);
+        git(&repo, &["push", "heroku", "main"]);
+        git(&repo, &["checkout", "master"]);
+        // Make jj learn the mirror bookmark, then force the fallback path by
+        // stubbing out `trunk()` (origin's default branch is undiscoverable).
+        run_jj(&repo, &["git", "fetch", "--remote", "heroku"]).unwrap();
+        run_jj(&repo, &["config", "set", "--repo", r#"revset-aliases."trunk()""#, "none()"]).unwrap();
+
+        let trunk = JjBackend.detect_trunk(&repo).unwrap();
+        assert_eq!(trunk, "master", "must pick origin's master, not the newer heroku main, got {trunk:?}");
     }
 
     /// The pinned base commit id (master) the workspaces in these tests branch
