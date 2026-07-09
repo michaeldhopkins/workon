@@ -432,7 +432,7 @@ version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82cb6a9f675da968c63b6208c641b9dca58fc0133ae53375736b1767b0cab8bd"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -584,9 +584,9 @@ dependencies = [
 
 [[package]]
 name = "procpilot"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2b07713cc1ea53e2c3c91511e7a486bf7144e66c005b53d934a5b148e135de7"
+checksum = "4e6b1bd540a7f41bd7c768a661a488d67b2e0803100683ecb7e3ff484190873e"
 dependencies = [
  "backon",
  "os_pipe",
@@ -970,9 +970,9 @@ dependencies = [
 
 [[package]]
 name = "vcs-runner"
-version = "0.12.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd50e0aaa4c42af694c052d1637486e2936cc76e337c7ceac44e60e34a07fbb7"
+checksum = "9e83e867cb8eb12c7fd3df21fe4f506600362842d3ffb60d42a400cddee5a7cd"
 dependencies = [
  "anyhow",
  "procpilot",
@@ -1421,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "workon"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "assert_cmd",

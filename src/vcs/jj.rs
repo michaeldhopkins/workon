@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use vcs_runner::{parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8, RunError};
+use vcs_runner::{
+    parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8, run_jj_utf8_ignore_wc, RunError,
+};
 
 use super::{detect_git_remote, path_str, Vcs};
 
@@ -32,6 +34,14 @@ impl JjBackend {
     /// operation elsewhere. It also creates the workspace entry *before* hitting
     /// that error, leaving an orphan behind — so on any failure we forget the
     /// partial workspace, and on the stale case we run `update-stale` and retry.
+    ///
+    /// There is deliberately no guard against a *concurrent op-log reconcile*
+    /// here. `jj workspace add` rewrites no history — the corruption class that
+    /// a reconcile enables is a bad rebase onto a reconciled state, which
+    /// `workspace add` cannot produce — and jj preserves both sides of a fork
+    /// regardless. Concurrency is safe; workon only needs to *surface* a
+    /// divergence, which `workon list`'s status column does (see `active_status`
+    /// in `workspace.rs`, reading `divergent()` via `jj_divergent_change_ids`).
     fn add_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, rev: &str) -> Result<()> {
         let add = || self.run_workspace_add(project_dir, ws_dir, ws_id, rev);
 
@@ -90,7 +100,9 @@ impl JjBackend {
     /// concurrency-proof attribution. Callers filter to those still stranded.
     fn abandoned_working_copies(&self, ws_id: &str, project_dir: &Path) -> Vec<String> {
         let header = format!("Changed working copy {ws_id}@:");
-        let Ok(out) = run_jj_utf8(project_dir, &["op", "log", "--op-diff", "--no-graph"]) else {
+        // Working-copy-agnostic: teardown reads the op log to attribute orphans;
+        // it must not snapshot the (possibly stale) working copy while doing so.
+        let Ok(out) = run_jj_utf8_ignore_wc(project_dir, &["op", "log", "--op-diff", "--no-graph"]) else {
             return Vec::new();
         };
         let mut ids = Vec::new();
@@ -841,5 +853,72 @@ mod tests {
         ));
         assert!(!stderr_reports_stale("Error: Revision `main` doesn't exist"));
         assert!(!stderr_reports_stale(""));
+    }
+
+    /// Colocated jj repo with a few operations, so there's an older op to fork
+    /// the log at when simulating a concurrent writer.
+    fn setup_colocated(tmp: &Path) -> std::path::PathBuf {
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@t.com"]);
+        git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("f.txt"), "a").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+        run_jj(&repo, &["describe", "-m", "A"]).unwrap();
+        run_jj(&repo, &["new", "-m", "B"]).unwrap();
+        repo
+    }
+
+    /// Fork the operation log at an older op and let jj auto-reconcile the two
+    /// heads — the exact sequence a second jj process racing us produces, and
+    /// what leaves a persistent divergent change behind.
+    fn force_op_divergence(repo: &Path) {
+        let ops = run_jj_utf8(repo, &["op", "log", "--no-graph", "-T", "id ++ \"\\n\""]).unwrap();
+        let earlier = ops.lines().nth(2).expect("an older op to fork at").to_string();
+        run_jj(repo, &["--at-operation", &earlier, "describe", "-m", "FORKED"]).unwrap();
+        let _ = run_jj(repo, &["status"]); // triggers the auto-reconcile
+    }
+
+    /// workon reads divergence via `vcs_runner::jj_divergent_change_ids` (in
+    /// `active_status`, during `workon list`). Its load-bearing property is that
+    /// the read is working-copy-agnostic: it must detect a reconciled op-log
+    /// fork AND never snapshot the user's in-progress edits (which would move
+    /// `@` under them). Pinning both against real jj means a dependency
+    /// regression — e.g. the pre-0.15 helper that shelled out without
+    /// `--ignore-working-copy` — can't silently reintroduce the snapshot.
+    #[test]
+    fn divergence_read_detects_fork_without_snapshotting_wip() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = setup_colocated(tmp.path());
+
+        assert!(
+            vcs_runner::jj_divergent_change_ids(&repo).unwrap().is_empty(),
+            "a clean repo reports no divergence"
+        );
+
+        force_op_divergence(&repo);
+        assert!(
+            !vcs_runner::jj_divergent_change_ids(&repo).unwrap().is_empty(),
+            "a reconciled op-log fork must surface as divergent"
+        );
+
+        // Dirty the working copy, then read `@` (itself working-copy-agnostic so
+        // the read doesn't snapshot) before and after the divergence check.
+        std::fs::write(repo.join("f.txt"), "uncommitted WIP").unwrap();
+        let at = || {
+            run_jj_utf8(&repo, &["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", "commit_id", "--limit", "1"])
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let before = at();
+        let _ = vcs_runner::jj_divergent_change_ids(&repo);
+        assert_eq!(before, at(), "the divergence read must not snapshot the working copy (@ must not move)");
     }
 }
