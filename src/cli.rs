@@ -40,7 +40,7 @@ pub struct SessionArgs {
     #[arg(short = 'r', long, requires = "workspace")]
     pub resume: Option<String>,
 
-    /// Named config to load from ~/.config/workon/configs/<name>.kdl
+    /// Named config to load from `~/.config/workon/configs/<name>.kdl`
     #[arg(short = 'c', long = "config")]
     pub config: Option<String>,
 
