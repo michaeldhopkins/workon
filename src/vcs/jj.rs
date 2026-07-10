@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -93,37 +94,61 @@ impl JjBackend {
         .unwrap_or(false)
     }
 
-    /// Commit ids this workspace's `@` moved away from, parsed from
-    /// `jj op log --op-diff`. Each operation prints a `Changed working copy
-    /// <ws>@:` block whose `- <change_id> <commit_id> …` lines are the commits
-    /// `@` left behind. Scoped to this workspace's blocks only — the basis for
-    /// concurrency-proof attribution. Callers filter to those still stranded.
-    fn abandoned_working_copies(&self, ws_id: &str, project_dir: &Path) -> Vec<String> {
-        let header = format!("Changed working copy {ws_id}@:");
-        // Working-copy-agnostic: teardown reads the op log to attribute orphans;
-        // it must not snapshot the (possibly stale) working copy while doing so.
-        let Ok(out) = run_jj_utf8_ignore_wc(project_dir, &["op", "log", "--op-diff", "--no-graph"]) else {
+    /// The repo's orphaned work, across all workspaces: non-empty commits that no
+    /// bookmark, remote, or working copy still reaches. Small in practice — most
+    /// commits are reachable from a bookmark or remote — so an empty result (the
+    /// common case) lets [`stranded_work`](Self::stranded_work) return before any
+    /// per-operation attribution. Read-only and working-copy-agnostic.
+    fn repo_orphans(&self, project_dir: &Path) -> Vec<String> {
+        let revset = "~empty() & ~ancestors(bookmarks() | remote_bookmarks()) \
+                      & ~working_copies() & ~ancestors(working_copies())";
+        run_jj_utf8_ignore_wc(
+            project_dir,
+            &["log", "--no-graph", "-r", revset, "-T", r#"commit_id ++ "\n""#],
+        )
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+    }
+
+    /// Which of `orphans` **this workspace's `@` ever pointed at** — the
+    /// concurrency-safe attribution that a repo-wide orphan revset can't give
+    /// (it would also flag other live workspaces' orphans). The "did `@` ever
+    /// point here" signal lives only in the operation log, but we read it with
+    /// first-class queries — structured op ids, then the `<ws>@` revset evaluated
+    /// `--at-operation` — never by parsing `op log --op-diff` prose.
+    ///
+    /// `present(<ws>@)` yields empty (not an error) once we walk past the
+    /// workspace's creation, which bounds the newest-first walk to this
+    /// workspace's own lifetime; we also stop early once every orphan is
+    /// attributed.
+    fn abandoned_by_workspace(&self, ws_id: &str, project_dir: &Path, orphans: &[String]) -> Vec<String> {
+        let want: HashSet<&str> = orphans.iter().map(String::as_str).collect();
+        let Ok(op_ids) =
+            run_jj_utf8_ignore_wc(project_dir, &["op", "log", "--no-graph", "-T", r#"id ++ "\n""#])
+        else {
             return Vec::new();
         };
-        let mut ids = Vec::new();
-        let mut in_block = false;
-        for line in out.lines() {
-            let t = line.trim();
-            if t == header {
-                in_block = true;
-            } else if !in_block {
-                continue;
-            } else if let Some(rest) = t.strip_prefix("- ") {
-                if let Some(commit_id) = rest.split_whitespace().nth(1) {
-                    ids.push(commit_id.to_string());
+        let wc_at_op = format!("present({ws_id}@)");
+        let mut found: Vec<String> = Vec::new();
+        for op in op_ids.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(cid) = run_jj_utf8_ignore_wc(
+                project_dir,
+                &["--at-operation", op, "log", "--no-graph", "-r", &wc_at_op, "-T", "commit_id", "--limit", "1"],
+            ) else {
+                continue; // transient read failure on one op: skip, don't misjudge the boundary
+            };
+            let cid = cid.trim();
+            if cid.is_empty() {
+                break; // older than this workspace's creation — nothing more of ours to find
+            }
+            if want.contains(cid) && !found.iter().any(|f| f == cid) {
+                found.push(cid.to_string());
+                if found.len() == want.len() {
+                    break; // every orphan attributed
                 }
-            } else if !t.starts_with("+ ") {
-                in_block = false;
             }
         }
-        ids.sort();
-        ids.dedup();
-        ids
+        found
     }
 }
 
@@ -321,26 +346,21 @@ impl Vcs for JjBackend {
     }
 
     fn stranded_work(&self, ws_id: &str, _base: &str, project_dir: &Path, _ws_dir: &Path) -> Vec<String> {
-        // Candidates: commits this workspace's @ moved away from, recovered from
-        // the operation log. `jj op log --op-diff` prints, per operation, a
-        // "Changed working copy <ws>@:" block whose `-` line is the commit @ left
-        // behind. Scoping to *this* workspace's blocks is what makes attribution
-        // concurrency-proof (a repo-wide revset would also catch other
-        // workspaces' orphans).
-        let candidates = self.abandoned_working_copies(ws_id, project_dir);
-        if candidates.is_empty() {
+        // The repo's orphaned work first: usually empty, so the clean case costs
+        // one read and skips all per-operation attribution below.
+        let orphans = self.repo_orphans(project_dir);
+        if orphans.is_empty() {
             return Vec::new();
         }
-        // Keep only those still genuinely stranded: non-empty, unsaved, and
-        // unreachable from any workspace.
-        let revset = format!(
-            "({}) & ~empty() & ~ancestors(bookmarks() | remote_bookmarks()) \
-             & ~working_copies() & ~ancestors(working_copies())",
-            candidates.join("|")
-        );
+        // Narrow to the orphans *this* workspace abandoned — concurrency-safe, via
+        // first-class `<ws>@` history rather than op-log text parsing.
+        let mine = self.abandoned_by_workspace(ws_id, project_dir, &orphans);
+        if mine.is_empty() {
+            return Vec::new();
+        }
         run_jj_utf8(
             project_dir,
-            &["log", "--ignore-working-copy", "--no-graph", "-r", &revset,
+            &["log", "--ignore-working-copy", "--no-graph", "-r", &mine.join("|"),
               "-T", r#"commit_id.shortest(8) ++ "  " ++ if(description, description.first_line(), "(no description set)") ++ "\n""#],
         )
         .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect())
