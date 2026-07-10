@@ -970,9 +970,9 @@ dependencies = [
 
 [[package]]
 name = "vcs-runner"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e83e867cb8eb12c7fd3df21fe4f506600362842d3ffb60d42a400cddee5a7cd"
+checksum = "1a5d6e8bee1b13e4aa5e71c2c1a7b863048a15ca4f04915ea0c687bbc9388c16"
 dependencies = [
  "anyhow",
  "procpilot",

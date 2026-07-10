@@ -3,7 +3,8 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use vcs_runner::{
-    parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8, run_jj_utf8_ignore_wc, RunError,
+    jj_revset_history, parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8,
+    run_jj_utf8_ignore_wc, RunError,
 };
 
 use super::{detect_git_remote, path_str, Vcs};
@@ -113,42 +114,17 @@ impl JjBackend {
     /// Which of `orphans` **this workspace's `@` ever pointed at** — the
     /// concurrency-safe attribution that a repo-wide orphan revset can't give
     /// (it would also flag other live workspaces' orphans). The "did `@` ever
-    /// point here" signal lives only in the operation log, but we read it with
-    /// first-class queries — structured op ids, then the `<ws>@` revset evaluated
-    /// `--at-operation` — never by parsing `op log --op-diff` prose.
-    ///
-    /// `present(<ws>@)` yields empty (not an error) once we walk past the
-    /// workspace's creation, which bounds the newest-first walk to this
-    /// workspace's own lifetime; we also stop early once every orphan is
-    /// attributed.
+    /// point here" signal lives only in the operation log; vcs-runner's
+    /// `jj_revset_history` reads it with first-class queries — `<ws>@` evaluated
+    /// `--at-operation`, `present()`-wrapped and bounded to the workspace's
+    /// lifetime — never by parsing `op log --op-diff` prose.
     fn abandoned_by_workspace(&self, ws_id: &str, project_dir: &Path, orphans: &[String]) -> Vec<String> {
         let want: HashSet<&str> = orphans.iter().map(String::as_str).collect();
-        let Ok(op_ids) =
-            run_jj_utf8_ignore_wc(project_dir, &["op", "log", "--no-graph", "-T", r#"id ++ "\n""#])
-        else {
-            return Vec::new();
-        };
-        let wc_at_op = format!("present({ws_id}@)");
-        let mut found: Vec<String> = Vec::new();
-        for op in op_ids.lines().filter(|l| !l.trim().is_empty()) {
-            let Ok(cid) = run_jj_utf8_ignore_wc(
-                project_dir,
-                &["--at-operation", op, "log", "--no-graph", "-r", &wc_at_op, "-T", "commit_id", "--limit", "1"],
-            ) else {
-                continue; // transient read failure on one op: skip, don't misjudge the boundary
-            };
-            let cid = cid.trim();
-            if cid.is_empty() {
-                break; // older than this workspace's creation — nothing more of ours to find
-            }
-            if want.contains(cid) && !found.iter().any(|f| f == cid) {
-                found.push(cid.to_string());
-                if found.len() == want.len() {
-                    break; // every orphan attributed
-                }
-            }
-        }
-        found
+        jj_revset_history(project_dir, &format!("{ws_id}@"), 0)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|cid| want.contains(cid.as_str()))
+            .collect()
     }
 }
 
