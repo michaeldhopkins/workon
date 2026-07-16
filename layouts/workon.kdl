@@ -1,3 +1,13 @@
+// The `workon` block is workon's own; it is stripped before the rest of this
+// file is handed to zellij. It declares which pane is the agent and what args
+// workon injects into it.
+workon {
+    agent command="claude" {
+        new "--session-id" "{session_id}"
+        resume "-r" "{session_id}"
+    }
+}
+
 default_mode "locked"
 
 layout {

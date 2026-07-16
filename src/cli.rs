@@ -36,7 +36,7 @@ pub struct SessionArgs {
     #[arg(long, requires = "workspace")]
     pub skip_copy_ignored: bool,
 
-    /// Resume a Claude session by ID (printed when a workspace exits)
+    /// Resume an agent session by ID (printed when a workspace exits)
     #[arg(short = 'r', long, requires = "workspace")]
     pub resume: Option<String>,
 

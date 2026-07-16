@@ -1,6 +1,6 @@
 [package]
 name = "workon"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
@@ -16,6 +16,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 clonetree = "0.0.2"
+# KDL v1, matching zellij's layout dialect (zellij 0.43 itself uses kdl 4.5).
+# Pinned to the major on purpose: kdl 6.x implements KDL v2, which rejects most
+# zellij layouts — including zellij's own shipped defaults. Do not bump across it.
+kdl = "4"
 rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
 vcs-runner = "0.16.0"
