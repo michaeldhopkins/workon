@@ -12,7 +12,7 @@ use vcs_runner::{binary_available, jj_divergent_change_ids, run_git_utf8, Cmd};
 use crate::claude_trust;
 use crate::deps;
 use crate::discover::{self, WsRef};
-use crate::layout;
+use crate::layout::{self, Config, ResolvedLayout};
 use crate::provision::{self, Provisioner, Resource};
 use crate::session;
 use crate::vcs::Vcs;
@@ -30,12 +30,19 @@ const WORKON_JSON: &str = ".workon.json";
 /// workspace has meaningful changes worth offering to save.
 const GENERATED_FILES: &[&str] = &[ENV_TEST_LOCAL, WORKON_JSON];
 
-#[derive(Default)]
+/// The one agent whose on-disk session storage workon knows how to relocate.
+/// Which args an agent takes is config data now, but *where it keeps
+/// transcripts* is still Claude-specific knowledge — see `migrate_claude_session`.
+const CLAUDE: &str = "claude";
+
 pub struct WorkspaceOptions<'a> {
     pub skip_copy_ignored: bool,
     pub label: Option<&'a str>,
     pub resume: Option<&'a str>,
+    /// The config's *name*, recorded in `.workon.json` as provenance.
     pub config: Option<&'a str>,
+    /// The same config, already read and parsed.
+    pub cfg: &'a Config,
 }
 
 /// A live handle to a provisioned workspace, threaded through the
@@ -121,10 +128,10 @@ pub fn run_workspace(
     opts: WorkspaceOptions<'_>,
     vcs: &dyn Vcs,
 ) -> Result<()> {
-    let WorkspaceOptions { skip_copy_ignored, label, resume, config } = opts;
+    let WorkspaceOptions { skip_copy_ignored, label, resume, config, cfg } = opts;
     let ws = provision(project_dir, project_name, skip_copy_ignored, label, config, vcs)?;
-    let claude_session_id = attach(&ws, config, resume)?;
-    teardown(&ws, Some(&claude_session_id), SaveMode::Prompt, vcs)?;
+    let session_id = attach(&ws, cfg, resume)?;
+    teardown(&ws, session_id.as_deref(), SaveMode::Prompt, vcs)?;
     Ok(())
 }
 
@@ -273,11 +280,11 @@ fn provision_in(
     })
 }
 
-/// Resolve the layout (with the claude session id or resume args injected) and
-/// hand off to zellij. Blocks until the session quits. Returns the claude
-/// session id so the caller can surface the resume hint. Recomputes mise env
-/// from the worktree so it works the same in a fresh process.
-fn attach(ws: &Workspace, config: Option<&str>, resume: Option<&str>) -> Result<String> {
+/// Resolve the layout (with the agent's session id or resume args injected) and
+/// hand off to zellij. Blocks until the session quits. Returns the session id so
+/// the caller can surface the resume hint. Recomputes mise env from the worktree
+/// so it works the same in a fresh process.
+fn attach(ws: &Workspace, cfg: &Config, resume: Option<&str>) -> Result<Option<String>> {
     // mise env + any provisioner session env (Phoenix's MIX_TEST_PARTITION, …),
     // read fresh from `.workon.json` so a headless `attach` in a new process
     // behaves identically, so the user's own test runs hit the isolated DB.
@@ -287,19 +294,54 @@ fn attach(ws: &Workspace, config: Option<&str>, resume: Option<&str>) -> Result<
         None => format!("{}-{}", ws.project_name, ws.ws_id),
     };
 
-    let ws_layout;
-    let claude_session_id;
-    if let Some(prev_session_id) = resume {
-        migrate_claude_session(prev_session_id, &ws.ws_dir);
-        ws_layout = layout::resolve_resume_layout(config, prev_session_id)?;
-        claude_session_id = prev_session_id.to_string();
-    } else {
-        claude_session_id = generate_claude_session_id();
-        ws_layout = layout::resolve_workspace_layout(config, &claude_session_id)?;
-    }
+    let (ws_layout, session_id) = session_layout(cfg, &ws.ws_dir, resume)?;
     session::launch(&tab_name, ws_layout.path(), &ws.ws_dir, &mise_vars)?;
 
-    Ok(claude_session_id)
+    Ok(session_id)
+}
+
+/// The layout to launch, plus the session id to report back.
+///
+/// The id is `Some` only when workon actually knows it: it mints one for a
+/// fresh session (if the agent accepts being handed one) or echoes the one
+/// being resumed. An agent that can't take an id — or a config with no agent —
+/// yields `None`, and teardown prints no resume hint it couldn't honor.
+fn session_layout(
+    cfg: &Config,
+    ws_dir: &Path,
+    resume: Option<&str>,
+) -> Result<(ResolvedLayout, Option<String>)> {
+    let Some(agent) = cfg.agent.as_ref() else {
+        return Ok((cfg.resolve()?, None));
+    };
+
+    if let Some(prev_session_id) = resume {
+        // The CLI guards both of these via ensure_resume_compatible; belt and
+        // braces so a future caller can't silently drop --resume on the floor.
+        let Some(args) = agent.resume_args(prev_session_id) else {
+            bail!("agent '{}' does not declare a 'resume' capability", agent.command);
+        };
+        if !cfg.runs_agent() {
+            bail!("layout has no pane running '{}' to resume into", agent.command);
+        }
+        if agent.command == CLAUDE {
+            migrate_claude_session(prev_session_id, ws_dir);
+        }
+        return Ok((cfg.resolve_with_agent_args(&args)?, Some(prev_session_id.to_string())));
+    }
+
+    // A declared agent the layout never runs (the Claude compatibility default
+    // over an all-opencode config, say) has nothing to inject into. Minting an
+    // id anyway would advertise a resume that nothing could honor.
+    if !cfg.runs_agent() {
+        return Ok((cfg.resolve()?, None));
+    }
+
+    let session_id = generate_session_id();
+    match agent.new_args(&session_id) {
+        Some(args) => Ok((cfg.resolve_with_agent_args(&args)?, Some(session_id))),
+        None => Ok((cfg.resolve()?, None)),
+    }
 }
 
 /// Default-yes save prompt: empty input (bare Enter, or EOF from a closed
@@ -330,18 +372,19 @@ fn should_save(save: &SaveMode, ws_id: &str) -> Result<bool> {
 }
 
 /// Final phase: rescue unsaved work (per `save`), then forget the workspace,
-/// drop its test DB, and remove the directory. `claude_session_id` is `Some`
-/// only for the ephemeral flow, where it drives the resume hint.
+/// drop its test DB, and remove the directory. `session_id` is `Some` only for
+/// the ephemeral flow, and only when workon knows the agent's session id — it
+/// drives the resume hint.
 fn teardown(
     ws: &Workspace,
-    claude_session_id: Option<&str>,
+    session_id: Option<&str>,
     save: SaveMode,
     vcs: &dyn Vcs,
 ) -> Result<TeardownOutcome> {
     eprintln!();
     eprintln!("Cleaning up workspace {}...", ws.ws_id);
-    if let Some(sid) = claude_session_id {
-        eprintln!("Claude session: {sid}");
+    if let Some(sid) = session_id {
+        eprintln!("Agent session: {sid}");
         eprintln!("  Resume with: workon -w --resume {sid}");
     }
 
@@ -556,11 +599,12 @@ pub fn cmd_attach(reference: Option<&str>, config_override: Option<&str>) -> Res
     // Same up-front validation as the interactive path: a config that doesn't
     // resolve, is untrusted, or wants a missing binary should fail before we
     // hand control to zellij.
-    let layout_content = layout::read_config(config)?;
-    layout::validate_layout(&layout_content)?;
-    deps::check_all(&layout_content)?;
+    let cfg = layout::read_config(config)?;
+    layout::validate_layout(&cfg.layout)?;
+    deps::check_all(&cfg.layout)?;
+    cfg.ensure_single_agent_pane()?;
 
-    attach(&ws, config, None)?;
+    attach(&ws, &cfg, None)?;
     Ok(())
 }
 
@@ -1100,7 +1144,9 @@ fn generate_ws_id() -> String {
     format!("ws-{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2])
 }
 
-fn generate_claude_session_id() -> String {
+/// Mint the session id workon hands the agent, rather than scraping one back
+/// out of the agent's own state afterwards.
+fn generate_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
@@ -1586,9 +1632,111 @@ mod tests {
     }
 
     #[test]
-    fn claude_session_id_is_valid_uuid() {
-        let id = generate_claude_session_id();
+    fn session_id_is_valid_uuid() {
+        let id = generate_session_id();
         assert!(uuid::Uuid::parse_str(&id).is_ok(), "should be a valid UUID: {id}");
+    }
+
+    /// `session_layout` decides both what zellij runs and whether teardown can
+    /// offer a resume hint. None of these use `claude` as the agent, so none
+    /// touch the real `~/.claude` on the way through.
+    mod session_layout {
+        use super::*;
+
+        fn layout_text(resolved: &ResolvedLayout) -> String {
+            std::fs::read_to_string(resolved.path()).unwrap()
+        }
+
+        fn config(src: &str) -> Config {
+            Config::parse(src).unwrap()
+        }
+
+        #[test]
+        fn no_agent_means_no_session_id_and_no_injection() {
+            let cfg = config("workon {\n}\nlayout {\n    pane command=\"vim\"\n}");
+            let (resolved, id) = session_layout(&cfg, Path::new("/tmp"), None).unwrap();
+            assert_eq!(id, None, "no agent: nothing to resume, so no hint");
+            assert_eq!(layout_text(&resolved), cfg.layout);
+        }
+
+        #[test]
+        fn fresh_session_mints_an_id_and_injects_it() {
+            let cfg = config(
+                "workon {\n    agent command=\"vim\" {\n        new \"--id\" \"{session_id}\"\n    }\n}\n\
+                 layout {\n    pane command=\"vim\"\n}",
+            );
+            let (resolved, id) = session_layout(&cfg, Path::new("/tmp"), None).unwrap();
+            let id = id.expect("an agent taking --id should get a minted session id");
+            assert!(uuid::Uuid::parse_str(&id).is_ok(), "should be a UUID: {id}");
+            assert!(layout_text(&resolved).contains(&id), "the minted id must reach the pane");
+        }
+
+        #[test]
+        fn agent_without_new_capability_gets_no_id_and_no_injection() {
+            let cfg = config(
+                "workon {\n    agent command=\"vim\" {\n        resume \"-r\" \"{session_id}\"\n    }\n}\n\
+                 layout {\n    pane command=\"vim\"\n}",
+            );
+            let (resolved, id) = session_layout(&cfg, Path::new("/tmp"), None).unwrap();
+            assert_eq!(id, None, "workon can't know an id it never handed over");
+            assert_eq!(layout_text(&resolved), cfg.layout);
+        }
+
+        #[test]
+        fn resume_echoes_the_id_and_injects_resume_args() {
+            let cfg = config(
+                "workon {\n    agent command=\"vim\" {\n        resume \"-r\" \"{session_id}\"\n    }\n}\n\
+                 layout {\n    pane command=\"vim\"\n}",
+            );
+            let (resolved, id) = session_layout(&cfg, Path::new("/tmp"), Some("prev-id")).unwrap();
+            assert_eq!(id.as_deref(), Some("prev-id"));
+            assert!(layout_text(&resolved).contains(r#"args "-r" "prev-id""#));
+        }
+
+        #[test]
+        fn resume_against_an_agent_that_cannot_resume_is_refused() {
+            let cfg = config(
+                "workon {\n    agent command=\"vim\" {\n        new \"--id\" \"{session_id}\"\n    }\n}\n\
+                 layout {\n    pane command=\"vim\"\n}",
+            );
+            let err = session_layout(&cfg, Path::new("/tmp"), Some("prev-id")).unwrap_err();
+            assert!(err.to_string().contains("does not declare a 'resume' capability"), "{err}");
+        }
+
+        /// A config naming an agent its layout never runs (the Claude
+        /// compatibility default over an all-opencode config) must not advertise
+        /// a resume for a session nothing ever received.
+        #[test]
+        fn declared_agent_the_layout_never_runs_gets_no_id_and_no_hint() {
+            let cfg = config("layout {\n    pane command=\"opencode\"\n}");
+            assert!(cfg.agent.is_some(), "compatibility default names claude");
+            assert!(!cfg.runs_agent(), "but nothing runs it");
+
+            let (resolved, id) = session_layout(&cfg, Path::new("/tmp"), None).unwrap();
+            assert_eq!(id, None, "no pane received an id, so offer no resume");
+            assert_eq!(layout_text(&resolved), cfg.layout);
+        }
+
+        #[test]
+        fn resume_into_a_layout_missing_the_agent_pane_is_refused() {
+            let cfg = config("layout {\n    pane command=\"opencode\"\n}");
+            let err = session_layout(&cfg, Path::new("/tmp"), Some("prev-id")).unwrap_err();
+            assert!(err.to_string().contains("no pane running 'claude'"), "{err}");
+        }
+
+        #[test]
+        fn injected_args_merge_with_args_the_user_wrote() {
+            // Regression guard: zellij honors only a pane's first `args` node,
+            // so a sibling would silently drop one set or the other.
+            let cfg = config(
+                "workon {\n    agent command=\"vim\" {\n        new \"--id\" \"{session_id}\"\n    }\n}\n\
+                 layout {\n    pane command=\"vim\" {\n        args \"--clean\"\n    }\n}",
+            );
+            let (resolved, id) = session_layout(&cfg, Path::new("/tmp"), None).unwrap();
+            let text = layout_text(&resolved);
+            assert_eq!(text.matches("args ").count(), 1, "exactly one args node: {text}");
+            assert!(text.contains(&format!(r#"args "--clean" "--id" "{}""#, id.unwrap())), "{text}");
+        }
     }
 
     #[test]

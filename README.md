@@ -142,7 +142,7 @@ A workspace whose project directory has been deleted can't be removed with `dest
 
 ## Custom configs
 
-A "config" is a named Zellij layout file. Pick one with `-c <name>`; the default is used when `-c` is omitted (or `-c default` is passed explicitly).
+A "config" is a named Zellij layout file, optionally opening with a [`workon` block](#declaring-the-agent) that declares the agent it drives. Pick one with `-c <name>`; the default is used when `-c` is omitted (or `-c default` is passed explicitly).
 
 ### Creating a config
 
@@ -204,6 +204,46 @@ workon -c opencode
 - Every `command="..."` in the layout must be a binary on your `PATH`. workon checks before launching and tells you what's missing.
 - For the full layout syntax, see the [zellij layout docs](https://zellij.dev/documentation/creating-a-layout.html).
 
+### Declaring the agent
+
+A config may open with a `workon` block naming the agent one of its panes runs, and the arguments workon passes it. The block is workon's own — it is stripped before the rest of the file is handed to zellij:
+
+```kdl
+workon {
+    agent command="claude" {
+        new "--session-id" "{session_id}"
+        resume "-r" "{session_id}"
+    }
+}
+```
+
+- `command` names the pane the args are injected into, matched against `command="..."`.
+- `new` is used when a `-w` workspace opens. `{session_id}` expands to a UUID workon mints, which is what lets it print a resume hint on exit without scraping the agent's state.
+- `resume` is used by `-r/--resume`, with `{session_id}` set to the id being resumed.
+
+Both capabilities are optional. An agent declaring no `new` is launched untouched, and workon prints no resume hint; an agent declaring no `resume` rejects `--resume` up front. Args merge into any `args` you write yourself, with the injected ones last.
+
+To drive a **different agent**, name it and give it that agent's own flags:
+
+```kdl
+workon {
+    agent command="codex" {
+        resume "resume" "{session_id}"
+    }
+}
+```
+
+For a config with **no agent** — panes workon should never rewrite — declare an empty block:
+
+```kdl
+workon {
+}
+```
+
+A config with **no `workon` block at all** is treated as the Claude layout workon shipped before the block existed, equivalent to the first example above. Existing configs keep working unchanged; new ones are clearer if they say what they drive.
+
+> Session storage is still Claude-specific: on `--resume`, workon relocates the transcript from `~/.claude/projects/` into the new worktree. Other agents get their args injected but no transcript migration.
+
 ### Where configs are loaded from
 
 The default config (no `-c` flag, or `-c default`) is resolved in this order:
@@ -256,13 +296,13 @@ To replace the running session instead:  workon --new-session -c opencode
 
 This works in both directions — bare `workon` against a session you started with `-c opencode` will also be refused.
 
-### `--resume` requires a claude config
+### `--resume` requires an agent that can resume
 
-`-r/--resume` injects `--session-id` into the layout's `claude` pane. Configs without a `command="claude"` pane are rejected up-front:
+`-r/--resume` injects the [agent's](#declaring-the-agent) `resume` args into its pane. Configs that declare no agent, declare one without a `resume` capability, or have no pane running it are rejected up-front:
 
 ```
 $ workon -w --resume <id> -c opencode
-Error: --resume only works with claude-based configs (active config: opencode)
+Error: --resume only works with configs whose layout runs the agent, but 'opencode' has no pane running 'claude'
 ```
 
 ## Session management

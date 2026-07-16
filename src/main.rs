@@ -47,13 +47,19 @@ fn run_session(session: cli::SessionArgs) -> Result<()> {
     let config = session.config.as_deref();
 
     // Resolve the layout first so deps::check_all knows which binaries to require
-    // and we can fail fast on resume + non-claude-config combinations.
-    let layout_content = layout::read_config(config)?;
-    layout::validate_layout(&layout_content)?;
-    deps::check_all(&layout_content)?;
+    // and we can fail fast on resume + configs that can't resume.
+    let cfg = layout::read_config(config)?;
+    layout::validate_layout(&cfg.layout)?;
+    deps::check_all(&cfg.layout)?;
 
     if session.resume.is_some() {
-        layout::ensure_resume_compatible(config.unwrap_or("default"), &layout_content)?;
+        cfg.ensure_resume_compatible(config.unwrap_or("default"))?;
+    }
+
+    // Only the workspace flow injects, and it provisions a worktree first — so
+    // reject an un-injectable layout here rather than halfway through setup.
+    if session.workspace {
+        cfg.ensure_single_agent_pane()?;
     }
 
     // Treat `--name ""` as no name so it falls back to the default.
@@ -66,16 +72,17 @@ fn run_session(session: cli::SessionArgs) -> Result<()> {
             label: name,
             resume: session.resume.as_deref(),
             config,
+            cfg: &cfg,
         };
         workspace::run_workspace(&project.dir, &project.name, opts, &*vcs)?;
     } else {
-        let layout = layout::resolve_layout(config)?;
+        let layout = cfg.resolve()?;
         session::run(
             name.unwrap_or(&project.name),
             layout.path(),
             &project.dir,
             session.new_session,
-            &layout_content,
+            &cfg.layout,
             config.unwrap_or("default"),
         )?;
     }
