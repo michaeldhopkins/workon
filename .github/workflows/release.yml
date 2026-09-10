@@ -263,3 +263,14 @@ jobs:
           repository: michaeldhopkins/homebrew-tap
           event-type: update-formula
           client-payload: '{"formula": "workon", "repo": "michaeldhopkins/workon", "version": "${{ needs.check-version.outputs.version }}"}'
+
+      - name: Trigger michaeldhopkins.com release index update
+        if: env.SITE_TOKEN != ''
+        env:
+          SITE_TOKEN: ${{ secrets.SITE_GITHUB_TOKEN }}
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.SITE_GITHUB_TOKEN }}
+          repository: michaeldhopkins/michaeldhopkins.com
+          event-type: release-published
+          client-payload: '{"repo": "michaeldhopkins/workon", "version": "${{ needs.check-version.outputs.version }}"}'
