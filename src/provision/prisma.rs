@@ -76,7 +76,7 @@ impl Provisioner for Prisma {
 
 /// The `provider` inside the `datasource` block (postgresql/mysql/sqlite/…),
 /// ignoring the `generator`'s `provider = "prisma-client-js"`.
-fn datasource_provider(schema: &str) -> Option<String> {
+pub(crate) fn datasource_provider(schema: &str) -> Option<String> {
     const DB_PROVIDERS: &[&str] = &["postgresql", "mysql", "sqlite", "sqlserver", "cockroachdb", "mongodb"];
     for line in schema.lines() {
         let line = line.trim();
@@ -91,7 +91,7 @@ fn datasource_provider(schema: &str) -> Option<String> {
 }
 
 /// The env var name from `url = env("NAME")` (usually `DATABASE_URL`).
-fn url_env_var(schema: &str) -> Option<String> {
+pub(crate) fn url_env_var(schema: &str) -> Option<String> {
     let after = schema.split("env(").nth(1)?;
     let inner = after.split(')').next()?;
     Some(inner.trim().trim_matches('"').to_string())

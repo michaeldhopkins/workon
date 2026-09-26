@@ -1,0 +1,5 @@
+[alembic]
+script_location = alembic
+# Left blank on purpose: env.py sets it from DATABASE_URL (the idiomatic way to
+# make Alembic honor an injected URL), which is what lets workon isolate the DB.
+sqlalchemy.url =

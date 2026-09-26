@@ -1,0 +1,106 @@
+name: Fuzz replay
+
+# The gate half of the fuzzing program. `fuzz.yml`, a burst on each push to main, is
+# the half that explores.
+#
+# Replay every input the bursts have accumulated against the code as it stands. It is
+# deterministic (same corpus, same answer, no "it got lucky on push #47"), it takes
+# minutes, and it answers the question a per-push job should answer: did this change
+# break a path we already explored?
+#
+# Read-only with respect to the corpus cache: `fuzz.yml` owns the canonical corpus, so
+# nothing here writes it back. These restores also keep the cache inside GitHub's 7-day
+# eviction window between bursts. On a cache miss the replay still runs the committed
+# `seed-*` inputs, so a fresh branch is never blocked.
+on:
+  # A docs-only change cannot change what a target does: nothing fuzzed reads Markdown or
+  # docs. No branch rule requires this check, so a skipped run blocks nothing.
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  TRIPLE: x86_64-unknown-linux-gnu
+
+jobs:
+  replay:
+    name: Replay ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false # one target regressing must not hide the others
+      matrix:
+        target: [layout_inject, repo_and_tool_text, ps_tree, encoders]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      # The build dominates this job's wall clock — nightly + sanitizer + instrumented
+      # std runs to minutes and dwarfs the replay itself — so caching it is what makes a
+      # per-push gate tolerable.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Build fuzz target
+        run: cargo +nightly fuzz build ${{ matrix.target }} --target "$TRIPLE"
+
+      # The corpus fuzz.yml saves under `fuzz-corpus-<target>-<run id>-<attempt>`; the
+      # prefix match restores the newest. Caches written on main are readable from PR
+      # branches.
+      - name: Restore corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # `-runs=0` executes each corpus input exactly once and exits: no mutation, no
+      # randomness. The committed `seed-*` inputs are in the tree, so this still gates
+      # something even on a cold cache.
+      - name: Replay corpus
+        run: |
+          set -euo pipefail
+          BIN="fuzz/target/$TRIPLE/release/${{ matrix.target }}"
+          mkdir -p fuzz/corpus/${{ matrix.target }} fuzz/artifacts/${{ matrix.target }}
+          COUNT=$(find fuzz/corpus/${{ matrix.target }} -type f | wc -l)
+          echo "Replaying $COUNT corpus inputs"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::notice::no corpus yet for ${{ matrix.target }} (fuzz.yml populates it) — replay skipped"
+            exit 0
+          fi
+          "$BIN" -runs=0 -timeout=25 -rss_limit_mb=4096 \
+            -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/ \
+            fuzz/corpus/${{ matrix.target }}
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-replay-findings-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+      # The replay already exits non-zero on a crash; this names the artifact kind and
+      # matches the check in fuzz.yml.
+      - name: Fail on crashes
+        if: always()
+        run: |
+          hits=$(find fuzz/artifacts -type f \( -name 'crash-*' -o -name 'timeout-*' -o -name 'oom-*' \) 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::fuzzing saved crash/timeout artifacts (see fuzz-replay-findings-${{ matrix.target }})"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "no crash/timeout/oom artifacts"

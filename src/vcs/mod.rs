@@ -1,5 +1,5 @@
 mod git;
-mod jj;
+pub(crate) mod jj;
 
 use std::path::Path;
 

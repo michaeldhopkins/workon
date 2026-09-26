@@ -11,14 +11,14 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use vcs_runner::Cmd;
 
-mod alembic;
+pub(crate) mod alembic;
 mod django;
-mod ef_core;
-mod laravel;
-mod phoenix;
-mod prisma;
+pub(crate) mod ef_core;
+pub(crate) mod laravel;
+pub(crate) mod phoenix;
+pub(crate) mod prisma;
 mod python_venv;
-mod rails;
+pub(crate) mod rails;
 
 pub trait Provisioner: Send + Sync {
     fn name(&self) -> &'static str;
@@ -155,7 +155,7 @@ fn env_host(var: &str, default: &str) -> String {
     if host.is_empty() || host.starts_with('/') { default.to_string() } else { host }
 }
 
-fn auth_prefix(user: &str, password: Option<String>) -> String {
+pub(crate) fn auth_prefix(user: &str, password: Option<String>) -> String {
     if user.is_empty() {
         // No username (PG*/MYSQL* user and $USER all unset) → no userinfo. Any
         // password is intentionally dropped: a password without a user isn't a
@@ -174,7 +174,7 @@ fn auth_prefix(user: &str, password: Option<String>) -> String {
 /// the `:` splits user/pass and the `@` ends the userinfo. Encodes every byte
 /// outside the RFC 3986 unreserved set, which is always safe (over-encoding a
 /// sub-delim just decodes back).
-fn percent_encode_userinfo(s: &str) -> String {
+pub(crate) fn percent_encode_userinfo(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

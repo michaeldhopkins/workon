@@ -1,0 +1,5 @@
+workon {
+}
+layout {
+    pane command="opencode" focus=true
+}

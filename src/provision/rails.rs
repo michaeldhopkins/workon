@@ -71,7 +71,7 @@ impl Provisioner for Rails {
 
 /// The first `adapter:` value in `database.yml` (usually under `default:`),
 /// e.g. `postgresql`, `mysql2`, `sqlite3`.
-fn adapter(database_yml: &str) -> Option<String> {
+pub(crate) fn adapter(database_yml: &str) -> Option<String> {
     database_yml.lines().find_map(|l| {
         let v = l.trim().strip_prefix("adapter:")?.trim();
         (!v.is_empty()).then(|| v.to_string())

@@ -57,7 +57,7 @@ impl Provisioner for Alembic {
 
 /// The `sqlalchemy.url` value from `alembic.ini`, if non-empty. Blank means the
 /// project drives it from env (`env.py`), which we treat as "manage it".
-fn configured_url(ini: &str) -> Option<String> {
+pub(crate) fn configured_url(ini: &str) -> Option<String> {
     ini.lines().find_map(|l| {
         let v = l.trim().strip_prefix("sqlalchemy.url")?.trim_start_matches(['=', ' ']).trim();
         (!v.is_empty()).then(|| v.to_string())

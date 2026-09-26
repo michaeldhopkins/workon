@@ -1150,7 +1150,7 @@ fn generate_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn slugify(text: &str) -> String {
+pub(crate) fn slugify(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
         .collect::<String>()
