@@ -150,7 +150,7 @@ pub(crate) fn init_jj(project_dir: &Path) -> Result<()> {
 ///
 /// Strips trailing `*` (out-of-sync with tracked remote) and `?` (conflict)
 /// markers that jj's `bookmarks` template appends to the name.
-fn first_real_bookmark(raw: &str) -> &str {
+pub(crate) fn first_real_bookmark(raw: &str) -> &str {
     raw.split_whitespace()
         .map(|b| b.trim_end_matches(['*', '?']))
         .find(|b| !b.is_empty() && !b.ends_with("@git"))

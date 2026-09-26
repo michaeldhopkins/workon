@@ -15,3 +15,7 @@ pub mod session;
 pub mod trust;
 pub mod vcs;
 pub mod workspace;
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz_api;

@@ -84,7 +84,7 @@ impl Provisioner for Phoenix {
 /// otherwise Postgres silently truncates the created name and the (full) name we
 /// record for teardown no longer matches it, breaking isolation. workon owns the
 /// partition, so capping it keeps the created and recorded names identical.
-fn partition_for(app: &str, ws_id: &str) -> String {
+pub(crate) fn partition_for(app: &str, ws_id: &str) -> String {
     let sanitized: String =
         ws_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
     let raw = format!("_{sanitized}");
@@ -101,7 +101,7 @@ fn partition_for(app: &str, ws_id: &str) -> String {
 /// and the match must be at a token boundary (so `myapp:`/`apps_path:` don't
 /// count). An umbrella root, which has only `apps_path:`, yields `None` — a
 /// graceful no-op.
-fn app_name(mix: &str) -> Option<String> {
+pub(crate) fn app_name(mix: &str) -> Option<String> {
     for raw in mix.lines() {
         let line = raw.split('#').next().unwrap_or(raw); // drop a trailing/whole-line comment
         for (idx, _) in line.match_indices("app:") {

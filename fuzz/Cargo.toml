@@ -1,0 +1,61 @@
+# Standalone workspace (see the empty `[workspace]` below): the root
+# `cargo build` / `test` / `clippy` / `deny` never see it, so the main crate stays
+# on stable while this builds only under `cargo fuzz`, which needs nightly for
+# `-Zsanitizer`.
+
+[package]
+name = "workon-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The same KDL v1 parser workon (and zellij) use, as the oracle for what an
+# injected layout reads back as.
+kdl = "4"
+# Oracles for the encoders: a URL parser for the database URL's credentials, a
+# regex engine for the pgrep pattern.
+url = "2"
+percent-encoding = "2"
+regex = "1"
+
+[dependencies.workon]
+path = ".."
+
+[workspace]
+
+# Line-level debug info so a crash stack trace names the workon function.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "layout_inject"
+path = "fuzz_targets/layout_inject.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repo_and_tool_text"
+path = "fuzz_targets/repo_and_tool_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ps_tree"
+path = "fuzz_targets/ps_tree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encoders"
+path = "fuzz_targets/encoders.rs"
+test = false
+doc = false
+bench = false

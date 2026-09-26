@@ -1,0 +1,6 @@
+    1     0 /sbin/launchd
+  345     1 /usr/libexec/logd
+ 1042  1040 -/opt/homebrew/bin/zsh
+ 2553  1042 claude
+ 2601  2553 npm exec @playwright/mcp@latest --headless
+ 2700  2553 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper

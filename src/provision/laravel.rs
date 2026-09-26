@@ -66,7 +66,7 @@ impl Provisioner for Laravel {
 
 /// The `DB_CONNECTION` test value from `phpunit.xml`
 /// (`<env name="DB_CONNECTION" value="X"/>`).
-fn phpunit_db_connection(xml: &str) -> Option<String> {
+pub(crate) fn phpunit_db_connection(xml: &str) -> Option<String> {
     let line = xml.lines().find(|l| l.contains("DB_CONNECTION"))?;
     let value = line.split("value=").nth(1)?.trim().trim_start_matches('"');
     value.split('"').next().map(str::to_string)

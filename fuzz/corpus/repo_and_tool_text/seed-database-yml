@@ -1,0 +1,5 @@
+# The provisioner injects the isolated test DB via DATABASE_URL + RAILS_ENV=test,
+# which overrides these values; the name here is only a placeholder.
+test:
+  adapter: postgresql
+  database: workon_rails_fixture_placeholder

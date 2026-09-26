@@ -53,7 +53,7 @@ fn install_hint(name: &str) -> &'static str {
 /// `// pane command="foo"` will still surface `foo` as a required dependency.
 /// Acceptable trade-off — a real KDL parser would be overkill for the dep
 /// pre-check, and users who want to disable a pane should remove the line.
-fn extract_commands(layout: &str) -> Vec<String> {
+pub(crate) fn extract_commands(layout: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for line in layout.lines() {
         let mut rest = line;
@@ -103,7 +103,7 @@ fn check_version(name: &str, path: &std::path::Path) -> Option<String> {
     None
 }
 
-fn parse_major_minor(version: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_major_minor(version: &str) -> Option<(u32, u32)> {
     let mut parts = version.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;

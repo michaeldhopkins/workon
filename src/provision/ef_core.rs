@@ -108,7 +108,7 @@ fn package_refs(ws_dir: &Path) -> Vec<String> {
 }
 
 /// The `Include="…"` / `Include='…'` attribute value within a single element's tag.
-fn include_value(tag: &str) -> Option<String> {
+pub(crate) fn include_value(tag: &str) -> Option<String> {
     let after = tag.split("Include=").nth(1)?.trim_start();
     let quote = after.chars().next()?;
     if quote != '"' && quote != '\'' {
@@ -176,7 +176,7 @@ fn npgsql_connection_string(name: &str) -> String {
 /// with `;`, `=`, a quote, or surrounding space would otherwise terminate the
 /// pair early or be trimmed; wrap it in single quotes (doubling any embedded
 /// single quote), which Npgsql parses back verbatim.
-fn npgsql_value(v: &str) -> String {
+pub(crate) fn npgsql_value(v: &str) -> String {
     let needs_quoting =
         v.is_empty() || v.starts_with(' ') || v.ends_with(' ') || v.chars().any(|c| matches!(c, ';' | '=' | '\'' | '"'));
     if needs_quoting {

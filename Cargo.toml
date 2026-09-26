@@ -52,3 +52,7 @@ collapsible-if = "deny"
 too-many-arguments = "deny"
 needless-range-loop = "deny"
 extend_with_drain = "deny"
+
+[lints.rust]
+# `cargo fuzz` builds with `--cfg fuzzing`, which gates `src/fuzz_api.rs`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

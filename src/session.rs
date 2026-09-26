@@ -88,7 +88,7 @@ fn running_descendant_commands(name: &str) -> Result<HashSet<String>> {
 /// from `root_pid` and returns the set of basenames of all descendants.
 /// Cross-platform: macOS prints full paths in `comm`; Linux prints basenames.
 /// We strip leading directories defensively.
-fn parse_descendants(ps_stdout: &str, root_pid: u32) -> HashSet<String> {
+pub(crate) fn parse_descendants(ps_stdout: &str, root_pid: u32) -> HashSet<String> {
     let mut by_ppid: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
     for line in ps_stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -243,7 +243,7 @@ fn zellij_version() -> Result<String> {
 /// tail covers both real zellij (no trailing argv) and our tests' decoys
 /// (extra argv after the path); the leading `/` keeps `foo` from matching
 /// `foo-bar` substrings.
-fn anchored_server_pattern(name: &str) -> String {
+pub(crate) fn anchored_server_pattern(name: &str) -> String {
     format!("zellij --server .*/{}([[:space:]]|$)", regex_escape(name))
 }
 
