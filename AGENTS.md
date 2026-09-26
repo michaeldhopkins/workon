@@ -34,6 +34,7 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - Clippy lints configured in `Cargo.toml` under `[lints.clippy]` — several are set to `deny`
 - `cargo-deny` config in `deny.toml`
 - Changelog generation via `git-cliff` (`cliff.toml`)
+- `tests/file_length.rs` fails when a file under `src` passes 400 production lines (inline test modules are not counted). Files already over are pinned at their size and may only shrink; new code goes in a new module, never into a pinned file.
 
 ## Release process
 
