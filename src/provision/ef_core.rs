@@ -173,12 +173,15 @@ fn npgsql_connection_string(name: &str) -> String {
 }
 
 /// Quote a value for an ADO.NET/Npgsql `key=value;…` connection string. A value
-/// with `;`, `=`, a quote, or surrounding space would otherwise terminate the
-/// pair early or be trimmed; wrap it in single quotes (doubling any embedded
-/// single quote), which Npgsql parses back verbatim.
+/// with `;`, `=`, a quote or a control character, or with surrounding whitespace
+/// of any kind (ADO.NET trims with `char.IsWhiteSpace`), would otherwise
+/// terminate the pair early or be trimmed; wrap it in single quotes (doubling any
+/// embedded single quote), which Npgsql parses back verbatim.
 pub(crate) fn npgsql_value(v: &str) -> String {
-    let needs_quoting =
-        v.is_empty() || v.starts_with(' ') || v.ends_with(' ') || v.chars().any(|c| matches!(c, ';' | '=' | '\'' | '"'));
+    let needs_quoting = v.is_empty()
+        || v.starts_with(char::is_whitespace)
+        || v.ends_with(char::is_whitespace)
+        || v.chars().any(|c| c.is_control() || matches!(c, ';' | '=' | '\'' | '"'));
     if needs_quoting {
         format!("'{}'", v.replace('\'', "''"))
     } else {
@@ -198,6 +201,17 @@ mod tests {
         assert_eq!(npgsql_value("pa'ss"), "'pa''ss'");
         assert_eq!(npgsql_value(" leading"), "' leading'");
         assert_eq!(npgsql_value("a=b"), "'a=b'");
+    }
+
+    #[test]
+    fn npgsql_value_quotes_any_surrounding_whitespace_and_control_characters() {
+        // ADO.NET trims an unquoted value with char.IsWhiteSpace, not just ' ', and
+        // ends one at a control character. Found by the `encoders` fuzz target.
+        assert_eq!(npgsql_value("\u{a0}pw"), "'\u{a0}pw'");
+        assert_eq!(npgsql_value("pw\t"), "'pw\t'");
+        assert_eq!(npgsql_value("\u{2003}pw"), "'\u{2003}pw'");
+        assert_eq!(npgsql_value("p\u{1}w"), "'p\u{1}w'");
+        assert_eq!(npgsql_value("inner space"), "inner space");
     }
 
     #[test]
