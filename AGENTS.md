@@ -90,8 +90,11 @@ fixtures under `tests/fixtures/`.
   own environment, and there is no quoting that makes a malformed host valid.
 
 **Not fuzzed, and why.**
-- `~/.claude.json` and `.workon.json`: parsed with `serde_json` into `Value` or
-  derived structs, with no hand-written parsing to fuzz.
+- `~/.claude.json`, `.workon.json` and `mise env --json`: parsed with
+  `serde_json` into `Value` or derived structs, with no hand-written parsing to
+  fuzz. `mise env` is read as JSON because its shell form quotes values for a
+  shell (`'it'\''s'`) and spreads a multi-line value over several lines; the
+  line parser it replaced corrupted both (captured 2026-09-26, mise 2026.2.21).
 - `trusted.toml`: parsed by `toml` into a derived struct.
 - vcs-runner's own parsing: that crate is fuzzed in its own repo.
 - `python_venv` repair reads and rewrites files on disk by plain substring

@@ -949,8 +949,8 @@ fn do_copy_files(
 
 
 fn mise_env(dir: &Path) -> HashMap<String, String> {
-    match Cmd::new("mise").arg("env").in_dir(dir).run() {
-        Ok(output) => parse_mise_env_output(&output.stdout_lossy()),
+    match Cmd::new("mise").args(["env", "--json"]).in_dir(dir).run() {
+        Ok(output) => parse_mise_env_json(&output.stdout_lossy()),
         Err(_) => HashMap::new(),
     }
 }
@@ -965,16 +965,11 @@ fn session_launch_env(ws_dir: &Path) -> HashMap<String, String> {
     vars
 }
 
-fn parse_mise_env_output(output: &str) -> HashMap<String, String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.strip_prefix("export ")?;
-            let (key, value) = line.split_once('=')?;
-            let value = value.trim_matches('\'').trim_matches('"');
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect()
+/// JSON, not the shell form: that quotes each value for a shell (`'it'\''s'`) and
+/// prints a multi-line value over several lines, so reading it back needs a shell.
+fn parse_mise_env_json(output: &str) -> HashMap<String, String> {
+    let map: HashMap<String, serde_json::Value> = serde_json::from_str(output).unwrap_or_default();
+    map.into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect()
 }
 
 fn trust_mise_configs(ws_dir: &Path) -> Result<()> {
@@ -2106,18 +2101,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_mise_env_output_extracts_vars() {
-        let output = "\
-export PATH='/usr/local/bin:/usr/bin'
-export RUBY_ROOT=/home/user/.mise/installs/ruby/4.0.1
-export COMPOSER_HOME=\"/home/user/.composer\"
-not an export line
-";
-        let vars = parse_mise_env_output(output);
+    fn parse_mise_env_json_keeps_values_verbatim() {
+        // Captured from `mise env --json` (mise 2026.2.21). The shell form of the same
+        // env printed `'it'\''s'`, `'say "hi"'` and a value split over two lines,
+        // which the old line parser read back as `it'\''s`, `say "hi` and `line1`.
+        let output = r#"{
+  "PATH": "/usr/local/bin:/usr/bin",
+  "W_DQUOTE": "say \"hi\"",
+  "W_EMPTY": "",
+  "W_NL": "line1\nline2",
+  "W_SQUOTE": "it's",
+  "W_TRAILQ": "x'"
+}"#;
+        let vars = parse_mise_env_json(output);
         assert_eq!(vars.get("PATH").unwrap(), "/usr/local/bin:/usr/bin");
-        assert_eq!(vars.get("RUBY_ROOT").unwrap(), "/home/user/.mise/installs/ruby/4.0.1");
-        assert_eq!(vars.get("COMPOSER_HOME").unwrap(), "/home/user/.composer");
-        assert!(!vars.contains_key("not"));
+        assert_eq!(vars.get("W_DQUOTE").unwrap(), "say \"hi\"");
+        assert_eq!(vars.get("W_EMPTY").unwrap(), "");
+        assert_eq!(vars.get("W_NL").unwrap(), "line1\nline2");
+        assert_eq!(vars.get("W_SQUOTE").unwrap(), "it's");
+        assert_eq!(vars.get("W_TRAILQ").unwrap(), "x'");
+        assert_eq!(vars.len(), 6);
+    }
+
+    #[test]
+    fn parse_mise_env_json_ignores_non_strings_and_bad_output() {
+        let vars = parse_mise_env_json(r#"{"A": "a", "B": 1, "C": null}"#);
+        assert_eq!(vars, HashMap::from([("A".to_string(), "a".to_string())]));
+        assert!(parse_mise_env_json("export A=a\n").is_empty(), "shell-form output is not JSON");
+        assert!(parse_mise_env_json("").is_empty());
     }
 
     #[test]
