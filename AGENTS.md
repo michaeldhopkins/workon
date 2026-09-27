@@ -63,6 +63,14 @@ function gets a wrapper there.
 | `ps_tree` | structural invariant | A process table built from the input (three bytes per process: parent, name, `comm` form) is rendered as `ps -A -o pid=,ppid=,comm=` and parsed; the result is exactly the names reachable from the root. Parents may cycle. |
 | `encoders` | roundtrip | For fuzzed `a\0b\0c\0d`: the test DB name and Phoenix partition are identifiers within Postgres's 63 bytes and keep the ws id; `postgresql://user:pass@host:port/db` reads back (via the `url` crate) as exactly that user, password, host (IPv6 included) and port; the whole Npgsql connection string (host, port, user, password) reads back field for field under the ADO.NET rules; the `pgrep` pattern matches this session's server and not a name one character off; slugs are `[a-z0-9-]`, have no empty segments, and are idempotent. |
 
+**Bugs found, each with a unit test and a `seed-*`:**
+- `encoders` (2026-09-26): an Npgsql value with leading or trailing non-ASCII
+  whitespace went unquoted, and ADO.NET trims it.
+- `layout_inject` (2026-09-27, first CI burst): kdl 4.7.1 panics building the
+  error for `(true` (an unclosed type annotation at the end of input), so a
+  malformed config crashed workon instead of being reported. `layout::parse_kdl`
+  turns the panic into the parse error; kdl 4.x has no newer release to take.
+
 **Where the `comm` forms come from.** `ps` output captured on macOS
 (2026-09-26): a bare `claude`, full paths, a login shell as
 `-/opt/homebrew/bin/zsh`, an app-bundle path with spaces, and argv-like entries
