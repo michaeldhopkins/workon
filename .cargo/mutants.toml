@@ -1,0 +1,28 @@
+# cargo-mutants configuration. Method: the `rust-mutation-testing` skill;
+# workon's specifics (slice count, findings, why each exclusion) are in AGENTS.md.
+
+# Copy only what a fresh clone has. Without this every build directory gets
+# fuzz/target (1.1G) and the fixtures' installed deps (node_modules, vendor,
+# .venv: 466M), and a local run no longer matches CI, which has neither.
+gitignore = true
+
+exclude_globs = [
+    # Compiled only under `--cfg fuzzing` (cargo-fuzz). `cargo test` never
+    # builds it, so every mutant here would compile, run nothing and read MISSED.
+    "src/fuzz_api.rs",
+]
+
+exclude_re = [
+    # Code whose effect only a live database server can show. Without Postgres
+    # or MySQL every path through these returns the same empty `Setup` (or does
+    # nothing), so a mutant cannot change anything a test can observe. They are
+    # asserted by the DB-gated cycle tests, which run in ci.yml's `provisioners`
+    # job with Postgres, MySQL and one toolchain per fixture ecosystem; the
+    # mutants jobs have none of that, and the pure helpers these call (adapter
+    # parsing, test_db_name, the URL and connection-string encoders) are still
+    # mutated.
+    'DbEngine::create',
+    'Resource::teardown',
+    'replace mysqladmin ',
+    '<impl Provisioner for (Rails|Prisma|Alembic|Django|Laravel|EfCore|Phoenix)>::setup',
+]
