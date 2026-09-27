@@ -64,3 +64,15 @@ would bake in the wrong abstraction.
   `{name}` first — the `-w` flow would supply the capitalized tab name
   (`Uptime-thing`) while a plain session supplies the project dir name
   (`uptime-thing`), and those should not diverge on a phone screen.
+
+## The generated `postgresql://` URL names no driver
+
+SQLAlchemy 2.1 changed what a bare `postgresql://` means: it now loads psycopg
+(v3) where 2.0 loaded psycopg2. The Alembic fixture broke on exactly this in CI
+on 2026-09-27 (it installed only psycopg2-binary and resolved SQLAlchemy 2.1.1);
+the fixture is now pinned. A real project on SQLAlchemy 2.1 that still uses
+psycopg2 gets the same failure from the `DATABASE_URL` workon writes, because
+workon replaces the project's URL, driver suffix and all. Options: keep a
+`+driver` suffix from a URL the project already configures, or read which of
+psycopg/psycopg2 the venv has. Undecided; `run_step` at least prints the failure
+now.
