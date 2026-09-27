@@ -216,3 +216,46 @@ fn invalid_config_name_with_path_traversal_is_rejected() {
         .failure()
         .stderr(predicate::str::contains("invalid config name"));
 }
+
+/// `workon create --json` in a fresh repo, with HOME pointed at `root` so the
+/// worktree and `~/.claude.json` land in the tempdir. Returns the ws_id.
+fn create_ws_id(root: &Path, name: &str) -> String {
+    let proj = root.join("proj");
+    if !proj.exists() {
+        std::fs::create_dir(&proj).unwrap();
+        git(&proj, &["init", "-q", "-b", "main"]);
+        git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        // The git backend (used when jj is not on PATH) branches from
+        // `origin/<trunk>`, so the repo needs a remote carrying main.
+        let origin = root.join("origin.git");
+        git(root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(&proj, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&proj, &["push", "-q", "origin", "main"]);
+    }
+    let out = cargo_bin_cmd!("workon")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .current_dir(&proj)
+        .args(["create", "--name", name, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    json["ws_id"].as_str().unwrap().to_string()
+}
+
+/// `--name` becomes the ws_id's label, and `--name ""` means no name: a bare
+/// `ws-xxxxxx` rather than one ending in an empty `-` label.
+#[test]
+fn create_name_labels_the_ws_id_and_empty_name_is_no_name() {
+    let home = tempfile::tempdir().unwrap();
+    let labelled = create_ws_id(home.path(), "Fix Bug");
+    assert!(labelled.starts_with("ws-") && labelled.ends_with("-fix-bug"), "{labelled}");
+    assert_eq!(labelled.len(), "ws-abcdef-fix-bug".len(), "{labelled}");
+
+    let unnamed = create_ws_id(home.path(), "");
+    assert_eq!(unnamed.len(), "ws-abcdef".len(), "{unnamed}");
+    assert!(unnamed.starts_with("ws-") && !unnamed.ends_with('-'), "{unnamed}");
+}

@@ -23,7 +23,7 @@ fn run_subcommand(command: cli::Command) -> Result<()> {
             let vcs = vcs::detect(&project.dir)?;
             let args = workspace::CreateArgs {
                 skip_copy_ignored,
-                name: name.as_deref().filter(|s| !s.is_empty()),
+                name: cli::given_name(name.as_deref()),
                 config: config.as_deref(),
                 json,
             };
@@ -62,8 +62,7 @@ fn run_session(session: cli::SessionArgs) -> Result<()> {
         cfg.ensure_single_agent_pane()?;
     }
 
-    // Treat `--name ""` as no name so it falls back to the default.
-    let name = session.name.as_deref().filter(|s| !s.is_empty());
+    let name = cli::given_name(session.name.as_deref());
 
     if session.workspace {
         let vcs = vcs::detect(&project.dir)?;
