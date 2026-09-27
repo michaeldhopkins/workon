@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
+use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
 
 /// The connection-string key EF's `ConnectionStrings__<Name>` overrides. Real
 /// projects vary; `Default` is the common convention.
@@ -70,7 +70,7 @@ impl Provisioner for EfCore {
         for (k, v) in ctx.mise_vars {
             cmd = cmd.env(k, v);
         }
-        let _ = cmd.run();
+        run_step(cmd, "dotnet ef database update");
 
         Ok(Setup { resources: vec![resource], env: vec![(env_key, conn)], ..Setup::default() })
     }

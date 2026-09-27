@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, venv_python, DbEngine, ProvisionCtx, Provisioner, Setup};
+use super::{test_db_name, venv_python, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
 
 pub struct Alembic;
 
@@ -49,7 +49,7 @@ impl Provisioner for Alembic {
         for (k, v) in ctx.mise_vars {
             cmd = cmd.env(k, v);
         }
-        let _ = cmd.run();
+        run_step(cmd, "alembic upgrade head");
 
         Ok(Setup { resources: vec![resource], env: vec![("DATABASE_URL".to_string(), url)], ..Setup::default() })
     }

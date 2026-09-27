@@ -166,6 +166,19 @@ pub(crate) fn url_authority(host: &str, port: Option<&str>) -> String {
     }
 }
 
+/// Run a setup step (a migration, a client generate) whose failure does not stop
+/// provisioning but must be seen: swallowed, a failed migration leaves a workspace
+/// that looks provisioned and has no schema. Returns whether it succeeded.
+pub(crate) fn run_step(cmd: Cmd, what: &str) -> bool {
+    match cmd.run() {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("Warning: {what} failed: {e}");
+            false
+        }
+    }
+}
+
 fn env_host(var: &str, default: &str) -> String {
     let host = std::env::var(var).unwrap_or_default();
     if host.is_empty() || host.starts_with('/') { default.to_string() } else { host }
@@ -262,6 +275,13 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_step_reports_whether_the_step_succeeded() {
+        assert!(run_step(Cmd::new("true"), "a passing step"));
+        assert!(!run_step(Cmd::new("false"), "a failing step"));
+        assert!(!run_step(Cmd::new("workon-no-such-binary"), "a missing tool"));
+    }
 
     #[test]
     fn postgres_url_carries_pgport_and_brackets_an_ipv6_host() {
