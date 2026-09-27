@@ -61,7 +61,7 @@ function gets a wrapper there.
 | `layout_inject` | roundtrip + structural | A config (`layout\0arg\0arg…`) that parses yields a zellij layout that parses with no `workon` block. Injecting args keeps one agent pane and the same pane commands, leaves every other pane byte-identical, and the agent pane's first `args` node reads back as its old entries followed by exactly the injected args. With no agent pane, injection changes nothing. The oracle is the kdl 4 crate, the KDL v1 parser zellij also uses. |
 | `repo_and_tool_text` | never-panics + shape | Every parser over a repo file (`database.yml`, `schema.prisma`, `phpunit.xml`, `alembic.ini`, `mix.exs`, a `.csproj` tag), `jj log -T bookmarks`, `<tool> --version`, raw `ps` text, and a layout's lines. The `mix.exs` app name is an identifier; the trunk bookmark is one word of the input without `*`/`?`/`@git`; layout commands are non-empty, quote-free and unique. |
 | `ps_tree` | structural invariant | A process table built from the input (three bytes per process: parent, name, `comm` form) is rendered as `ps -A -o pid=,ppid=,comm=` and parsed; the result is exactly the names reachable from the root. Parents may cycle. |
-| `encoders` | roundtrip | For fuzzed `a\0b`: the test DB name and Phoenix partition are identifiers within Postgres's 63 bytes and keep the ws id; `postgresql://user:pass@localhost/db` reads back (via the `url` crate) as exactly that user, password and host; an Npgsql connection-string value reads back unchanged under the ADO.NET rules; the `pgrep` pattern matches this session's server and not a name one character off; slugs are `[a-z0-9-]`, have no empty segments, and are idempotent. |
+| `encoders` | roundtrip | For fuzzed `a\0b\0c\0d`: the test DB name and Phoenix partition are identifiers within Postgres's 63 bytes and keep the ws id; `postgresql://user:pass@host:port/db` reads back (via the `url` crate) as exactly that user, password, host (IPv6 included) and port; the whole Npgsql connection string (host, port, user, password) reads back field for field under the ADO.NET rules; the `pgrep` pattern matches this session's server and not a name one character off; slugs are `[a-z0-9-]`, have no empty segments, and are idempotent. |
 
 **Where the `comm` forms come from.** `ps` output captured on macOS
 (2026-09-26): a bare `claude`, full paths, a login shell as
@@ -85,9 +85,12 @@ fixtures under `tests/fixtures/`.
   element of a socket). The `pgrep` oracle is Rust's `regex`, not POSIX ERE; the
   two agree on every character `regex_escape` escapes.
 - `layout_inject` checks what kdl reads back, not what zellij does with it.
-- `PGHOST`/`PGPORT` go into the Npgsql string and database URL unquoted; a host
-  containing `;` or `/` would break them. Not fuzzed: those come from the user's
-  own environment, and there is no quoting that makes a malformed host valid.
+- The URL's host is drawn from IPv6 literals and `[A-Za-z0-9.-]` names: a
+  `PGHOST` with other characters is not a host libpq could reach either. The
+  Npgsql string takes any host and port text, since it quotes every field.
+- Known limits, not bugs: a socket-path `PGHOST` becomes `localhost` in the URL
+  and Npgsql string (URL-driven clients need TCP), and a libpq multi-host
+  `PGHOST` (`h1,h2`) is passed through as one host.
 
 **Not fuzzed, and why.**
 - `~/.claude.json`, `.workon.json` and `mise env --json`: parsed with
@@ -95,6 +98,9 @@ fixtures under `tests/fixtures/`.
   fuzz. `mise env` is read as JSON because its shell form quotes values for a
   shell (`'it'\''s'`) and spreads a multi-line value over several lines; the
   line parser it replaced corrupted both (captured 2026-09-26, mise 2026.2.21).
+  `--json` is in every release named `mise` (checked at tag v2024.1.0, the first
+  after the rename from rtx), so there is no fallback; output that is not JSON
+  prints a warning rather than silently dropping the env (`src/mise_env.rs`).
 - `trusted.toml`: parsed by `toml` into a derived struct.
 - vcs-runner's own parsing: that crate is fuzzed in its own repo.
 - `python_venv` repair reads and rewrites files on disk by plain substring
