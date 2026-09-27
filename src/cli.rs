@@ -105,3 +105,21 @@ pub enum Command {
         reference: Option<String>,
     },
 }
+
+/// `--name ""` counts as no name, so the caller falls back to its default
+/// (the directory name, or an unlabelled ws_id).
+pub fn given_name(name: Option<&str>) -> Option<&str> {
+    name.filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_name_is_no_name() {
+        assert_eq!(given_name(Some("fix-bug")), Some("fix-bug"));
+        assert_eq!(given_name(Some("")), None);
+        assert_eq!(given_name(None), None);
+    }
+}
