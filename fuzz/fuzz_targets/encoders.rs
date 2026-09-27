@@ -1,11 +1,13 @@
 //! Names and credentials workon writes into something else's syntax: a database
-//! name, a Phoenix test partition, the user and password in a database URL, a
-//! value in an Npgsql connection string, the `pgrep` pattern that finds a
-//! session's zellij server, and a workspace slug.
+//! name, a Phoenix test partition, the user, password, host and port in a
+//! database URL, the fields of an Npgsql connection string, the `pgrep` pattern
+//! that finds a session's zellij server, and a workspace slug.
 //!
-//! Input: `a\0b`. Each value comes from somewhere workon does not control: a
+//! Input: `a\0b\0c\0d`. Each value comes from somewhere workon does not control: a
 //! project directory's name, a `--name` label, a `mix.exs` app name, `PGUSER` /
-//! `PGPASSWORD` / `MYSQL_PWD`. Each check fixes the frame and fuzzes the value,
+//! `PGPASSWORD` / `PGHOST` / `PGPORT`. `d` is the Npgsql port as text; the URL's
+//! port is a number derived from its length, and absent when `d` is. Each check
+//! fixes the frame and fuzzes the value,
 //! then reads the result back with an independent parser and asserts exact
 //! equality.
 #![no_main]
@@ -16,12 +18,17 @@ use workon::fuzz_api as w;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else { return };
-    let (a, b) = text.split_once('\0').unwrap_or((text, ""));
+    let mut parts = text.splitn(4, '\0');
+    let a = parts.next().unwrap_or_default();
+    let b = parts.next().unwrap_or_default();
+    let c = parts.next().unwrap_or_default();
+    let d = parts.next();
+    let port = d.map(|d| (d.len() * 7919 % 65536) as u16);
 
     db_name(a, b);
     partition(a, b);
-    url_credentials(a, b);
-    npgsql(b);
+    url_credentials(a, b, c, port);
+    npgsql(c, d.unwrap_or_default(), a, b);
     server_pattern(a);
     slug(a);
 });
@@ -57,13 +64,30 @@ fn partition(app: &str, ws_id: &str) {
     }
 }
 
-/// `postgresql://{user}:{password}@localhost/db` must read back as exactly that
-/// user, password and host, whatever the credentials hold.
-fn url_credentials(user: &str, password: &str) {
+/// A PGHOST as a real environment holds it: an IPv6 literal (unbracketed), or a
+/// name or IPv4 address. Other characters are dropped from the fuzzed text, since
+/// no server has such a host and libpq would reject it before workon's URL mattered.
+fn host_from(seed: &str) -> String {
+    if seed.parse::<std::net::Ipv6Addr>().is_ok() {
+        return seed.to_string();
+    }
+    let host: String = seed.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-').collect();
+    if host.is_empty() { "localhost".to_string() } else { host }
+}
+
+/// `postgresql://{user}:{password}@{host}[:{port}]/db` must read back as exactly
+/// that user, password, host and port, whatever the credentials hold.
+fn url_credentials(user: &str, password: &str, host_seed: &str, port: Option<u16>) {
+    let host = host_from(host_seed);
     let auth = w::auth_prefix(user, Some(password.to_string()));
-    let raw = format!("postgresql://{auth}localhost/db");
+    let port_text = port.map(|p| p.to_string());
+    let raw = w::postgres_url(&auth, &host, port_text.as_deref(), "db");
     let url = url::Url::parse(&raw).unwrap_or_else(|e| panic!("{raw:?} does not parse: {e}"));
-    assert_eq!(url.host_str(), Some("localhost"), "{raw:?}");
+    match host.parse::<std::net::Ipv6Addr>() {
+        Ok(ip) => assert_eq!(url.host(), Some(url::Host::Ipv6(ip)), "{raw:?}"),
+        Err(_) => assert_eq!(url.host_str(), Some(host.as_str()), "{raw:?}"),
+    }
+    assert_eq!(url.port(), port, "{raw:?}");
     assert_eq!(url.path(), "/db", "{raw:?}");
     let decode = |s: &str| percent_decode_str(s).decode_utf8().expect("utf8").into_owned();
     if user.is_empty() {
@@ -75,22 +99,27 @@ fn url_credentials(user: &str, password: &str) {
     assert_eq!(url.password().map(decode), expected, "{raw:?}");
 }
 
-/// A value placed between two other pairs must read back unchanged under the
-/// ADO.NET connection-string rules Npgsql uses (`DbConnectionStringBuilder`): a
-/// value may be wrapped in `'` or `"`, a doubled quote inside is one quote, and an
-/// unquoted value ends at `;` and has surrounding whitespace trimmed.
+/// The whole Npgsql connection string must read back field for field under the
+/// ADO.NET rules Npgsql uses (`DbConnectionStringBuilder`): a value may be wrapped
+/// in `'` or `"`, a doubled quote inside is one quote, and an unquoted value ends
+/// at `;` and has surrounding whitespace trimmed. Host and port come from the
+/// environment as much as the credentials do, so all four are fuzzed.
 ///
 /// Control characters are left out: how .NET treats one depends on where it sits,
-/// this oracle does not model that, and no credential in an environment variable
-/// carries one.
-fn npgsql(value: &str) {
-    if value.chars().any(char::is_control) {
+/// this oracle does not model that, and no environment value carries one.
+fn npgsql(host: &str, port: &str, user: &str, password: &str) {
+    if [host, port, user, password].iter().any(|v| v.chars().any(char::is_control)) {
         return;
     }
-    let conn = format!("Host=localhost;Username={};Port=5432", w::npgsql_value(value));
+    let conn = w::npgsql_connection_string(host, port, "app_test", user, Some(password));
     let pairs = parse_connection_string(&conn).unwrap_or_else(|e| panic!("{conn:?}: {e}"));
     let got: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    assert_eq!(got, [("Host", "localhost"), ("Username", value), ("Port", "5432")], "{conn:?}");
+    let port = if port.is_empty() { "5432" } else { port };
+    let mut expected = vec![("Host", host), ("Port", port), ("Database", "app_test"), ("Username", user)];
+    if !password.is_empty() {
+        expected.push(("Password", password));
+    }
+    assert_eq!(got, expected, "{conn:?}");
 }
 
 fn parse_connection_string(s: &str) -> Result<Vec<(String, String)>, String> {

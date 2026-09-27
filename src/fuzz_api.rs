@@ -51,9 +51,6 @@ pub fn percent_encode_userinfo(s: &str) -> String {
     crate::provision::percent_encode_userinfo(s)
 }
 
-pub fn npgsql_value(v: &str) -> String {
-    ef_core::npgsql_value(v)
-}
 
 pub fn anchored_server_pattern(name: &str) -> String {
     crate::session::anchored_server_pattern(name)
@@ -61,4 +58,12 @@ pub fn anchored_server_pattern(name: &str) -> String {
 
 pub fn slugify(text: &str) -> String {
     crate::workspace::slugify(text)
+}
+
+pub fn postgres_url(auth: &str, host: &str, port: Option<&str>, name: &str) -> String {
+    crate::provision::postgres_url(auth, host, port, name)
+}
+
+pub fn npgsql_connection_string(host: &str, port: &str, name: &str, user: &str, password: Option<&str>) -> String {
+    ef_core::npgsql_connection_string_from(host, port, name, user, password)
 }

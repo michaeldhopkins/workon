@@ -163,11 +163,24 @@ fn collect_csprojs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 fn npgsql_connection_string(name: &str) -> String {
     let host = std::env::var("PGHOST").unwrap_or_default();
     let host = if host.is_empty() || host.starts_with('/') { "localhost".to_string() } else { host };
-    let port = std::env::var("PGPORT").unwrap_or_else(|_| "5432".into());
+    let port = std::env::var("PGPORT").unwrap_or_default();
     let user = std::env::var("PGUSER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_default();
-    let mut conn = format!("Host={host};Port={port};Database={name};Username={}", npgsql_value(&user));
-    if let Some(pass) = std::env::var("PGPASSWORD").ok().filter(|p| !p.is_empty()) {
-        conn.push_str(&format!(";Password={}", npgsql_value(&pass)));
+    npgsql_connection_string_from(&host, &port, name, &user, std::env::var("PGPASSWORD").ok().as_deref())
+}
+
+/// Every value goes through [`npgsql_value`], host and port included: they come
+/// from the environment as much as the credentials do. An empty port means 5432.
+pub(crate) fn npgsql_connection_string_from(host: &str, port: &str, name: &str, user: &str, password: Option<&str>) -> String {
+    let port = if port.is_empty() { "5432" } else { port };
+    let mut conn = format!(
+        "Host={};Port={};Database={};Username={}",
+        npgsql_value(host),
+        npgsql_value(port),
+        npgsql_value(name),
+        npgsql_value(user)
+    );
+    if let Some(pass) = password.filter(|p| !p.is_empty()) {
+        conn.push_str(&format!(";Password={}", npgsql_value(pass)));
     }
     conn
 }
@@ -201,6 +214,19 @@ mod tests {
         assert_eq!(npgsql_value("pa'ss"), "'pa''ss'");
         assert_eq!(npgsql_value(" leading"), "' leading'");
         assert_eq!(npgsql_value("a=b"), "'a=b'");
+    }
+
+    #[test]
+    fn npgsql_connection_string_quotes_host_and_port_like_credentials() {
+        assert_eq!(
+            npgsql_connection_string_from("db.local", "5433", "app_test", "u", Some("p")),
+            "Host=db.local;Port=5433;Database=app_test;Username=u;Password=p"
+        );
+        assert_eq!(
+            npgsql_connection_string_from("a;b", " 5432", "d", "u", None),
+            "Host='a;b';Port=' 5432';Database=d;Username=u"
+        );
+        assert_eq!(npgsql_connection_string_from("h", "", "d", "u", Some("")), "Host=h;Port=5432;Database=d;Username=u");
     }
 
     #[test]

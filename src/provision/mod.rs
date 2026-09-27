@@ -130,14 +130,14 @@ impl DbEngine {
                 let host = env_host("PGHOST", "localhost");
                 let user = std::env::var("PGUSER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_default();
                 let auth = auth_prefix(&user, std::env::var("PGPASSWORD").ok());
-                format!("postgresql://{auth}{host}/{name}")
+                postgres_url(&auth, &host, std::env::var("PGPORT").ok().as_deref(), name)
             }
             DbEngine::Mysql => {
                 let host = env_host("MYSQL_HOST", "127.0.0.1");
-                let port = std::env::var("MYSQL_TCP_PORT").unwrap_or_else(|_| "3306".into());
+                let port = std::env::var("MYSQL_TCP_PORT").ok().filter(|p| !p.is_empty());
                 let user = mysql_user();
                 let auth = auth_prefix(&user, std::env::var("MYSQL_PWD").ok());
-                format!("mysql://{auth}{host}:{port}/{name}")
+                format!("mysql://{auth}{}/{name}", url_authority(&host, Some(port.as_deref().unwrap_or("3306"))))
             }
         }
     }
@@ -147,6 +147,22 @@ impl DbEngine {
             DbEngine::Postgres => Resource::PostgresDb { name: name.to_string() },
             DbEngine::Mysql => Resource::MysqlDb { name: name.to_string() },
         }
+    }
+}
+
+/// `PGPORT` is included when set: libpq's createdb honours it, and a URL
+/// without it points the app at 5432 whatever server the database was made on.
+pub(crate) fn postgres_url(auth: &str, host: &str, port: Option<&str>, name: &str) -> String {
+    format!("postgresql://{auth}{}/{name}", url_authority(host, port))
+}
+
+/// `host[:port]` for a URL. An IPv6 literal is bracketed, or its colons would
+/// read as a port.
+pub(crate) fn url_authority(host: &str, port: Option<&str>) -> String {
+    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_string() };
+    match port.filter(|p| !p.is_empty()) {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
     }
 }
 
@@ -246,6 +262,19 @@ pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn postgres_url_carries_pgport_and_brackets_an_ipv6_host() {
+        // PGPORT was dropped, so a server on 5433 got a URL for 5432 while createdb
+        // (which reads PGPORT itself) made the database on 5433.
+        assert_eq!(postgres_url("u@", "localhost", Some("5433"), "db"), "postgresql://u@localhost:5433/db");
+        assert_eq!(postgres_url("u@", "localhost", None, "db"), "postgresql://u@localhost/db");
+        assert_eq!(postgres_url("", "db.local", Some(""), "db"), "postgresql://db.local/db");
+        // An unbracketed IPv6 host's colons would read as a port.
+        assert_eq!(postgres_url("u@", "::1", Some("5432"), "db"), "postgresql://u@[::1]:5432/db");
+        assert_eq!(url_authority("[::1]", None), "[::1]");
+        assert_eq!(url_authority("fe80::1", Some("3306")), "[fe80::1]:3306");
+    }
 
     #[test]
     fn userinfo_is_percent_encoded_in_urls() {
