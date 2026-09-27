@@ -218,8 +218,8 @@ fn invalid_config_name_with_path_traversal_is_rejected() {
 }
 
 /// `workon create --json` in a fresh repo, with HOME pointed at `root` so the
-/// worktree and `~/.claude.json` land in the tempdir. Returns the ws_id.
-fn create_ws_id(root: &Path, name: &str) -> String {
+/// worktree and `~/.claude.json` land in the tempdir. Returns the JSON report.
+fn create_json(root: &Path, name: &str) -> serde_json::Value {
     let proj = root.join("proj");
     if !proj.exists() {
         std::fs::create_dir(&proj).unwrap();
@@ -242,8 +242,7 @@ fn create_ws_id(root: &Path, name: &str) -> String {
         .get_output()
         .stdout
         .clone();
-    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    json["ws_id"].as_str().unwrap().to_string()
+    serde_json::from_slice(&out).unwrap()
 }
 
 /// `--name` becomes the ws_id's label, and `--name ""` means no name: a bare
@@ -251,11 +250,24 @@ fn create_ws_id(root: &Path, name: &str) -> String {
 #[test]
 fn create_name_labels_the_ws_id_and_empty_name_is_no_name() {
     let home = tempfile::tempdir().unwrap();
-    let labelled = create_ws_id(home.path(), "Fix Bug");
+    let labelled = create_json(home.path(), "Fix Bug")["ws_id"].as_str().unwrap().to_string();
     assert!(labelled.starts_with("ws-") && labelled.ends_with("-fix-bug"), "{labelled}");
     assert_eq!(labelled.len(), "ws-abcdef-fix-bug".len(), "{labelled}");
 
-    let unnamed = create_ws_id(home.path(), "");
+    let unnamed = create_json(home.path(), "")["ws_id"].as_str().unwrap().to_string();
     assert_eq!(unnamed.len(), "ws-abcdef".len(), "{unnamed}");
     assert!(unnamed.starts_with("ws-") && !unnamed.ends_with('-'), "{unnamed}");
+}
+
+/// Creating a workspace pre-accepts Claude Code's trust dialog for it, in the
+/// `~/.claude.json` under `$HOME`.
+#[test]
+fn create_trusts_the_worktree_in_claude_json() {
+    let home = tempfile::tempdir().unwrap();
+    let report = create_json(home.path(), "");
+    let path = report["path"].as_str().unwrap();
+
+    let claude: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.path().join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(claude["projects"][path]["hasTrustDialogAccepted"], serde_json::Value::Bool(true), "{claude}");
 }

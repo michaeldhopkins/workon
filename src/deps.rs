@@ -173,6 +173,28 @@ pane command="opencode""#;
     }
 
     #[test]
+    fn check_dep_reports_a_missing_binary_with_its_hint() {
+        let mut problems = Vec::new();
+        check_dep("workon_fake_dep_abc123", "", &mut problems);
+        check_dep("workon_fake_dep_def456", "brew install it", &mut problems);
+        check_dep("ls", "", &mut problems);
+        assert_eq!(
+            problems,
+            vec![
+                "  workon_fake_dep_abc123 — not found on PATH".to_string(),
+                "  workon_fake_dep_def456 — not found. Install: brew install it".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn check_all_fails_naming_a_missing_pane_command() {
+        let err = check_all(r#"pane command="workon_fake_dep_abc123""#).unwrap_err().to_string();
+        assert!(err.starts_with("missing dependencies:"), "{err}");
+        assert!(err.contains("  workon_fake_dep_abc123 — not found on PATH"), "{err}");
+    }
+
+    #[test]
     fn install_hint_known_binaries() {
         assert!(install_hint("claude").contains("claude.ai"));
         assert!(install_hint("branchdiff").contains("brew install"));
