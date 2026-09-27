@@ -114,6 +114,59 @@ fixtures under `tests/fixtures/`.
 - `python_venv` repair reads and rewrites files on disk by plain substring
   replacement; there is no parser, and a filesystem harness would test `std::fs`.
 
+## Mutation testing
+
+cargo-mutants (the `rust-mutation-testing` skill has the method).
+`.github/workflows/mutants.yml`, not gating: on PRs and pushes to `main`,
+`--in-diff` over the change (skipped with a warning above 25 selected mutants);
+on pushes to `main` also one rotating slice, `--shard k/24` with
+`k = run_number % 24`, so the whole tree is covered once every 24 pushes. Both
+run `--jobs 2`; the slice summary prints how long cargo-mutants ran, which is
+the number to re-choose 24 from.
+
+```sh
+cargo mutants --list | wc -l                  # 658 on 2026-09-27
+cargo mutants -j2 --no-shuffle --shard 3/24   # one slice, as CI runs it
+```
+
+**Choosing 24.** The suite is test-bound, and how test-bound depends on the
+machine: slice 0/24 (28 mutants) took 19m39s on a laptop busy with other
+builds, baseline 31s build + 86s test, while slice 2/48 (14) took 3m04s once it
+was quiet, baseline 17s + 18s. The busy figure was `repairs_a_real_copied_venv…`
+alone taking 80s (it builds a real venv with pip). A slice of ~28 is therefore
+6-20 minutes locally; a hosted runner is uncontended, so 24 was chosen for
+~10 minutes there with the 20-minute timeout as headroom. Re-choose from the
+CI figure.
+
+**Exclusions** (`.cargo/mutants.toml`):
+- `gitignore = true`: build copies skip `fuzz/target` (1.1G) and the fixtures'
+  installed deps (466M), so a local copy matches a fresh CI checkout.
+- `src/fuzz_api.rs`: compiled only under `--cfg fuzzing`; `cargo test` never
+  builds it, so every mutant would read MISSED.
+- `DbEngine::create`, `Resource::teardown`, `mysqladmin`, and `setup` of every
+  server-DB provisioner (Rails, Prisma, Alembic, Django, Laravel, EfCore,
+  Phoenix). Without a live server each returns the same empty `Setup` or does
+  nothing, so no test can observe a mutant; they are asserted by the DB-gated
+  cycle tests in ci.yml's `provisioners` job (Postgres, MySQL, one toolchain per
+  fixture). Giving the mutants jobs that environment would add those
+  toolchains' setup to every run; the helpers they call (adapter parsing,
+  `test_db_name`, the URL and Npgsql encoders) are still mutated.
+
+jj must be on PATH (the workflow pins it): the jj-backed tests return early
+without it, which reads as a pass and would turn their mutants into false
+MISSED. Note that ci.yml's main job does not install jj, so those tests skip
+there.
+
+**Findings, 2026-09-27** (slice 0/24 and slice 2/48): 34 caught, 6 missed,
+2 unviable before fixes (85%). All six were real gaps, now tested:
+- `main.rs`: both `--name ""` filters (`delete !`). The rule moved to
+  `cli::given_name`; `tests/cli.rs` runs `workon create --name … --json`.
+- `deps::check_all -> Ok(())`, `deps::check_dep -> ()`: only `which` itself was
+  tested, never the report.
+- `claude_trust::approve_workspace -> Ok(())`, `home_dir -> Ok(Default)`: the
+  trust write was tested below the function that picks `~/.claude.json`; the
+  create test now reads it back from `$HOME`.
+
 ## Release process
 
 Pushing to `main` triggers `.github/workflows/release.yml` which:
