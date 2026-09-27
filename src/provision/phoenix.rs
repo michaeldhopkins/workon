@@ -18,7 +18,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{DbEngine, ProvisionCtx, Provisioner, Setup};
+use super::{DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
 
 pub struct Phoenix;
 
@@ -65,7 +65,7 @@ impl Provisioner for Phoenix {
         for (k, v) in ctx.mise_vars {
             migrate = migrate.env(k, v);
         }
-        let _ = migrate.run();
+        run_step(migrate, "mix ecto.migrate");
 
         // Session env, not a file: MIX_TEST_PARTITION must be set when the user
         // runs `mix test` in the workspace, and it's safe session-wide because it

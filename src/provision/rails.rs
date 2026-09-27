@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
+use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
 
 pub struct Rails;
 
@@ -58,7 +58,7 @@ impl Provisioner for Rails {
         for (k, v) in ctx.mise_vars {
             cmd = cmd.env(k, v);
         }
-        let _ = cmd.run();
+        run_step(cmd, "rails db:schema:load");
 
         Ok(Setup {
             resources: vec![resource],
