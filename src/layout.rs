@@ -51,9 +51,7 @@ pub struct Config {
 impl Config {
     /// Split a raw config into its agent declaration and the zellij remainder.
     pub fn parse(src: &str) -> Result<Config> {
-        let mut doc: KdlDocument = src
-            .parse()
-            .context("workon config is not valid KDL")?;
+        let mut doc = parse_kdl(src)?;
         let agent = agent::from_document(&doc)?;
         doc.nodes_mut().retain(|n| n.name().value() != "workon");
         let agent_panes = agent.as_ref().map_or(0, |a| count_panes_running(&doc, &a.command));
@@ -133,6 +131,29 @@ impl Config {
             );
         }
         Ok(())
+    }
+}
+
+/// Parse a config as KDL v1, turning a parser panic into the parse error it is.
+///
+/// kdl 4.7.1 is the last KDL v1 release (6.x is KDL v2, which zellij layouts are
+/// not), and it panics while building the error for some malformed input: an
+/// unclosed type annotation at the end, `(true`, slices its error span past the
+/// input. Found by the `layout_inject` fuzz target.
+///
+/// The panic hook is silenced for the parse so the caught panic prints nothing.
+/// The hook is process-wide, so the swap is serialized, and a panic on another
+/// thread inside that window loses its message (not its effect).
+fn parse_kdl(src: &str) -> Result<KdlDocument> {
+    static HOOK_SWAP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = HOOK_SWAP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let parsed = std::panic::catch_unwind(|| src.parse::<KdlDocument>());
+    std::panic::set_hook(hook);
+    match parsed {
+        Ok(result) => result.context("workon config is not valid KDL"),
+        Err(_) => bail!("workon config is not valid KDL (the parser failed without saying where)"),
     }
 }
 
@@ -496,6 +517,17 @@ mod tests {
         write_config(tmp.path(), "broken", "layout { pane \"unterminated\n");
         let err = read_config_from(tmp.path(), Some("broken")).unwrap_err();
         assert!(err.to_string().contains("not valid KDL"), "{err}");
+    }
+
+    #[test]
+    fn kdl_that_panics_the_parser_is_a_parse_error() {
+        // kdl 4.7.1 panics building the error span for an unclosed type annotation
+        // at the end of input. Found by the `layout_inject` fuzz target.
+        for src in ["(true", "layout {\n}\n(t"] {
+            let err = Config::parse(src).unwrap_err();
+            assert!(err.to_string().contains("not valid KDL"), "{src:?}: {err}");
+        }
+        assert!(Config::parse("layout {\n}\n").is_ok(), "a panic guard must not reject valid KDL");
     }
 
     #[test]
