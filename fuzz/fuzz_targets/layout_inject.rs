@@ -71,15 +71,21 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(first_args(new[0]), expected, "the agent's args did not read back as old ++ injected");
 });
 
-/// Panes whose `command` is `cmd`, found the way workon finds them: a commanded
-/// pane is a leaf, so a match ends the descent.
+/// Panes whose `command` is `cmd`, as zellij would run them: any commanded pane
+/// is a leaf, because zellij 0.43 rejects a pane with both a `command` and nested
+/// panes (`kdl_layout_parser.rs`, "Cannot have both properties … and nested
+/// children"), so nothing inside one runs.
 fn agent_panes<'a>(doc: &'a KdlDocument, cmd: &str) -> Vec<&'a KdlNode> {
     let mut out = Vec::new();
     for node in doc.nodes() {
-        if node.get("command").and_then(|e| e.value().as_string()) == Some(cmd) {
-            out.push(node);
-        } else if let Some(kids) = node.children() {
-            out.extend(agent_panes(kids, cmd));
+        match node.get("command") {
+            Some(c) if c.value().as_string() == Some(cmd) => out.push(node),
+            Some(_) => {}
+            None => {
+                if let Some(kids) = node.children() {
+                    out.extend(agent_panes(kids, cmd));
+                }
+            }
         }
     }
     out

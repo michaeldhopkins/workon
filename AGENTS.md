@@ -70,6 +70,13 @@ function gets a wrapper there.
   error for `(true` (an unclosed type annotation at the end of input), so a
   malformed config crashed workon instead of being reported. `layout::parse_kdl`
   turns the panic into the parse error; kdl 4.x has no newer release to take.
+- `layout_inject` (2026-09-28, CI burst): counting and injection descended into
+  a commanded pane that was not the agent, so a `pane command="claude"` nested
+  inside `pane command="vim" { … }` got the args. zellij rejects a pane with
+  both a `command` and nested panes, so that pane never runs. Any commanded pane
+  is now a leaf (`layout::runs`). The crash input looked like a comment match,
+  but it was a multi-line string followed by a real children block; comments and
+  string contents never reach the structural matcher.
 
 **Where the `comm` forms come from.** `ps` output captured on macOS
 (2026-09-26): a bare `claude`, full paths, a login shell as
