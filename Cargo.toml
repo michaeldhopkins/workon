@@ -39,6 +39,7 @@ syn = { version = "2", features = ["full", "visit"] }
 assert_cmd = "2"
 clap_mangen = "0.2"
 predicates = "3"
+proptest = "1"
 tempfile = "3"
 
 [lints.clippy]

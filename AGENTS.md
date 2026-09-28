@@ -174,6 +174,14 @@ there.
   trust write was tested below the function that picks `~/.claude.json`; the
   create test now reads it back from `$HOME`.
 
+**2026-09-28:** three MISSED in `discover::assert_under_worktrees` (`==`→`!=`,
+`||`→`&&`, delete `!`), the guard `workon destroy` runs before tearing a
+workspace down. Its only test called it against the real `~/.worktrees`, which
+a CI runner does not have, so every call failed at `canonicalize` and every
+mutant passed. The check now runs against any root (`assert_under`) and a pure
+`is_strictly_inside`, tested on a temp root (a workspace, the root itself, a
+`worktrees-evil` sibling, `..` escapes, symlinks both ways) and by a proptest.
+
 ## Release process
 
 Pushing to `main` triggers `.github/workflows/release.yml` which:
