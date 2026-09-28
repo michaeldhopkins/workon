@@ -118,10 +118,17 @@ jobs:
             exit 0
           fi
           # Exit codes: 2 a mutant was MISSED (the finding); 3 a mutant TIMED
-          # OUT (usually an injected infinite loop, also a real result); 4 the
-          # unmutated baseline failed; 5 and 6 the diff does not match the tree
-          # or is malformed, which are bugs in "Compute diff", not in workon.
-          cargo mutants --no-shuffle -vV --jobs 2 --in-diff mutants.diff
+          # OUT (usually an injected infinite loop, a real result, so counted as
+          # caught and passed); 4 the unmutated baseline failed; 5 and 6 the diff
+          # does not match the tree or is malformed, which are bugs in "Compute
+          # diff", not in workon.
+          rc=0
+          cargo mutants --no-shuffle -vV --jobs 2 --in-diff mutants.diff || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
+            rc=0
+          fi
+          exit "$rc"
 
       - name: Summarise
         if: always()
@@ -233,7 +240,13 @@ jobs:
           # slice count was chosen from a local measurement, and this is the
           # figure to re-choose it from.
           trap 'echo "$SECONDS" > mutants-seconds.txt' EXIT
-          cargo mutants --no-shuffle -vV --jobs 2 --shard "$k/$SLICES"
+          rc=0
+          cargo mutants --no-shuffle -vV --jobs 2 --shard "$k/$SLICES" || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
+            rc=0
+          fi
+          exit "$rc"
 
       - name: Summarise
         if: always()
