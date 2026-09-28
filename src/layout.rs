@@ -163,18 +163,21 @@ fn parse_kdl(src: &str) -> Result<KdlDocument> {
 fn count_panes_running(doc: &KdlDocument, command: &str) -> usize {
     doc.nodes()
         .iter()
-        .map(|node| {
-            let here = usize::from(
-                node.get("command").and_then(|e| e.value().as_string()).is_some_and(|c| c == command),
-            );
-            // A commanded pane is a leaf — its children are args/env, never
-            // nested panes — so a match ends the descent.
-            if here == 1 {
-                return 1;
-            }
-            node.children().map_or(0, |kids| count_panes_running(kids, command))
+        .map(|node| match runs(node) {
+            Some(c) => usize::from(c == Some(command)),
+            None => node.children().map_or(0, |kids| count_panes_running(kids, command)),
         })
         .sum()
+}
+
+/// `Some(the command)` for a node with a `command` property (`Some(None)` when
+/// the value is not a string), `None` for one without.
+///
+/// A commanded node is a leaf, agent or not: zellij rejects a pane with both a
+/// `command` and nested panes, so nothing inside one ever runs, and neither
+/// counting nor injection may descend into it.
+fn runs(node: &KdlNode) -> Option<Option<&str>> {
+    node.get("command").map(|e| e.value().as_string())
 }
 
 /// Read, trust-check, and parse the config named by `config`.
@@ -301,18 +304,14 @@ fn is_valid_config_name(name: &str) -> bool {
 /// last, which also lets them win for flags whose last occurrence takes effect.
 fn inject_into(doc: &mut KdlDocument, agent_cmd: &str, args: &[String]) {
     for node in doc.nodes_mut() {
-        let is_agent = node
-            .get("command")
-            .and_then(|e| e.value().as_string())
-            .is_some_and(|c| c == agent_cmd);
-
-        if is_agent {
-            append_args(node, args);
-            continue;
-        }
-
-        if let Some(children) = node.children_mut() {
-            inject_into(children, agent_cmd, args);
+        match runs(node) {
+            Some(Some(c)) if c == agent_cmd => append_args(node, args),
+            Some(_) => {}
+            None => {
+                if let Some(children) = node.children_mut() {
+                    inject_into(children, agent_cmd, args);
+                }
+            }
         }
     }
 }
@@ -903,6 +902,58 @@ layout {
         let src = "layout {\n    tab {\n        pane command=\"claude\"\n        pane split_direction=\"vertical\" {\n            pane command=\"claude\"\n        }\n    }\n    pane command=\"vim\"\n}";
         let cfg = Config::parse(src).unwrap();
         assert_eq!(cfg.agent_panes, 2);
+    }
+
+    /// Resolve with `args` and return the written layout.
+    fn injected(src: &str, args: &[&str]) -> String {
+        let cfg = Config::parse(src).unwrap();
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        resolved_text(&cfg.resolve_with_agent_args(&args).unwrap())
+    }
+
+    #[test]
+    fn a_pane_inside_a_commanded_pane_is_not_an_agent_pane() {
+        // zellij 0.43 rejects a pane with both `command` and nested panes ("Cannot
+        // have both properties (command/edit/plugin) and nested children"), so a
+        // pane nested there never runs. Counting it made workon inject into a pane
+        // zellij ignores. Found by the `layout_inject` fuzz target.
+        let src = "layout {\n  pane command=\"vim\" { pane command=\"claude\"; }\n}\n";
+        let cfg = Config::parse(src).unwrap();
+        assert!(!cfg.runs_agent());
+        assert_eq!(injected(src, &["a"]), cfg.layout, "nothing to inject into");
+    }
+
+    #[test]
+    fn the_fuzzed_layout_whose_string_spans_lines_injects_nothing() {
+        // The crash input: the first pane's command is a string spanning a line
+        // that looks like a comment, and the `{ pane command="claude"; }` after it
+        // is that pane's children block.
+        let src = "layout {\n  pane command=\"claudee is handellthorkofocus=truen` block iblock is workon's own; it is sztrip{session_id}he rest of this\n// f/-e iee` block is  \"{ pane command=\"claude\"; }\n}\n";
+        let cfg = Config::parse(src).unwrap();
+        assert!(!cfg.runs_agent());
+        assert_eq!(injected(src, &["a"]), cfg.layout);
+    }
+
+    #[test]
+    fn agent_text_in_comments_and_strings_is_never_a_pane() {
+        let real = "    pane command=\"claude\" focus=true\n";
+        for decoy in [
+            "    // pane command=\"claude\"\n",
+            "    /* pane command=\"claude\" */\n",
+            "    pane name=\"pane command=\\\"claude\\\"\"\n",
+            "    /-pane command=\"claude\"\n",
+        ] {
+            let src = format!("layout {{\n{decoy}{real}}}\n");
+            let cfg = Config::parse(&src).unwrap();
+            assert_eq!(cfg.agent_panes, 1, "{decoy:?}");
+            let out = injected(&src, &["--session-id", "x"]);
+            assert!(out.contains(decoy.trim_end()), "the decoy was rewritten: {out}");
+            let doc: KdlDocument = out.parse().unwrap();
+            let pane = &doc.get("layout").unwrap().children().unwrap().nodes().iter().rfind(|n| n.get("command").is_some()).unwrap();
+            let args = pane.children().unwrap().get("args").unwrap();
+            let values: Vec<_> = args.entries().iter().map(|e| e.value().as_string().unwrap()).collect();
+            assert_eq!(values, ["--session-id", "x"], "{decoy:?}");
+        }
     }
 }
 
