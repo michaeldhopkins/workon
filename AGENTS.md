@@ -182,6 +182,13 @@ mutant passed. The check now runs against any root (`assert_under`) and a pure
 `is_strictly_inside`, tested on a temp root (a workspace, the root itself, a
 `worktrees-evil` sibling, `..` escapes, symlinks both ways) and by a proptest.
 
+**2026-10-03** (CI run 37100256686): nine MISSED, all functions that read the
+process environment or run `mise`, so no test could set what they read.
+`layout::config_dir` and `DbEngine::url` (via `url_in`) now take the variables
+through a lookup a test supplies; `url` itself is checked against `url_in` over
+the real environment. `mise_env` takes the program to run, and its test runs a
+stand-in script that reports its arguments and working directory.
+
 ## Release process
 
 Pushing to `main` triggers `.github/workflows/release.yml` which:

@@ -217,7 +217,7 @@ fn provision_in(
         eprintln!("Warning: failed to trust mise configs: {e}");
     }
 
-    let mise_vars = crate::mise_env::mise_env(&ws_dir);
+    let mise_vars = crate::mise_env::mise_env("mise", &ws_dir);
 
     // Run every provisioner that detects its project type, collecting the
     // resources they created (for teardown) and the env vars they want written
@@ -953,7 +953,7 @@ fn do_copy_files(
 /// carries the workspace's test-DB isolation identity (Phoenix's
 /// `MIX_TEST_PARTITION`), which must not be shadowed by an inherited mise value.
 fn session_launch_env(ws_dir: &Path) -> HashMap<String, String> {
-    let mut vars = crate::mise_env::mise_env(ws_dir);
+    let mut vars = crate::mise_env::mise_env("mise", ws_dir);
     vars.extend(read_meta(ws_dir).session_env);
     vars
 }
