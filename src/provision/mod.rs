@@ -244,7 +244,8 @@ pub fn test_db_name(project_name: &str, ws_id: &str) -> String {
     let suffix = format!("_{}_test", sanitize(ws_id));
     let proj = sanitize(project_name);
     let max_proj = 63usize.saturating_sub(suffix.len());
-    let proj = if proj.len() > max_proj { &proj[..max_proj] } else { proj.as_str() };
+    // `sanitize` leaves only ASCII, so a byte index is a char boundary.
+    let proj = &proj[..proj.len().min(max_proj)];
     format!("{proj}{suffix}")
 }
 
@@ -353,6 +354,23 @@ mod tests {
         assert_eq!(auth_prefix("us er", Some("p@w:d".to_string())), "us%20er:p%40w%3Ad@");
         assert_eq!(auth_prefix("bob", None), "bob@");
         assert_eq!(auth_prefix("", Some("x".to_string())), "");
+        // An empty password is no password, not a `bob:` with nothing after it.
+        assert_eq!(auth_prefix("bob", Some(String::new())), "bob@");
+    }
+
+    #[test]
+    fn venv_python_prefers_the_workspace_venv() {
+        let ws = tempfile::tempdir().unwrap();
+        assert_eq!(venv_python(ws.path()), PathBuf::from("python3"));
+        std::fs::create_dir_all(ws.path().join(".venv/bin")).unwrap();
+        std::fs::write(ws.path().join(".venv/bin/python"), "").unwrap();
+        assert_eq!(venv_python(ws.path()), ws.path().join(".venv/bin/python"));
+    }
+
+    #[test]
+    fn provisioners_run_venv_repair_before_the_python_frameworks() {
+        let names: Vec<&str> = provisioners().iter().map(|p| p.name()).collect();
+        assert_eq!(names, ["python-venv", "rails", "prisma", "alembic", "django", "laravel", "ef-core", "phoenix"]);
     }
 
     #[test]
@@ -368,6 +386,10 @@ mod tests {
         assert!(name.len() <= 63, "len {} > 63: {name}", name.len());
         // The unique ws_id + suffix survive; the project is what gets trimmed.
         assert!(name.ends_with("_ws_abc123_test"));
+        assert_eq!(name, format!("{}_ws_abc123_test", "a".repeat(63 - "_ws_abc123_test".len())));
+        // A project that exactly fills the remaining bytes is kept whole.
+        let exact = "b".repeat(63 - "_ws_abc123_test".len());
+        assert_eq!(test_db_name(&exact, "ws-abc123"), format!("{exact}_ws_abc123_test"));
     }
 
     #[test]

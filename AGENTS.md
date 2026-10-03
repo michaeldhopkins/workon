@@ -190,6 +190,12 @@ through a lookup a test supplies; `url` itself is checked against `url_in` over
 the real environment. `mise_env` takes the program to run, and its test runs a
 stand-in script that reports its arguments and working directory.
 
+**2026-10-03** (CI run 37149178056): four MISSED in `provision/mod.rs`, all
+now tested: `auth_prefix`'s empty-password guard, `venv_python`, and the
+`provisioners` registry order. `test_db_name`'s `>`→`>=` was equivalent (a
+slice to the full length is the whole string); the comparison became
+`min`, so the mutant no longer exists.
+
 ## Release process
 
 Pushing to `main` triggers `.github/workflows/release.yml` which:
