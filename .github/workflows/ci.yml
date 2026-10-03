@@ -80,15 +80,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install db clients (createdb/dropdb, mysqladmin)
         run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
+      # The fixtures' runtimes, from mise.toml: the setup actions below cannot read TOML.
+      - name: runtime versions from mise.toml
+        id: pin
+        run: |
+          for tool in ruby node php dotnet erlang elixir; do
+            echo "$tool=$(sed -nE "s/^$tool = \"([^\"]+)\".*/\1/p" mise.toml)" >> "$GITHUB_OUTPUT"
+          done
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.4"
+          ruby-version: ${{ steps.pin.outputs.ruby }}
       - name: install the Rails fixture's gems (so the cycle test runs)
         working-directory: tests/fixtures/rails
         run: bundle install --jobs 4
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: ${{ steps.pin.outputs.node }}
       - name: install the Prisma fixture's deps (so the cycle test runs)
         working-directory: tests/fixtures/prisma
         run: npm install --no-audit --no-fund
@@ -100,20 +107,20 @@ jobs:
         run: python3 -m venv .venv && ./.venv/bin/pip install -q -r requirements.txt
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.4"
+          php-version: ${{ steps.pin.outputs.php }}
       - name: set up the Laravel fixture (so the cycle test runs)
         working-directory: tests/fixtures/laravel
         run: composer install --no-interaction --quiet && cp .env.example .env && php artisan key:generate --force
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: ${{ steps.pin.outputs.dotnet }}.x
       - name: restore the EF Core fixture (so the cycle test runs)
         working-directory: tests/fixtures/efcore
         run: dotnet restore && dotnet tool restore
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "27"
-          elixir-version: "1.18"
+          otp-version: ${{ steps.pin.outputs.erlang }}
+          elixir-version: ${{ steps.pin.outputs.elixir }}
       - name: set up the Phoenix fixture's deps (so the cycle test runs)
         working-directory: tests/fixtures/phoenix
         run: mix local.hex --force && mix deps.get && mix compile

@@ -1,0 +1,10 @@
+# The runtimes the cycle tests' fixture projects (tests/fixtures/*) run on, and the one place each
+# is named. ci.yml's test job reads them in a step, since its setup actions cannot read TOML, and
+# tests/runtime_pin.rs fails when a workflow names a version itself.
+[tools]
+ruby = "4.0"
+node = "26"
+php = "8.5"
+dotnet = "10.0"
+erlang = "29"
+elixir = "1.20"
