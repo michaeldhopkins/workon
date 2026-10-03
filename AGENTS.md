@@ -34,6 +34,7 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - Clippy lints configured in `Cargo.toml` under `[lints.clippy]` — several are set to `deny`
 - `cargo-deny` config in `deny.toml`
 - Changelog generation via `git-cliff` (`cliff.toml`)
+- `mise.toml` pins the runtimes the cycle tests' fixtures run on (Ruby, Node, PHP, .NET, Erlang, Elixir). ci.yml reads them in a step, and `tests/runtime_pin.rs` fails when a workflow names a version itself. Move a fixture to a new major there, and nowhere else.
 - `tests/file_length.rs` fails when a file under `src` passes 400 production lines (inline test modules are not counted). Files already over are pinned at their size and may only shrink; new code goes in a new module, never into a pinned file.
 
 ## Fuzzing
