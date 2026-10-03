@@ -22,7 +22,7 @@ jobs:
       should_release: ${{ steps.check.outputs.should_release }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -46,7 +46,7 @@ jobs:
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -72,7 +72,7 @@ jobs:
         run: cargo run --locked --example generate_assets
 
       - name: Upload distribution assets
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: dist-assets
           path: target/assets/
@@ -86,11 +86,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            runner: macos-14
+            runner: macos-26
             archive: workon-x86_64-apple-darwin.tar.gz
             is_macos: true
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-26
             archive: workon-aarch64-apple-darwin.tar.gz
             is_macos: true
           - target: x86_64-unknown-linux-gnu
@@ -103,7 +103,7 @@ jobs:
             runner: windows-latest
             archive: workon-x86_64-pc-windows-msvc.zip
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -174,7 +174,7 @@ jobs:
           rm "$RUNNER_TEMP/workon.zip"
 
       - name: Download distribution assets
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: dist-assets
           path: dist-assets
@@ -197,7 +197,7 @@ jobs:
           Compress-Archive -Path "target/${{ matrix.target }}/release/workon.exe" -DestinationPath "${{ matrix.archive }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
@@ -212,7 +212,7 @@ jobs:
     needs: [check-version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -224,7 +224,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
