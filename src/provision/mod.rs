@@ -125,18 +125,23 @@ impl DbEngine {
     /// rejected. `PG*` for Postgres; `MYSQL_HOST`/`MYSQL_TCP_PORT`/`MYSQL_USER`/
     /// `MYSQL_PWD` for MySQL. A socket-path host becomes `localhost`.
     pub fn url(&self, name: &str) -> String {
+        self.url_in(name, &|var| std::env::var(var).ok())
+    }
+
+    /// [`Self::url`] with the variables read through `env`, so a test can supply them.
+    fn url_in(&self, name: &str, env: &dyn Fn(&str) -> Option<String>) -> String {
         match self {
             DbEngine::Postgres => {
-                let host = env_host("PGHOST", "localhost");
-                let user = std::env::var("PGUSER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_default();
-                let auth = auth_prefix(&user, std::env::var("PGPASSWORD").ok());
-                postgres_url(&auth, &host, std::env::var("PGPORT").ok().as_deref(), name)
+                let host = env_host(env("PGHOST"), "localhost");
+                let user = env("PGUSER").or_else(|| env("USER")).unwrap_or_default();
+                let auth = auth_prefix(&user, env("PGPASSWORD"));
+                postgres_url(&auth, &host, env("PGPORT").as_deref(), name)
             }
             DbEngine::Mysql => {
-                let host = env_host("MYSQL_HOST", "127.0.0.1");
-                let port = std::env::var("MYSQL_TCP_PORT").ok().filter(|p| !p.is_empty());
-                let user = mysql_user();
-                let auth = auth_prefix(&user, std::env::var("MYSQL_PWD").ok());
+                let host = env_host(env("MYSQL_HOST"), "127.0.0.1");
+                let port = env("MYSQL_TCP_PORT").filter(|p| !p.is_empty());
+                let user = mysql_user(env);
+                let auth = auth_prefix(&user, env("MYSQL_PWD"));
                 format!("mysql://{auth}{}/{name}", url_authority(&host, Some(port.as_deref().unwrap_or("3306"))))
             }
         }
@@ -179,8 +184,8 @@ pub(crate) fn run_step(cmd: Cmd, what: &str) -> bool {
     }
 }
 
-fn env_host(var: &str, default: &str) -> String {
-    let host = std::env::var(var).unwrap_or_default();
+fn env_host(value: Option<String>, default: &str) -> String {
+    let host = value.unwrap_or_default();
     if host.is_empty() || host.starts_with('/') { default.to_string() } else { host }
 }
 
@@ -216,14 +221,14 @@ pub(crate) fn percent_encode_userinfo(s: &str) -> String {
 
 /// MySQL clients don't read a user env var natively (unlike host/port/password),
 /// so workon reads `MYSQL_USER`, falling back to the OS user then `root`.
-fn mysql_user() -> String {
-    std::env::var("MYSQL_USER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "root".into())
+fn mysql_user(env: &dyn Fn(&str) -> Option<String>) -> String {
+    env("MYSQL_USER").or_else(|| env("USER")).unwrap_or_else(|| "root".into())
 }
 
 /// `mysqladmin` with the resolved user in front of the subcommand; host, port,
 /// and password are read from the environment natively.
 fn mysqladmin(args: &[&str]) -> Cmd {
-    Cmd::new("mysqladmin").arg("-u").arg(mysql_user()).args(args)
+    Cmd::new("mysqladmin").arg("-u").arg(mysql_user(&|var| std::env::var(var).ok())).args(args)
 }
 
 /// A collision-free test DB name that stays within Postgres's 63-byte identifier
@@ -294,6 +299,49 @@ mod tests {
         assert_eq!(postgres_url("u@", "::1", Some("5432"), "db"), "postgresql://u@[::1]:5432/db");
         assert_eq!(url_authority("[::1]", None), "[::1]");
         assert_eq!(url_authority("fe80::1", Some("3306")), "[fe80::1]:3306");
+    }
+
+    fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn url_reads_the_process_environment() {
+        let process = |var: &str| std::env::var(var).ok();
+        for engine in [DbEngine::Postgres, DbEngine::Mysql] {
+            assert_eq!(engine.url("db"), engine.url_in("db", &process));
+        }
+        assert!(DbEngine::Postgres.url("db").starts_with("postgresql://"));
+        assert!(DbEngine::Mysql.url("db").starts_with("mysql://"));
+    }
+
+    #[test]
+    fn postgres_url_is_built_from_the_pg_variables() {
+        let env = [("PGHOST", "db.local"), ("PGPORT", "5433"), ("PGUSER", "app"), ("PGPASSWORD", "s@cret"), ("USER", "os")];
+        assert_eq!(DbEngine::Postgres.url_in("t", &env_of(&env)), "postgresql://app:s%40cret@db.local:5433/t");
+        // No PGUSER: the OS user; a socket-path PGHOST: localhost, since a URL needs TCP.
+        let env = [("PGHOST", "/tmp"), ("USER", "os")];
+        assert_eq!(DbEngine::Postgres.url_in("t", &env_of(&env)), "postgresql://os@localhost/t");
+        assert_eq!(DbEngine::Postgres.url_in("t", &env_of(&[])), "postgresql://localhost/t");
+    }
+
+    #[test]
+    fn mysql_url_is_built_from_the_mysql_variables() {
+        let env = [("MYSQL_HOST", "db.local"), ("MYSQL_TCP_PORT", "3307"), ("MYSQL_USER", "app"), ("MYSQL_PWD", "pw"), ("USER", "os")];
+        assert_eq!(DbEngine::Mysql.url_in("t", &env_of(&env)), "mysql://app:pw@db.local:3307/t");
+        // An empty port is MySQL's default, not an empty `host:`.
+        let env = [("MYSQL_HOST", "/var/run/mysqld.sock"), ("MYSQL_TCP_PORT", ""), ("USER", "os")];
+        assert_eq!(DbEngine::Mysql.url_in("t", &env_of(&env)), "mysql://os@127.0.0.1:3306/t");
+        assert_eq!(DbEngine::Mysql.url_in("t", &env_of(&[])), "mysql://root@127.0.0.1:3306/t");
+    }
+
+    proptest::proptest! {
+        /// Any MYSQL_TCP_PORT that is set and non-empty is the URL's port.
+        #[test]
+        fn mysql_url_carries_any_given_port(port in "[0-9]{1,5}") {
+            let env = [("MYSQL_TCP_PORT", port.as_str()), ("MYSQL_USER", "u")];
+            proptest::prop_assert_eq!(DbEngine::Mysql.url_in("t", &env_of(&env)), format!("mysql://u@127.0.0.1:{port}/t"));
+        }
     }
 
     #[test]

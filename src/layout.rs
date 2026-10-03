@@ -190,7 +190,7 @@ fn runs(node: &KdlNode) -> Option<Option<&str>> {
 /// Any other name resolves only to `~/.config/workon/configs/<name>.kdl`,
 /// erroring if the file is absent.
 pub fn read_config(config: Option<&str>) -> Result<Config> {
-    let workon_dir = config_dir()?.join("workon");
+    let workon_dir = config_dir(|var| std::env::var(var).ok())?.join("workon");
     read_config_from(&workon_dir, config)
 }
 
@@ -334,16 +334,31 @@ fn append_args(pane: &mut KdlNode, args: &[String]) {
     }
 }
 
-fn config_dir() -> Result<PathBuf> {
-    std::env::var("XDG_CONFIG_HOME")
+/// `$XDG_CONFIG_HOME`, else `$HOME/.config`, read through `env` so a test can
+/// supply the variables.
+fn config_dir(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
+    env("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map_err(|_| anyhow::anyhow!("cannot determine config directory"))
+        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine config directory"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn config_dir_prefers_xdg_config_home_then_home_dot_config() {
+        let both = [("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/somewhere")];
+        assert_eq!(config_dir(env_of(&both)).unwrap(), PathBuf::from("/xdg"));
+        assert_eq!(config_dir(env_of(&[("HOME", "/somewhere")])).unwrap(), PathBuf::from("/somewhere/.config"));
+        let err = config_dir(env_of(&[])).unwrap_err();
+        assert!(err.to_string().contains("cannot determine config directory"), "{err}");
+    }
 
     /// Append a `[[trusted]]` pin for an on-disk config so `read_config_from`
     /// will load it — the test-side equivalent of a user hand-editing
