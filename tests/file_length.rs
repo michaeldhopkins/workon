@@ -1,10 +1,8 @@
 //! workon's file-length gate.
 //!
-//! Copied from branchdiff's (`tests/file_length.rs`, itself from cmdproof's), whose
-//! `production_lines` rule was corrected more than once before it measured files honestly; see the
-//! comment on it. Function-level lints (`clippy.toml`) never see a file growing one function at a
-//! time, and `src/workspace.rs` had reached 1,178 production lines by the time this went in
-//! (2026-09-26).
+//! Its `production_lines` rule is the subtle part; see the comment on it. Function-level lints
+//! (`clippy.toml`) never see a file growing one function at a time, and `src/workspace.rs` had
+//! reached 1,178 production lines by the time this went in (2026-09-26).
 //!
 //! Two decisions make it useful rather than annoying:
 //!

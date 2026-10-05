@@ -62,8 +62,8 @@ would bake in the wrong abstraction.
   `resolve_with_agent_args`. Wiring remote control means adding a `{name}`
   expansion and an injection point on the plain path. Decide one spelling for
   `{name}` first — the `-w` flow would supply the capitalized tab name
-  (`Uptime-thing`) while a plain session supplies the project dir name
-  (`uptime-thing`), and those should not diverge on a phone screen.
+  (`My-app`) while a plain session supplies the project dir name
+  (`my-app`), and those should not diverge on a phone screen.
 
 ## The generated `postgresql://` URL names no driver
 

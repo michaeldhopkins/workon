@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "workon"
-version = "0.24.3"
+version = "0.24.4"
 dependencies = [
  "anyhow",
  "assert_cmd",
