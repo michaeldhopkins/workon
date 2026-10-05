@@ -16,6 +16,7 @@ pub mod session;
 pub mod trust;
 pub mod vcs;
 pub mod workspace;
+mod zellij_reply;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]

@@ -196,6 +196,13 @@ now tested: `auth_prefix`'s empty-password guard, `venv_python`, and the
 slice to the full length is the whole string); the comparison became
 `min`, so the mutant no longer exists.
 
+**2026-10-03** (CI run 37150772418): eight MISSED in `session.rs`. The match
+guards of `session_exists` and `delete_session` could only be reached through a
+real zellij; reading its reply moved to `zellij_reply` (`read_listing`,
+`delete_hung`), tested with real timeout and non-zero-exit errors, which took
+`session.rs` under the length limit. `parse_descendants`' `<`→`>` is killed by a
+`comm` path with spaces, as macOS prints.
+
 ## Release process
 
 Pushing to `main` triggers `.github/workflows/release.yml` which:

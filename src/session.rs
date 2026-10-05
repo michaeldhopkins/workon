@@ -8,6 +8,7 @@ use tempfile::NamedTempFile;
 use vcs_runner::{Cmd, RunError};
 
 use crate::layout;
+use crate::zellij_reply::{delete_hung, read_listing, Listing};
 
 const ZELLIJ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -131,48 +132,29 @@ pub(crate) fn parse_descendants(ps_stdout: &str, root_pid: u32) -> HashSet<Strin
 }
 
 fn session_exists(name: &str) -> Result<bool> {
-    match Cmd::new("zellij")
+    let listing = Cmd::new("zellij")
         .args(["list-sessions", "--no-formatting"])
         .timeout(ZELLIJ_TIMEOUT)
         .run()
-    {
-        Ok(output) => Ok(output.stdout_lossy().lines().any(|line| {
-            line.split_whitespace()
-                .next()
-                .is_some_and(|first| first == name)
-        })),
-        Err(ref e) if e.is_timeout() => {
-            // IPC is hung. Could be our session's server or an unrelated orphan
-            // (zellij IPC blocks globally on a single bad socket). Surgically
-            // recover only what's bound to OUR session, then return false so
-            // the caller launches fresh.
+        .map(|output| output.stdout_lossy().into_owned());
+    match read_listing(name, listing)? {
+        Listing::Found(found) => Ok(found),
+        Listing::Hung => {
             recover_session(name)?;
             Ok(false)
         }
-        // Fresh machine / fully-reaped sessions: zellij exits 1 with this
-        // stderr sentinel. Semantically equivalent to "our session does not
-        // exist" — return false so the caller launches a new one.
-        Err(ref e) if is_no_sessions_error(e) => Ok(false),
-        Err(e) => Err(e.into()),
     }
 }
 
-fn is_no_sessions_error(err: &RunError) -> bool {
-    err.stderr()
-        .is_some_and(|s| s.contains("No active zellij sessions"))
-}
-
 fn delete_session(name: &str) -> Result<()> {
-    match Cmd::new("zellij")
+    let result = Cmd::new("zellij")
         .args(["delete-session", name, "--force"])
         .timeout(ZELLIJ_TIMEOUT)
-        .run()
-    {
-        Ok(_) => Ok(()),
-        // delete-session itself wedged — fall through to surgical kill.
-        Err(ref e) if e.is_timeout() => recover_session(name),
-        // Non-zero typically means "no such session"; nothing to do.
-        Err(_) => Ok(()),
+        .run();
+    if delete_hung(&result) {
+        recover_session(name)
+    } else {
+        Ok(())
     }
 }
 
@@ -482,6 +464,17 @@ mod tests {
         assert!(descendants.contains("claude"));
     }
 
+    // macOS prints the full executable path in `comm`, spaces included.
+    #[test]
+    fn parse_descendants_keeps_a_command_whose_path_has_spaces() {
+        let stdout = "\
+   100     1 zellij
+   200   100 /Applications/Visual Studio Code.app/Contents/MacOS/Electron
+";
+        let descendants = parse_descendants(stdout, 100);
+        assert!(descendants.contains("Electron"), "got {descendants:?}");
+    }
+
     #[test]
     fn parse_descendants_terminates_on_pid_cycle() {
         // Pathological input: 200's parent is 100, but 100's parent is 200.
@@ -583,76 +576,6 @@ mod tests {
 
         assert!(matches!(result, Err(RunError::Timeout { .. })));
         assert!(elapsed < Duration::from_secs(3));
-    }
-
-    /// Build a real `RunError::NonZeroExit` by running `sh -c "...>&2; exit 1"`.
-    /// `CmdDisplay::new` is crate-private upstream, so direct construction
-    /// isn't an option — running a real subprocess is the supported path.
-    fn non_zero_exit_with_stderr(stderr: &str) -> RunError {
-        let script = format!("printf %s {} 1>&2; exit 1", shell_single_quote(stderr));
-        Cmd::new("sh")
-            .args(["-c", &script])
-            .timeout(Duration::from_secs(5))
-            .run()
-            .expect_err("expected non-zero exit")
-    }
-
-    /// Single-quote a string for POSIX shell. Inputs in this file are static
-    /// test fixtures, but using the right quoting keeps the helper reusable.
-    fn shell_single_quote(s: &str) -> String {
-        let mut out = String::with_capacity(s.len() + 2);
-        out.push('\'');
-        for ch in s.chars() {
-            if ch == '\'' {
-                out.push_str("'\\''");
-            } else {
-                out.push(ch);
-            }
-        }
-        out.push('\'');
-        out
-    }
-
-    #[test]
-    fn no_sessions_error_recognized_on_fresh_machine() {
-        // The exact stderr zellij emits when no sessions exist on the host.
-        // Without this classifier, workon's first run on a clean machine
-        // aborts. See specs/no-active-sessions-bug.md.
-        let err = non_zero_exit_with_stderr("No active zellij sessions found.");
-        assert!(is_no_sessions_error(&err));
-    }
-
-    #[test]
-    fn no_sessions_error_tolerates_punctuation_drift() {
-        let err = non_zero_exit_with_stderr("No active zellij sessions found");
-        assert!(is_no_sessions_error(&err));
-    }
-
-    #[test]
-    fn unrelated_non_zero_exit_is_not_no_sessions() {
-        let err = non_zero_exit_with_stderr("some other zellij failure");
-        assert!(!is_no_sessions_error(&err));
-    }
-
-    #[test]
-    fn timeout_error_is_not_no_sessions() {
-        let err = Cmd::new("sleep")
-            .arg("60")
-            .timeout(Duration::from_millis(100))
-            .run()
-            .expect_err("expected timeout");
-        assert!(err.is_timeout());
-        assert!(!is_no_sessions_error(&err));
-    }
-
-    #[test]
-    fn spawn_error_is_not_no_sessions() {
-        let err = Cmd::new("definitely-not-a-real-binary-zxqv-9001")
-            .timeout(Duration::from_secs(5))
-            .run()
-            .expect_err("expected spawn failure");
-        assert!(err.is_spawn_failure());
-        assert!(!is_no_sessions_error(&err));
     }
 
     #[test]
