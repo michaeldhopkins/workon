@@ -15,6 +15,17 @@ on:
   push:
     branches: [main]
     paths-ignore: ["**.md", "docs/**"]
+  # Re-run one slice by number, to reproduce a slice that hung or failed.
+  workflow_dispatch:
+    inputs:
+      slice:
+        description: "Slice k to run (0 to SLICES-1)"
+        required: true
+        type: number
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -31,6 +42,7 @@ env:
 jobs:
   in-diff:
     name: Mutants in changed code
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -203,11 +215,16 @@ jobs:
   # coverage is approximate, which is fine. N and how it was chosen: AGENTS.md.
   slice:
     name: Mutants, rotating slice
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       SLICES: 24
+      # Wall-clock limit for cargo-mutants itself, under the job's timeout, so
+      # a stuck run still reaches Summarise and the artifact upload. Slices take
+      # 3-4 minutes on a runner; slice 8 was cancelled at the job timeout on
+      # 2026-10-05 with no log or artifact to say which mutant hung.
+      MUTANTS_WALL: 15m
     steps:
       - uses: actions/checkout@v7
 
@@ -233,7 +250,11 @@ jobs:
       - name: Mutants
         run: |
           set -euo pipefail
-          k=$(( ${{ github.run_number }} % SLICES ))
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            k="${{ inputs.slice }}"
+          else
+            k=$(( ${{ github.run_number }} % SLICES ))
+          fi
           echo "$k" > mutants-slice.txt
           echo "Slice $k of $SLICES"
           # Recorded however the run ends (exit 2 on a miss included): the
@@ -241,7 +262,16 @@ jobs:
           # figure to re-choose it from.
           trap 'echo "$SECONDS" > mutants-seconds.txt' EXIT
           rc=0
-          cargo mutants --no-shuffle -vV --jobs 2 --shard "$k/$SLICES" || rc=$?
+          # stdin closed: a mutant that reaches a prompt must fail, not wait.
+          # SIGINT lets cargo-mutants stop cleanly and write what it has.
+          timeout --signal=INT --kill-after=60s "$MUTANTS_WALL" \
+            cargo mutants --no-shuffle -vV --jobs 2 --shard "$k/$SLICES" < /dev/null || rc=$?
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "stopped" > mutants-stopped.txt
+            echo "::error::cargo-mutants still running after $MUTANTS_WALL; the newest logs in mutants.out/log are the mutants that hung"
+            ls -t mutants.out/log 2>/dev/null | head -5 || true
+            exit 1
+          fi
           if [ "$rc" -eq 3 ]; then
             echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
             rc=0
@@ -259,6 +289,15 @@ jobs:
             echo
             echo "_cargo mutants ran for ${secs}s_"
             echo
+            if [ -f mutants-stopped.txt ]; then
+              echo "**Stopped after $MUTANTS_WALL: the counts below are partial.**"
+              echo 'The most recently written logs, which include the mutants that hung:'
+              echo
+              echo '```'
+              ls -t mutants.out/log 2>/dev/null | head -5 || true
+              echo '```'
+              echo
+            fi
             if [ ! -d mutants.out ]; then
               echo 'No results directory: the run failed before reporting.'
               echo '**Treat this as no coverage, not as a pass.**'

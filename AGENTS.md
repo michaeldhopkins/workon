@@ -130,7 +130,10 @@ cargo-mutants (the `rust-mutation-testing` skill has the method).
 on pushes to `main` also one rotating slice, `--shard k/24` with
 `k = run_number % 24`, so the whole tree is covered once every 24 pushes. Both
 run `--jobs 2`; the slice summary prints how long cargo-mutants ran, which is
-the number to re-choose 24 from.
+the number to re-choose 24 from. The slice stops itself after 15 minutes, under
+the job's 25, so a hung mutant still gets a summary naming the newest logs and
+an uploaded `mutants.out`; `gh workflow run mutants.yml -f slice=<k>` re-runs
+one slice by number.
 
 ```sh
 cargo mutants --list | wc -l                  # 658 on 2026-09-27
