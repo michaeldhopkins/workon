@@ -316,3 +316,48 @@ fn create_reports_the_gitignored_files_it_copies() {
         assert!(stderr.contains("Cloned 5 gitignored files (1 dirs cloned, 2 copied individually)"), "{stderr}");
     }
 }
+
+/// A project with a mise config, created by a user whose mise shims directory
+/// exists but is not on PATH and who has no `mise activate`, gets the warning that
+/// non-interactive shells will miss the pinned tool versions. The shims directory
+/// is looked up under `$HOME`.
+#[test]
+fn create_warns_when_mise_shims_are_off_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let proj = root.join("proj");
+    std::fs::create_dir(&proj).unwrap();
+    git(&proj, &["init", "-q", "-b", "main"]);
+    std::fs::write(proj.join("mise.toml"), "[tools]\n").unwrap();
+    git(&proj, &["add", "."]);
+    git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    let origin = root.join("origin.git");
+    git(root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(&proj, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&proj, &["push", "-q", "origin", "main"]);
+
+    std::fs::create_dir_all(root.join(".local/share/mise/shims")).unwrap();
+    // A stand-in mise, so `mise trust` succeeds and the shims check runs.
+    let bin = root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("mise"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("mise"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = cargo_bin_cmd!("workon")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env_remove("MISE_SHELL")
+        .env_remove("__MISE_DIFF")
+        .env_remove("__MISE_SESSION")
+        .current_dir(&proj)
+        .args(["create", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Warning: mise shims directory is not on your PATH"), "{stderr}");
+}
