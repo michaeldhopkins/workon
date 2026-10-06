@@ -255,3 +255,64 @@ fn create_trusts_the_worktree_in_claude_json() {
         serde_json::from_str(&std::fs::read_to_string(home.path().join(".claude.json")).unwrap()).unwrap();
     assert_eq!(claude["projects"][path]["hasTrustDialogAccepted"], serde_json::Value::Bool(true), "{claude}");
 }
+
+/// `workon create` copies the project's gitignored files into the worktree and
+/// says what it did on stderr: the up-front notice (no time estimate for a
+/// handful of files), a warning per file or nested repo it could not copy, and
+/// a summary counting what was cloned whole and what was copied one by one.
+/// Files under a tracked directory (`config/`) can't be cloned as a top-level
+/// entry, so they are the ones copied individually.
+#[test]
+fn create_reports_the_gitignored_files_it_copies() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let proj = root.join("proj");
+    std::fs::create_dir_all(proj.join("config")).unwrap();
+    git(&proj, &["init", "-q", "-b", "main"]);
+    std::fs::write(proj.join(".gitignore"), ".env\nconfig/*.key\nconfig/gem/\nconfig/bad/\n").unwrap();
+    std::fs::write(proj.join("config/app.yml"), "tracked\n").unwrap();
+    git(&proj, &["add", "."]);
+    git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    let origin = root.join("origin.git");
+    git(root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(&proj, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&proj, &["push", "-q", "origin", "main"]);
+
+    std::fs::write(proj.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::write(proj.join("config/master.key"), "key\n").unwrap();
+    // Nested repos (a bundler git checkout) are listed as directories.
+    for nested in ["config/gem", "config/bad"] {
+        std::fs::create_dir_all(proj.join(nested)).unwrap();
+        git(&proj.join(nested), &["init", "-q"]);
+        std::fs::write(proj.join(nested).join("file"), "x\n").unwrap();
+    }
+    let unreadable = [proj.join("config/locked.key"), proj.join("config/bad/file")];
+    for path in &unreadable {
+        std::fs::write(path, "x\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    // Root reads anything, so it would see no failures to warn about.
+    let can_fail = std::fs::File::open(&unreadable[0]).is_err();
+
+    let output = cargo_bin_cmd!("workon")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .current_dir(&proj)
+        .args(["create", "--json"])
+        .output()
+        .unwrap();
+    for path in &unreadable {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("Cloning 5 gitignored files (skip with --skip-copy-ignored)..."), "{stderr}");
+    if can_fail {
+        assert!(stderr.contains("Warning: could not copy config/locked.key"), "{stderr}");
+        assert!(stderr.contains("Warning: could not clone dir config/bad"), "{stderr}");
+        assert!(stderr.contains("Cloned 5 gitignored files (1 dirs cloned, 2 copied individually)"), "{stderr}");
+    }
+}
