@@ -1,0 +1,4 @@
+# Set to the code's existing style, so adopting `cargo fmt` reformatted as little as possible.
+style_edition = "2021"
+use_small_heuristics = "Max"
+max_width = 120
