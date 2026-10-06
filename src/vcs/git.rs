@@ -375,6 +375,23 @@ mod tests {
         assert_eq!(occurrences, 1, "pattern should be written exactly once");
     }
 
+    /// A pattern lands on its own line: after an existing last line that lacks
+    /// a newline, and with no blank line ahead of it in an empty file.
+    #[test]
+    fn ignore_generated_file_writes_the_pattern_on_its_own_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_origin, repo) = init_repo_with_remote(tmp.path());
+        let exclude = repo.join(".git/info/exclude");
+
+        std::fs::write(&exclude, "*.log").unwrap();
+        GitBackend.ignore_generated_file(&repo, &repo, ".env.test.local");
+        assert_eq!(std::fs::read_to_string(&exclude).unwrap(), "*.log\n.env.test.local\n");
+
+        std::fs::write(&exclude, "").unwrap();
+        GitBackend.ignore_generated_file(&repo, &repo, ".env.test.local");
+        assert_eq!(std::fs::read_to_string(&exclude).unwrap(), ".env.test.local\n");
+    }
+
     #[test]
     fn save_work_creates_branch() {
         let tmp = tempfile::tempdir().unwrap();

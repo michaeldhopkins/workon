@@ -21,9 +21,9 @@ pub fn run(
     config_name: &str,
 ) -> Result<()> {
     let empty = std::collections::HashMap::new();
-    if session_exists(name)? {
+    if session_exists("zellij", name)? {
         if force_new {
-            delete_session(name)?;
+            delete_session("zellij", name)?;
             launch(name, layout, working_dir, &empty)
         } else {
             ensure_layout_compatible(name, layout_content, config_name)?;
@@ -131,8 +131,8 @@ pub(crate) fn parse_descendants(ps_stdout: &str, root_pid: u32) -> HashSet<Strin
     found
 }
 
-fn session_exists(name: &str) -> Result<bool> {
-    let listing = Cmd::new("zellij")
+fn session_exists(zellij: &str, name: &str) -> Result<bool> {
+    let listing = Cmd::new(zellij)
         .args(["list-sessions", "--no-formatting"])
         .timeout(ZELLIJ_TIMEOUT)
         .run()
@@ -146,8 +146,8 @@ fn session_exists(name: &str) -> Result<bool> {
     }
 }
 
-fn delete_session(name: &str) -> Result<()> {
-    let result = Cmd::new("zellij")
+fn delete_session(zellij: &str, name: &str) -> Result<()> {
+    let result = Cmd::new(zellij)
         .args(["delete-session", name, "--force"])
         .timeout(ZELLIJ_TIMEOUT)
         .run();
@@ -725,5 +725,109 @@ mod tests {
             bystander_pid_before, bystander_pid_after,
             "recover_session killed unrelated session — bystander pid changed"
         );
+    }
+
+    /// A stand-in for `zellij` that appends its arguments to `log` and runs `body`.
+    fn stand_in(dir: &Path, log: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("zellij");
+        let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n", log.display());
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn session_exists_reads_the_listing_for_this_session() {
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("log");
+        let zellij = stand_in(bin.path(), &log, "printf 'other [Created 1m ago]\\nmine [Created 2m ago]\\n'");
+        let zellij = zellij.to_str().unwrap();
+
+        assert!(session_exists(zellij, "mine").unwrap());
+        assert!(!session_exists(zellij, "absent").unwrap());
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(logged, "list-sessions --no-formatting\nlist-sessions --no-formatting\n");
+    }
+
+    #[test]
+    fn delete_session_asks_zellij_to_force_delete_it() {
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("log");
+        let zellij = stand_in(bin.path(), &log, "exit 0");
+
+        delete_session(zellij.to_str().unwrap(), "mine").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "delete-session mine --force\n");
+    }
+
+    /// Point `var` at `value` for the length of `body`, under ENV_MUTEX.
+    fn with_env<T>(var: &str, value: &Path, body: impl FnOnce() -> T) -> T {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os(var);
+        // SAFETY: env mutation is serialized with sibling tests via ENV_MUTEX.
+        unsafe { std::env::set_var(var, value) };
+        let out = body();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(var, v),
+                None => std::env::remove_var(var),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn preflight_socket_removes_a_socket_with_no_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("workon-orphan-{}", std::process::id());
+        let socket = dir.path().join(&name);
+        std::fs::write(&socket, "").unwrap();
+
+        with_env("ZELLIJ_SOCKET_DIR", dir.path(), || preflight_socket(&name));
+
+        assert!(!socket.exists(), "an orphaned socket should be removed before launch");
+    }
+
+    #[test]
+    fn preflight_socket_keeps_a_socket_whose_server_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("workon-live-{}", std::process::id());
+        let socket = dir.path().join(&name);
+        std::fs::write(&socket, "").unwrap();
+        let mut server = spawn_fake_server(&socket.to_string_lossy());
+        std::thread::sleep(Duration::from_millis(150));
+
+        with_env("ZELLIJ_SOCKET_DIR", dir.path(), || preflight_socket(&name));
+        let _ = server.kill();
+        let _ = server.wait();
+
+        assert!(socket.exists(), "a live server's socket must be left alone");
+    }
+
+    /// The user's own config survives, and any `default_mode` line, commented
+    /// out or not, becomes `locked` rather than a second, conflicting setting.
+    #[test]
+    fn locked_config_layers_locked_mode_over_the_users_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.kdl");
+        std::fs::write(&user, "theme \"nord\"\n// default_mode \"normal\"\n").unwrap();
+
+        let tmp = with_env("ZELLIJ_CONFIG_FILE", &user, || locked_config().unwrap());
+
+        let written = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(written.lines().collect::<Vec<_>>(), ["theme \"nord\"", "default_mode \"locked\""]);
+    }
+
+    #[test]
+    fn locked_config_prepends_locked_mode_when_the_user_sets_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.kdl");
+        std::fs::write(&user, "theme \"nord\"\n").unwrap();
+
+        let tmp = with_env("ZELLIJ_CONFIG_FILE", &user, || locked_config().unwrap());
+
+        let written = std::fs::read_to_string(tmp.path()).unwrap();
+        assert_eq!(written.lines().collect::<Vec<_>>(), ["default_mode \"locked\"", "theme \"nord\""]);
     }
 }

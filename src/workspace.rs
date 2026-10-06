@@ -1387,6 +1387,24 @@ mod tests {
         assert_eq!(meta.name.as_deref(), Some("fix bug"));
     }
 
+    /// Gitignored files (a `.env`, say) are copied into the new workspace unless
+    /// `--skip-copy-ignored` asked for them to be left behind.
+    #[test]
+    fn provision_in_copies_gitignored_files_unless_told_to_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        std::fs::write(repo.join(".git/info/exclude"), ".env\n").unwrap();
+        std::fs::write(repo.join(".env"), "SECRET=1\n").unwrap();
+        let worktrees = tmp.path().join("worktrees");
+        let none: Vec<Box<dyn Provisioner>> = Vec::new();
+
+        let copied = provision_in(&worktrees, &repo, "proj", false, None, None, &crate::vcs::GitBackend, &none).unwrap();
+        let skipped = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &none).unwrap();
+
+        assert_eq!(std::fs::read_to_string(copied.ws_dir.join(".env")).unwrap(), "SECRET=1\n");
+        assert!(!skipped.ws_dir.join(".env").exists(), "--skip-copy-ignored still copied .env");
+    }
+
     /// A provisioner that always fires and returns a canned resource + env, so
     /// the orchestration (collect resources, write env, persist, teardown) is
     /// testable without a real database or toolchain.

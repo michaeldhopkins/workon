@@ -118,3 +118,36 @@ pub(crate) fn detect_git_remote(project_dir: &Path) -> String {
     }
     names.first().map(|s| (*s).to_string()).unwrap_or_else(|| "origin".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A backend that takes every default, as a third-party `Vcs` would.
+    struct Minimal;
+    impl Vcs for Minimal {
+        fn detect_trunk(&self, _: &Path) -> Result<String> {
+            Ok("main".into())
+        }
+        fn create_workspace(&self, _: &Path, _: &Path, _: &str, _: &str) -> Result<String> {
+            Ok("base".into())
+        }
+        fn pre_copy_sync(&self, _: &Path) {}
+        fn changed_files(&self, _: &str, _: &str, _: &Path, _: &Path) -> Vec<String> {
+            Vec::new()
+        }
+        fn save_work(&self, _: &str, _: &str, _: &Path, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn forget_workspace(&self, _: &str, _: &Path, _: &Path) {}
+        fn ignore_generated_file(&self, _: &Path, _: &Path, _: &str) {}
+    }
+
+    /// A backend that cannot find stranded work must report none, or teardown
+    /// would offer to save commits that do not exist.
+    #[test]
+    fn stranded_work_defaults_to_none() {
+        let dir = Path::new("/nonexistent");
+        assert!(Minimal.stranded_work("ws", "base", dir, dir).is_empty());
+    }
+}
