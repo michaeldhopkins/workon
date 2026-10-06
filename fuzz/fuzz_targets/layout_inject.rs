@@ -29,9 +29,10 @@ fuzz_target!(|data: &[u8]| {
     let Ok(cfg) = Config::parse(src) else { return };
     let _ = workon::layout::focused_command(&cfg.layout);
 
-    let before: KdlDocument = cfg.layout.parse().unwrap_or_else(|e| {
-        panic!("the layout workon hands zellij does not parse: {e}\n{}", cfg.layout)
-    });
+    let before: KdlDocument = cfg
+        .layout
+        .parse()
+        .unwrap_or_else(|e| panic!("the layout workon hands zellij does not parse: {e}\n{}", cfg.layout));
     assert!(before.get("workon").is_none(), "the workon block reached zellij");
 
     let Some(agent) = cfg.agent.clone() else { return };
@@ -46,9 +47,9 @@ fuzz_target!(|data: &[u8]| {
         }
     };
     let written = std::fs::read_to_string(resolved.path()).expect("read the resolved layout");
-    let after: KdlDocument = written.parse().unwrap_or_else(|e| {
-        panic!("the injected layout does not parse: {e}\nargs: {args:?}\n{written}")
-    });
+    let after: KdlDocument = written
+        .parse()
+        .unwrap_or_else(|e| panic!("the injected layout does not parse: {e}\nargs: {args:?}\n{written}"));
 
     if !cfg.runs_agent() {
         assert_eq!(written, cfg.layout, "no agent pane, yet injection changed the layout");

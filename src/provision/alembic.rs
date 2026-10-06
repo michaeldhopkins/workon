@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, venv_python, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
+use super::{run_step, test_db_name, venv_python, DbEngine, ProvisionCtx, Provisioner, Setup};
 
 pub struct Alembic;
 

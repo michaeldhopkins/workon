@@ -96,10 +96,7 @@ pub fn parse_block(node: &KdlNode) -> Result<Option<AgentSpec>> {
         return Ok(None);
     };
 
-    let command = agent
-        .get("command")
-        .and_then(|e| e.value().as_string())
-        .filter(|c| !c.is_empty());
+    let command = agent.get("command").and_then(|e| e.value().as_string()).filter(|c| !c.is_empty());
     let Some(command) = command else {
         bail!(
             "workon config: agent needs a non-empty command=\"...\" naming the pane it drives\n\n\

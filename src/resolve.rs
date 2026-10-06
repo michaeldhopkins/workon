@@ -14,10 +14,7 @@ pub struct Project {
 /// shell script and has been removed.)
 pub fn resolve() -> Result<Project> {
     let dir = std::env::current_dir()?;
-    let name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "workon".into());
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "workon".into());
 
     Ok(Project { dir, name })
 }

@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
+use super::{run_step, test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
 
 pub struct Laravel;
 
@@ -86,10 +86,7 @@ mod tests {
 
     #[test]
     fn phpunit_db_connection_parsing() {
-        assert_eq!(
-            phpunit_db_connection("<env name=\"DB_CONNECTION\" value=\"pgsql\"/>").as_deref(),
-            Some("pgsql")
-        );
+        assert_eq!(phpunit_db_connection("<env name=\"DB_CONNECTION\" value=\"pgsql\"/>").as_deref(), Some("pgsql"));
         assert_eq!(phpunit_db_connection("<phpunit></phpunit>"), None);
     }
 
@@ -142,7 +139,8 @@ mod tests {
         assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
         assert_eq!(setup.env_file.as_deref(), Some(".env.testing"));
 
-        let out = Command::new("psql").args(["-tAc", "select to_regclass('public.migrations')", &name]).output().unwrap();
+        let out =
+            Command::new("psql").args(["-tAc", "select to_regclass('public.migrations')", &name]).output().unwrap();
         let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Resource::PostgresDb { name: name.clone() }.teardown();
         assert_eq!(table, "migrations", "artisan migrate should have created the migrations table");
@@ -172,13 +170,16 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let ws_dir = tmp.path().join("laravelmysql-ws-cycle");
-        assert!(Command::new("cp").args(["-R", fixture.to_str().unwrap(), ws_dir.to_str().unwrap()]).status().unwrap().success());
+        assert!(Command::new("cp")
+            .args(["-R", fixture.to_str().unwrap(), ws_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
         // Retarget the copy at mysql.
         let phpunit = ws_dir.join("phpunit.xml");
-        let xml = std::fs::read_to_string(&phpunit).unwrap().replace(
-            "<env name=\"DB_CONNECTION\" value=\"pgsql\"/>",
-            "<env name=\"DB_CONNECTION\" value=\"mysql\"/>",
-        );
+        let xml = std::fs::read_to_string(&phpunit)
+            .unwrap()
+            .replace("<env name=\"DB_CONNECTION\" value=\"pgsql\"/>", "<env name=\"DB_CONNECTION\" value=\"mysql\"/>");
         std::fs::write(&phpunit, xml).unwrap();
 
         let mise = HashMap::new();
@@ -192,7 +193,8 @@ mod tests {
         let setup = Laravel.setup(&ctx).unwrap();
         assert_eq!(setup.resources, vec![Resource::MysqlDb { name: name.clone() }]);
 
-        let user = std::env::var("MYSQL_USER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "root".into());
+        let user =
+            std::env::var("MYSQL_USER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "root".into());
         let query = format!(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{name}' AND table_name='migrations'"
         );

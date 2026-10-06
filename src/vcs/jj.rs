@@ -3,8 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use vcs_runner::{
-    jj_revset_history, parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8,
-    run_jj_utf8_ignore_wc, RunError,
+    jj_revset_history, parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8, run_jj_utf8_ignore_wc, RunError,
 };
 
 use super::{detect_git_remote, path_str, Vcs};
@@ -19,8 +18,7 @@ impl JjBackend {
     fn resolve_commit(&self, project_dir: &Path, revset: &str) -> Result<String> {
         let out = run_jj_utf8(
             project_dir,
-            &["log", "--ignore-working-copy", "--no-graph", "-r", revset,
-              "-T", "commit_id ++ \"\\n\"", "--limit", "1"],
+            &["log", "--ignore-working-copy", "--no-graph", "-r", revset, "-T", "commit_id ++ \"\\n\"", "--limit", "1"],
         )?;
         let id = out.lines().next().unwrap_or("").trim().to_string();
         if id.is_empty() {
@@ -52,8 +50,7 @@ impl JjBackend {
             Err(e) if is_stale_working_copy(&e) => {
                 eprintln!("Main repo working copy is stale; recovering with `jj workspace update-stale`...");
                 self.cleanup_partial_workspace(ws_id, project_dir, ws_dir);
-                run_jj(project_dir, &["workspace", "update-stale"])
-                    .context("failed to refresh stale working copy")?;
+                run_jj(project_dir, &["workspace", "update-stale"]).context("failed to refresh stale working copy")?;
                 add().map_err(|e2| {
                     self.cleanup_partial_workspace(ws_id, project_dir, ws_dir);
                     anyhow::Error::new(e2).context("failed to create jj workspace after update-stale")
@@ -67,11 +64,7 @@ impl JjBackend {
     }
 
     fn run_workspace_add(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, rev: &str) -> Result<(), RunError> {
-        run_jj(
-            project_dir,
-            &["workspace", "add", &path_str(ws_dir), "--name", ws_id, "-r", rev],
-        )
-        .map(|_| ())
+        run_jj(project_dir, &["workspace", "add", &path_str(ws_dir), "--name", ws_id, "-r", rev]).map(|_| ())
     }
 
     /// Remove a workspace `jj workspace add` left half-created on failure: forget
@@ -87,12 +80,9 @@ impl JjBackend {
 
     /// Whether `revset` matches at least one commit. Read-only.
     fn revset_nonempty(&self, project_dir: &Path, revset: &str) -> bool {
-        run_jj_utf8(
-            project_dir,
-            &["log", "--ignore-working-copy", "--no-graph", "-r", revset, "-T", r#""x""#],
-        )
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+        run_jj_utf8(project_dir, &["log", "--ignore-working-copy", "--no-graph", "-r", revset, "-T", r#""x""#])
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
     }
 
     /// The repo's orphaned work, across all workspaces: non-empty commits that no
@@ -103,12 +93,9 @@ impl JjBackend {
     fn repo_orphans(&self, project_dir: &Path) -> Vec<String> {
         let revset = "~empty() & ~ancestors(bookmarks() | remote_bookmarks()) \
                       & ~working_copies() & ~ancestors(working_copies())";
-        run_jj_utf8_ignore_wc(
-            project_dir,
-            &["log", "--no-graph", "-r", revset, "-T", r#"commit_id ++ "\n""#],
-        )
-        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect())
-        .unwrap_or_default()
+        run_jj_utf8_ignore_wc(project_dir, &["log", "--no-graph", "-r", revset, "-T", r#"commit_id ++ "\n""#])
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect())
+            .unwrap_or_default()
     }
 
     /// Which of `orphans` **this workspace's `@` ever pointed at** — the
@@ -175,11 +162,8 @@ fn remote_scoped(name: &str) -> String {
 /// revset is empty / errors. Kept separate so `detect_trunk` reads as a plain
 /// priority list of candidates.
 fn jj_trunk_bookmark(project_dir: &Path, revset: &str) -> Option<String> {
-    let output = run_jj_utf8(
-        project_dir,
-        &["log", "-r", revset, "--no-graph", "-T", "bookmarks", "--limit", "1"],
-    )
-    .ok()?;
+    let output =
+        run_jj_utf8(project_dir, &["log", "-r", revset, "--no-graph", "-T", "bookmarks", "--limit", "1"]).ok()?;
     let bookmark = first_real_bookmark(&output);
     (!bookmark.is_empty()).then(|| bookmark.to_string())
 }
@@ -194,12 +178,8 @@ impl Vcs for JjBackend {
         // froze every workspace on the wrong trunk. `trunk()` covers the common
         // case; the explicit origin/main|master|trunk lookups rescue repos where
         // jj's `trunk()` alias doesn't resolve but the bookmarks are known.
-        let origin_revsets = [
-            "trunk()".to_string(),
-            remote_scoped("main"),
-            remote_scoped("master"),
-            remote_scoped("trunk"),
-        ];
+        let origin_revsets =
+            ["trunk()".to_string(), remote_scoped("main"), remote_scoped("master"), remote_scoped("trunk")];
         for revset in &origin_revsets {
             if let Some(bookmark) = jj_trunk_bookmark(project_dir, revset) {
                 return Ok(bookmark);
@@ -279,23 +259,15 @@ impl Vcs for JjBackend {
         //
         // `base` is the pinned branch point, not a re-resolved trunk bookmark, so
         // a fetch that advanced trunk mid-session can't leak upstream commits in.
-        let unsaved = format!(
-            "({base}..{ws_head}) & ~empty() & ~ancestors(bookmarks() | remote_bookmarks())"
-        );
+        let unsaved = format!("({base}..{ws_head}) & ~empty() & ~ancestors(bookmarks() | remote_bookmarks())");
         if !self.revset_nonempty(project_dir, &unsaved) {
             return Vec::new();
         }
-        run_jj_utf8(
-            project_dir,
-            &["diff", "--ignore-working-copy", "--from", base, "--to", &ws_head, "--summary"],
-        )
-        .map(|stdout| {
-            parse_diff_summary(&stdout)
-                .into_iter()
-                .map(|c| c.path.to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default()
+        run_jj_utf8(project_dir, &["diff", "--ignore-working-copy", "--from", base, "--to", &ws_head, "--summary"])
+            .map(|stdout| {
+                parse_diff_summary(&stdout).into_iter().map(|c| c.path.to_string_lossy().into_owned()).collect()
+            })
+            .unwrap_or_default()
     }
 
     fn save_work(&self, ws_id: &str, base: &str, project_dir: &Path, _ws_dir: &Path) -> Result<()> {
@@ -305,18 +277,22 @@ impl Vcs for JjBackend {
         let ws_head = format!("{ws_id}@");
         let target = run_jj_utf8(
             project_dir,
-            &["log", "--ignore-working-copy", "--no-graph", "-T", "commit_id ++ \"\\n\"",
-              "-r", &format!("heads(({base}..{ws_head}) & ~empty())")],
+            &[
+                "log",
+                "--ignore-working-copy",
+                "--no-graph",
+                "-T",
+                "commit_id ++ \"\\n\"",
+                "-r",
+                &format!("heads(({base}..{ws_head}) & ~empty())"),
+            ],
         )
         .ok()
         .and_then(|s| s.lines().next().map(str::to_string))
         .filter(|s| !s.is_empty())
         .unwrap_or(ws_head);
 
-        run_jj(
-            project_dir,
-            &["bookmark", "set", &format!("workon/{ws_id}"), "-r", &target],
-        )?;
+        run_jj(project_dir, &["bookmark", "set", &format!("workon/{ws_id}"), "-r", &target])?;
         eprintln!("Bookmarked as workon/{ws_id}");
         Ok(())
     }
@@ -390,9 +366,7 @@ fn stderr_reports_stale(stderr: &str) -> bool {
 }
 
 fn absolute_git_dir(project_dir: &Path) -> Option<String> {
-    run_git_utf8(project_dir, &["rev-parse", "--absolute-git-dir"])
-        .ok()
-        .filter(|s| !s.is_empty())
+    run_git_utf8(project_dir, &["rev-parse", "--absolute-git-dir"]).ok().filter(|s| !s.is_empty())
 }
 
 /// Set up a git worktree reference in a jj workspace so that git commands work.
@@ -409,8 +383,7 @@ fn absolute_git_dir(project_dir: &Path) -> Option<String> {
 /// before origin), `<remote>/master` resolved to a ref ~1000 commits behind, and
 /// branchdiff/git tooling showed that stale state instead of jj's real `@`.
 fn setup_git_worktree(project_dir: &Path, ws_dir: &Path, ws_id: &str, base: &str) -> Result<()> {
-    let git_dir = absolute_git_dir(project_dir)
-        .context("could not determine .git directory")?;
+    let git_dir = absolute_git_dir(project_dir).context("could not determine .git directory")?;
     let wt_git_dir = format!("{git_dir}/worktrees/{ws_id}");
 
     std::fs::create_dir_all(&wt_git_dir)?;
@@ -466,8 +439,7 @@ mod tests {
         let repo_path = path_str(repo);
         let mut full = vec!["-C", &*repo_path];
         full.extend_from_slice(args);
-        Command::new("git").args(&full)
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(&full).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
     }
 
     /// Regression for the issue: `.env.test.local` written into a fresh jj
@@ -526,17 +498,29 @@ mod tests {
             .unwrap();
         Command::new("git")
             .args(["-C", &path_str(&project), "config", "user.email", "t@t.com"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
         Command::new("git")
             .args(["-C", &path_str(&project), "config", "user.name", "T"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
         std::fs::write(project.join("README"), "hi").unwrap();
         Command::new("git")
             .args(["-C", &path_str(&project), "add", "."])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
         Command::new("git")
             .args(["-C", &path_str(&project), "commit", "-m", "init"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         let base = run_git_utf8(&project, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
         setup_git_worktree(&project, &ws, "test-ws", &base).unwrap();
@@ -568,7 +552,10 @@ mod tests {
 
         Command::new("git")
             .args(["init", "--initial-branch=main", &path_str(&project)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
         git(&project, &["config", "user.email", "t@t.com"]);
         git(&project, &["config", "user.name", "T"]);
         std::fs::write(project.join("README"), "hi").unwrap();
@@ -603,7 +590,10 @@ mod tests {
         git(&repo, &["commit", "-m", "init"]);
         Command::new("git")
             .args(["clone", "--bare", &path_str(&repo), &path_str(&origin)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
         git(&repo, &["remote", "add", "origin", &path_str(&origin)]);
         git(&repo, &["push", "origin", "master"]);
         run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
@@ -631,7 +621,10 @@ mod tests {
         let heroku = tmp.path().join("heroku.git");
         Command::new("git")
             .args(["init", "--bare", "--initial-branch=main", &path_str(&heroku)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
         git(&repo, &["checkout", "-b", "main"]);
         std::fs::write(repo.join("app.rb"), "mirror is newer").unwrap();
         git(&repo, &["commit", "-am", "newer on mirror main"]);
@@ -694,8 +687,15 @@ mod tests {
 
         let out = run_jj_utf8(
             &repo,
-            &["log", "--ignore-working-copy", "--no-graph", "-r", "workon/wsb",
-              "-T", r#"description.first_line() ++ "|" ++ if(empty, "empty", "nonempty")"#],
+            &[
+                "log",
+                "--ignore-working-copy",
+                "--no-graph",
+                "-r",
+                "workon/wsb",
+                "-T",
+                r#"description.first_line() ++ "|" ++ if(empty, "empty", "nonempty")"#,
+            ],
         )
         .unwrap();
         assert!(out.contains("implement feature"), "bookmark should sit on the work commit, got {out}");
@@ -893,10 +893,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = setup_colocated(tmp.path());
 
-        assert!(
-            vcs_runner::jj_divergent_change_ids(&repo).unwrap().is_empty(),
-            "a clean repo reports no divergence"
-        );
+        assert!(vcs_runner::jj_divergent_change_ids(&repo).unwrap().is_empty(), "a clean repo reports no divergence");
 
         force_op_divergence(&repo);
         assert!(
@@ -908,10 +905,13 @@ mod tests {
         // the read doesn't snapshot) before and after the divergence check.
         std::fs::write(repo.join("f.txt"), "uncommitted WIP").unwrap();
         let at = || {
-            run_jj_utf8(&repo, &["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", "commit_id", "--limit", "1"])
-                .unwrap()
-                .trim()
-                .to_string()
+            run_jj_utf8(
+                &repo,
+                &["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", "commit_id", "--limit", "1"],
+            )
+            .unwrap()
+            .trim()
+            .to_string()
         };
         let before = at();
         let _ = vcs_runner::jj_divergent_change_ids(&repo);

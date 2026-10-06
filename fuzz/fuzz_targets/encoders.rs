@@ -72,7 +72,11 @@ fn host_from(seed: &str) -> String {
         return seed.to_string();
     }
     let host: String = seed.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-').collect();
-    if host.is_empty() { "localhost".to_string() } else { host }
+    if host.is_empty() {
+        "localhost".to_string()
+    } else {
+        host
+    }
 }
 
 /// `postgresql://{user}:{password}@{host}[:{port}]/db` must read back as exactly
@@ -185,7 +189,11 @@ fn server_pattern(name: &str) {
     // One character changed at a time: an unescaped `.` or class would still match.
     for (i, c) in name.char_indices().take(32) {
         let swap = if c == 'x' { "y" } else { "x" };
-        others.push(format!("zellij --server /tmp/zellij-501/0.43.1/{}{swap}{}", &name[..i], &name[i + c.len_utf8()..]));
+        others.push(format!(
+            "zellij --server /tmp/zellij-501/0.43.1/{}{swap}{}",
+            &name[..i],
+            &name[i + c.len_utf8()..]
+        ));
     }
     for other in others {
         assert!(!re.is_match(&other), "{pattern:?} matches another session's server {other:?}");

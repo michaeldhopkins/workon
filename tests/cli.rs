@@ -49,11 +49,7 @@ fn dynamic_completion_offers_workspace_ids() {
 
 #[test]
 fn version_flag() {
-    cargo_bin_cmd!("workon")
-        .arg("--version")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("workon 0."));
+    cargo_bin_cmd!("workon").arg("--version").assert().success().stdout(predicate::str::contains("workon 0."));
 }
 
 #[test]
@@ -76,11 +72,7 @@ fn skip_copy_ignored_requires_workspace() {
 
 #[test]
 fn help_lists_config_flag() {
-    cargo_bin_cmd!("workon")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--config"));
+    cargo_bin_cmd!("workon").arg("--help").assert().success().stdout(predicate::str::contains("--config"));
 }
 
 #[test]
@@ -150,20 +142,12 @@ fn resume_requires_workspace() {
 
 #[test]
 fn help_lists_name_flag() {
-    cargo_bin_cmd!("workon")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--name"));
+    cargo_bin_cmd!("workon").arg("--help").assert().success().stdout(predicate::str::contains("--name"));
 }
 
 #[test]
 fn help_lists_new_session_long_flag() {
-    cargo_bin_cmd!("workon")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--new-session"));
+    cargo_bin_cmd!("workon").arg("--help").assert().success().stdout(predicate::str::contains("--new-session"));
 }
 
 /// `-n` used to force a new session; it's now an inert no-op. It must still

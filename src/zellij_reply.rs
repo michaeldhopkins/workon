@@ -19,11 +19,9 @@ pub(crate) enum Listing {
 /// Read the stdout (or failure) of `zellij list-sessions --no-formatting`.
 pub(crate) fn read_listing(name: &str, result: Result<String, RunError>) -> Result<Listing> {
     match result {
-        Ok(stdout) => Ok(Listing::Found(stdout.lines().any(|line| {
-            line.split_whitespace()
-                .next()
-                .is_some_and(|first| first == name)
-        }))),
+        Ok(stdout) => Ok(Listing::Found(
+            stdout.lines().any(|line| line.split_whitespace().next().is_some_and(|first| first == name)),
+        )),
         Err(ref e) if e.is_timeout() => Ok(Listing::Hung),
         // Fresh machine / fully-reaped sessions: zellij exits 1 with this
         // stderr sentinel. Semantically equivalent to "our session does not
@@ -34,8 +32,7 @@ pub(crate) fn read_listing(name: &str, result: Result<String, RunError>) -> Resu
 }
 
 fn is_no_sessions_error(err: &RunError) -> bool {
-    err.stderr()
-        .is_some_and(|s| s.contains("No active zellij sessions"))
+    err.stderr().is_some_and(|s| s.contains("No active zellij sessions"))
 }
 
 /// Whether `zellij delete-session` wedged and needs the surgical kill. Any
@@ -55,11 +52,7 @@ mod tests {
     /// isn't an option — running a real subprocess is the supported path.
     fn non_zero_exit_with_stderr(stderr: &str) -> RunError {
         let script = format!("printf %s {} 1>&2; exit 1", shell_single_quote(stderr));
-        Cmd::new("sh")
-            .args(["-c", &script])
-            .timeout(Duration::from_secs(5))
-            .run()
-            .expect_err("expected non-zero exit")
+        Cmd::new("sh").args(["-c", &script]).timeout(Duration::from_secs(5)).run().expect_err("expected non-zero exit")
     }
 
     /// Single-quote a string for POSIX shell. Inputs in this file are static
@@ -79,11 +72,7 @@ mod tests {
     }
 
     fn timeout_error() -> RunError {
-        let err = Cmd::new("sleep")
-            .arg("60")
-            .timeout(Duration::from_millis(100))
-            .run()
-            .expect_err("expected timeout");
+        let err = Cmd::new("sleep").arg("60").timeout(Duration::from_millis(100)).run().expect_err("expected timeout");
         assert!(err.is_timeout());
         err
     }
@@ -104,37 +93,26 @@ dev [Created 1h ago] (EXITED - attach to resurrect)
 
     #[test]
     fn a_hung_listing_is_reported_as_hung() {
-        assert_eq!(
-            read_listing("dev", Err(timeout_error())).unwrap(),
-            Listing::Hung
-        );
+        assert_eq!(read_listing("dev", Err(timeout_error())).unwrap(), Listing::Hung);
     }
 
     #[test]
     fn no_sessions_on_the_machine_means_not_found() {
         let err = non_zero_exit_with_stderr("No active zellij sessions found.");
-        assert_eq!(
-            read_listing("dev", Err(err)).unwrap(),
-            Listing::Found(false)
-        );
+        assert_eq!(read_listing("dev", Err(err)).unwrap(), Listing::Found(false));
     }
 
     #[test]
     fn any_other_listing_failure_is_an_error() {
         let err = non_zero_exit_with_stderr("some other zellij failure");
         let err = read_listing("dev", Err(err)).expect_err("not a listing");
-        assert!(
-            format!("{err:#}").contains("some other zellij failure"),
-            "{err:#}"
-        );
+        assert!(format!("{err:#}").contains("some other zellij failure"), "{err:#}");
     }
 
     #[test]
     fn only_a_timed_out_delete_needs_recovery() {
         assert!(delete_hung::<()>(&Err(timeout_error())));
-        assert!(!delete_hung::<()>(&Err(non_zero_exit_with_stderr(
-            "no such session"
-        ))));
+        assert!(!delete_hung::<()>(&Err(non_zero_exit_with_stderr("no such session"))));
         assert!(!delete_hung(&Ok(())));
     }
 

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
+use super::{run_step, test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
 
 /// The connection-string key EF's `ConnectionStrings__<Name>` overrides. Real
 /// projects vary; `Default` is the common convention.
@@ -63,10 +63,7 @@ impl Provisioner for EfCore {
         // Restore the local dotnet-ef tool if a manifest declares one, then apply.
         let _ = Cmd::new("dotnet").arg("tool").arg("restore").in_dir(ctx.ws_dir).run();
         eprintln!("Applying migrations (dotnet ef database update)...");
-        let mut cmd = Cmd::new("dotnet")
-            .args(["ef", "database", "update"])
-            .env(&env_key, &conn)
-            .in_dir(ctx.ws_dir);
+        let mut cmd = Cmd::new("dotnet").args(["ef", "database", "update"]).env(&env_key, &conn).in_dir(ctx.ws_dir);
         for (k, v) in ctx.mise_vars {
             cmd = cmd.env(k, v);
         }
@@ -122,7 +119,8 @@ pub(crate) fn include_value(tag: &str) -> Option<String> {
 fn skip_dir(name: &str) -> bool {
     matches!(
         name,
-        "bin" | "obj"
+        "bin"
+            | "obj"
             | ".git"
             | "node_modules"
             | "vendor"
@@ -170,7 +168,13 @@ fn npgsql_connection_string(name: &str) -> String {
 
 /// Every value goes through [`npgsql_value`], host and port included: they come
 /// from the environment as much as the credentials do. An empty port means 5432.
-pub(crate) fn npgsql_connection_string_from(host: &str, port: &str, name: &str, user: &str, password: Option<&str>) -> String {
+pub(crate) fn npgsql_connection_string_from(
+    host: &str,
+    port: &str,
+    name: &str,
+    user: &str,
+    password: Option<&str>,
+) -> String {
     let port = if port.is_empty() { "5432" } else { port };
     let mut conn = format!(
         "Host={};Port={};Database={};Username={}",
@@ -226,7 +230,10 @@ mod tests {
             npgsql_connection_string_from("a;b", " 5432", "d", "u", None),
             "Host='a;b';Port=' 5432';Database=d;Username=u"
         );
-        assert_eq!(npgsql_connection_string_from("h", "", "d", "u", Some("")), "Host=h;Port=5432;Database=d;Username=u");
+        assert_eq!(
+            npgsql_connection_string_from("h", "", "d", "u", Some("")),
+            "Host=h;Port=5432;Database=d;Username=u"
+        );
     }
 
     #[test]
@@ -355,7 +362,8 @@ mod tests {
         let setup = EfCore.setup(&ctx).unwrap();
         assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
 
-        let out = Command::new("psql").args(["-tAc", "select to_regclass('public.\"Widgets\"')", &name]).output().unwrap();
+        let out =
+            Command::new("psql").args(["-tAc", "select to_regclass('public.\"Widgets\"')", &name]).output().unwrap();
         let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Resource::PostgresDb { name: name.clone() }.teardown();
         assert!(table.contains("Widgets"), "database update should have created Widgets, got {table:?}");

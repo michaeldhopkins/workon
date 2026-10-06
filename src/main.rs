@@ -29,9 +29,7 @@ fn run_subcommand(command: cli::Command) -> Result<()> {
             };
             workspace::cmd_create(&project.dir, &project.name, args, &*vcs)
         }
-        cli::Command::Attach { reference, config } => {
-            workspace::cmd_attach(reference.as_deref(), config.as_deref())
-        }
+        cli::Command::Attach { reference, config } => workspace::cmd_attach(reference.as_deref(), config.as_deref()),
         cli::Command::Destroy { reference, no_save, json } => {
             workspace::cmd_destroy(reference.as_deref(), no_save, json)
         }

@@ -196,11 +196,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".venv/bin")).unwrap();
         std::fs::write(tmp.path().join(".venv/bin/activate"), "VIRTUAL_ENV=\"/old/proj/.venv\"\n").unwrap();
         std::fs::write(sp.join("__editable__.mypkg-0.0.0.pth"), "/old/proj/src\n").unwrap();
-        std::fs::write(
-            sp.join("__editable___mypkg_finder.py"),
-            "MAPPING = {'mypkg': '/old/proj/src/mypkg'}\n",
-        )
-        .unwrap();
+        std::fs::write(sp.join("__editable___mypkg_finder.py"), "MAPPING = {'mypkg': '/old/proj/src/mypkg'}\n")
+            .unwrap();
 
         let venv = tmp.path().join(".venv");
         let changed = repair(&venv, &["/old/proj".to_string()], &tmp.path().to_string_lossy());
@@ -236,7 +233,11 @@ mod tests {
 
         // Simulate workon's copy, then remove the original so the old shebang is
         // genuinely dead.
-        assert!(Command::new("cp").args(["-R", dir_a.to_str().unwrap(), dir_b.to_str().unwrap()]).status().unwrap().success());
+        assert!(Command::new("cp")
+            .args(["-R", dir_a.to_str().unwrap(), dir_b.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
         std::fs::remove_dir_all(&dir_a).unwrap();
 
         // pip in the copy is broken until repaired (its shebang points at dir_a).

@@ -21,9 +21,8 @@ use libfuzzer_sys::fuzz_target;
 /// Names with no `/` and no leading `-`: the parser takes the text after the last
 /// `/` and strips a login shell's dash, so a name with either cannot be written
 /// in a form that reads back as itself.
-const NAMES: &[&str] = &[
-    "claude", "zsh", "branchdiff", "zellij", "node", "opencode", "bash", "Google Chrome Helper", "mcp@latest", "a-b",
-];
+const NAMES: &[&str] =
+    &["claude", "zsh", "branchdiff", "zellij", "node", "opencode", "bash", "Google Chrome Helper", "mcp@latest", "a-b"];
 
 fn comm(name: &str, form: u8) -> String {
     match form % 5 {
@@ -37,10 +36,8 @@ fn comm(name: &str, form: u8) -> String {
 
 fuzz_target!(|data: &[u8]| {
     let Some((&head, rest)) = data.split_first() else { return };
-    let procs: Vec<(usize, &str, u8)> = rest
-        .chunks_exact(3)
-        .map(|c| (c[0] as usize, NAMES[c[1] as usize % NAMES.len()], c[2]))
-        .collect();
+    let procs: Vec<(usize, &str, u8)> =
+        rest.chunks_exact(3).map(|c| (c[0] as usize, NAMES[c[1] as usize % NAMES.len()], c[2])).collect();
     if procs.is_empty() {
         return;
     }

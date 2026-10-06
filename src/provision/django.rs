@@ -66,9 +66,7 @@ fn reads_database_url(ws_dir: &Path) -> bool {
         }
     }
     candidates.iter().any(|p| {
-        std::fs::read_to_string(p)
-            .map(|s| s.contains("dj_database_url") || s.contains("DATABASE_URL"))
-            .unwrap_or(false)
+        std::fs::read_to_string(p).map(|s| s.contains("dj_database_url") || s.contains("DATABASE_URL")).unwrap_or(false)
     })
 }
 

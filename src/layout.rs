@@ -9,13 +9,11 @@ use crate::trust;
 
 const EMBEDDED_LAYOUT: &str = include_str!("../layouts/workon.kdl");
 
-pub(crate) const CREATING_A_CONFIG_URL: &str =
-    "https://github.com/michaeldhopkins/workon#creating-a-config";
+pub(crate) const CREATING_A_CONFIG_URL: &str = "https://github.com/michaeldhopkins/workon#creating-a-config";
 
 /// Where the `workon { agent ... }` block is documented. Agent errors point
 /// here rather than at the general config section.
-pub(crate) const DECLARING_AN_AGENT_URL: &str =
-    "https://github.com/michaeldhopkins/workon#declaring-the-agent";
+pub(crate) const DECLARING_AN_AGENT_URL: &str = "https://github.com/michaeldhopkins/workon#declaring-the-agent";
 
 #[derive(Debug)]
 pub struct ResolvedLayout {
@@ -208,11 +206,8 @@ pub fn read_config(config: Option<&str>) -> Result<Config> {
 /// tree, the user almost certainly launched the session with a different
 /// config and attaching would silently apply that config's layout instead.
 pub fn focused_command(layout: &str) -> Result<Option<String>> {
-    let focused: Vec<&str> = layout
-        .lines()
-        .filter(|line| line.contains("focus=true"))
-        .filter_map(command_in_line)
-        .collect();
+    let focused: Vec<&str> =
+        layout.lines().filter(|line| line.contains("focus=true")).filter_map(command_in_line).collect();
 
     if focused.len() > 1 {
         bail!(
@@ -292,8 +287,7 @@ fn read_config_source(workon_dir: &Path, config: Option<&str>) -> Result<String>
 }
 
 fn is_valid_config_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Append `args` to the pane running `agent_cmd`.
@@ -371,11 +365,8 @@ mod tests {
             canon.to_string_lossy(),
             trust::sha256_hex(body.as_bytes()),
         );
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(workon_dir.join("trusted.toml"))
-            .unwrap();
+        let mut f =
+            std::fs::OpenOptions::new().create(true).append(true).open(workon_dir.join("trusted.toml")).unwrap();
         f.write_all(entry.as_bytes()).unwrap();
     }
 
@@ -828,13 +819,8 @@ layout {
 
         let doc: KdlDocument = result.parse().expect("injected layout must be valid KDL");
         let pane = doc.get("layout").unwrap().children().unwrap().get("pane").unwrap();
-        let args: Vec<&KdlNode> = pane
-            .children()
-            .unwrap()
-            .nodes()
-            .iter()
-            .filter(|n| n.name().value() == "args")
-            .collect();
+        let args: Vec<&KdlNode> =
+            pane.children().unwrap().nodes().iter().filter(|n| n.name().value() == "args").collect();
         assert_eq!(args.len(), 1, "must be exactly one args node, got: {result}");
 
         let values: Vec<&str> = args[0].entries().iter().filter_map(|e| e.value().as_string()).collect();
@@ -887,10 +873,8 @@ layout {
     /// leaving a half-built worktree behind.
     #[test]
     fn ensure_single_agent_pane_rejects_two_and_accepts_one() {
-        let two = Config::parse(
-            "layout {\n    pane command=\"claude\" focus=true\n    pane command=\"claude\"\n}",
-        )
-        .unwrap();
+        let two =
+            Config::parse("layout {\n    pane command=\"claude\" focus=true\n    pane command=\"claude\"\n}").unwrap();
         let err = two.ensure_single_agent_pane().unwrap_err().to_string();
         assert!(err.contains("2 panes"), "{err}");
 
@@ -901,7 +885,8 @@ layout {
     /// A config with no agent can't have too many agent panes.
     #[test]
     fn ensure_single_agent_pane_passes_without_an_agent() {
-        let cfg = Config::parse("workon {\n}\nlayout {\n    pane command=\"vim\"\n    pane command=\"vim\"\n}").unwrap();
+        let cfg =
+            Config::parse("workon {\n}\nlayout {\n    pane command=\"vim\"\n    pane command=\"vim\"\n}").unwrap();
         assert!(cfg.ensure_single_agent_pane().is_ok());
     }
 
@@ -964,11 +949,18 @@ layout {
             let out = injected(&src, &["--session-id", "x"]);
             assert!(out.contains(decoy.trim_end()), "the decoy was rewritten: {out}");
             let doc: KdlDocument = out.parse().unwrap();
-            let pane = &doc.get("layout").unwrap().children().unwrap().nodes().iter().rfind(|n| n.get("command").is_some()).unwrap();
+            let pane = &doc
+                .get("layout")
+                .unwrap()
+                .children()
+                .unwrap()
+                .nodes()
+                .iter()
+                .rfind(|n| n.get("command").is_some())
+                .unwrap();
             let args = pane.children().unwrap().get("args").unwrap();
             let values: Vec<_> = args.entries().iter().map(|e| e.value().as_string().unwrap()).collect();
             assert_eq!(values, ["--session-id", "x"], "{decoy:?}");
         }
     }
 }
-

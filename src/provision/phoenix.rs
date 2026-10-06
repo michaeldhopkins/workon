@@ -18,7 +18,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
+use super::{run_step, DbEngine, ProvisionCtx, Provisioner, Setup};
 
 pub struct Phoenix;
 

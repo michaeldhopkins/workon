@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
+use super::{run_step, test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
 
 pub struct Prisma;
 
@@ -180,10 +180,8 @@ mod tests {
         let setup = Prisma.setup(&ctx).unwrap();
         assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
 
-        let out = Command::new("psql")
-            .args(["-tAc", "select to_regclass('public.\"Widget\"')", &name])
-            .output()
-            .unwrap();
+        let out =
+            Command::new("psql").args(["-tAc", "select to_regclass('public.\"Widget\"')", &name]).output().unwrap();
         let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Resource::PostgresDb { name: name.clone() }.teardown();
         assert!(table.contains("Widget"), "migrate deploy should have created the Widget table, got {table:?}");
@@ -256,7 +254,8 @@ mod tests {
     /// Whether `table` exists in mysql `db`, via the `mysql` client (host/port/
     /// password from the MYSQL_* env, user resolved like the provisioner does).
     fn mysql_has_table(db: &str, table: &str) -> bool {
-        let user = std::env::var("MYSQL_USER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "root".into());
+        let user =
+            std::env::var("MYSQL_USER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_else(|| "root".into());
         let query = format!(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{db}' AND table_name='{table}'"
         );

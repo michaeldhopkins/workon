@@ -24,22 +24,13 @@ fn approve_workspace_at(claude_json: &Path, ws_dir: &Path) -> Result<()> {
         Value::Object(serde_json::Map::new())
     };
 
-    let projects = doc
-        .as_object_mut()
-        .unwrap()
-        .entry("projects")
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let projects =
+        doc.as_object_mut().unwrap().entry("projects").or_insert_with(|| Value::Object(serde_json::Map::new()));
 
-    let entry = projects
-        .as_object_mut()
-        .unwrap()
-        .entry(&ws_key)
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let entry =
+        projects.as_object_mut().unwrap().entry(&ws_key).or_insert_with(|| Value::Object(serde_json::Map::new()));
 
-    entry
-        .as_object_mut()
-        .unwrap()
-        .insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+    entry.as_object_mut().unwrap().insert("hasTrustDialogAccepted".into(), Value::Bool(true));
 
     let output = serde_json::to_string_pretty(&doc)?;
 
@@ -67,8 +58,7 @@ mod tests {
         let ws_dir = tmp.path().join(".worktrees/myproject-ws-abc123");
         approve_workspace_at(&claude_json, &ws_dir).unwrap();
 
-        let content: Value =
-            serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+        let content: Value = serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
         let ws_key = ws_dir.to_string_lossy().into_owned();
         assert_eq!(content["existingKey"], true);
         assert_eq!(content["projects"][&ws_key]["hasTrustDialogAccepted"], true);
@@ -82,8 +72,7 @@ mod tests {
 
         approve_workspace_at(&claude_json, &ws_dir).unwrap();
 
-        let content: Value =
-            serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+        let content: Value = serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
         let ws_key = ws_dir.to_string_lossy().into_owned();
         assert_eq!(content["projects"][&ws_key]["hasTrustDialogAccepted"], true);
     }

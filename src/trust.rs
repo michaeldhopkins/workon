@@ -128,24 +128,14 @@ mod tests {
             sha256_hex(body.as_bytes()),
         );
         let manifest = workon_dir.join(TRUST_FILENAME);
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&manifest)
-            .unwrap();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&manifest).unwrap();
         f.write_all(entry.as_bytes()).unwrap();
     }
 
     #[test]
     fn sha256_hex_known_vectors() {
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
 
     #[test]
@@ -180,11 +170,8 @@ mod tests {
         // Pin the file's exact bytes so it clears the trust gate; the failure
         // must then come from UTF-8 decoding, not from being untrusted.
         let canon = std::fs::canonicalize(&path).unwrap();
-        let manifest = format!(
-            "[[trusted]]\npath = {:?}\nsha256 = \"{}\"\n",
-            canon.to_string_lossy(),
-            sha256_hex(raw),
-        );
+        let manifest =
+            format!("[[trusted]]\npath = {:?}\nsha256 = \"{}\"\n", canon.to_string_lossy(), sha256_hex(raw),);
         std::fs::write(dir.path().join(TRUST_FILENAME), manifest).unwrap();
 
         let err = read_trusted(dir.path(), &path).unwrap_err().to_string();
@@ -232,15 +219,9 @@ mod tests {
         let manifest = TrustManifest {
             trusted: vec![
                 // Right path, wrong hash.
-                TrustedEntry {
-                    path: canon.to_string_lossy().into_owned(),
-                    sha256: sha256_hex(b"something else"),
-                },
+                TrustedEntry { path: canon.to_string_lossy().into_owned(), sha256: sha256_hex(b"something else") },
                 // Right hash, wrong path.
-                TrustedEntry {
-                    path: "/some/other/place.kdl".to_string(),
-                    sha256: sha256_hex(body.as_bytes()),
-                },
+                TrustedEntry { path: "/some/other/place.kdl".to_string(), sha256: sha256_hex(body.as_bytes()) },
             ],
         };
         assert!(!is_trusted(&path, &sha256_hex(body.as_bytes()), &manifest));

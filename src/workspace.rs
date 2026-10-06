@@ -122,12 +122,7 @@ fn read_meta(ws_dir: &Path) -> WorkspaceMeta {
 /// Ephemeral workspace flow (`workon -w`): provision, attach, and tear down on
 /// quit. Same observable behavior as before, now composed from the three phases
 /// the headless subcommands also use.
-pub fn run_workspace(
-    project_dir: &Path,
-    project_name: &str,
-    opts: WorkspaceOptions<'_>,
-    vcs: &dyn Vcs,
-) -> Result<()> {
+pub fn run_workspace(project_dir: &Path, project_name: &str, opts: WorkspaceOptions<'_>, vcs: &dyn Vcs) -> Result<()> {
     let WorkspaceOptions { skip_copy_ignored, label, resume, config, cfg } = opts;
     let ws = provision(project_dir, project_name, skip_copy_ignored, label, config, vcs)?;
     let session_id = attach(&ws, cfg, resume)?;
@@ -222,13 +217,8 @@ fn provision_in(
     // Run every provisioner that detects its project type, collecting the
     // resources they created (for teardown) and the env vars they want written
     // to the generated test-env file.
-    let ctx = provision::ProvisionCtx {
-        project_dir,
-        project_name,
-        ws_id: &ws_id,
-        ws_dir: &ws_dir,
-        mise_vars: &mise_vars,
-    };
+    let ctx =
+        provision::ProvisionCtx { project_dir, project_name, ws_id: &ws_id, ws_dir: &ws_dir, mise_vars: &mise_vars };
     let mut resources = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
     let mut session_env: Vec<(String, String)> = Vec::new();
@@ -306,11 +296,7 @@ fn attach(ws: &Workspace, cfg: &Config, resume: Option<&str>) -> Result<Option<S
 /// fresh session (if the agent accepts being handed one) or echoes the one
 /// being resumed. An agent that can't take an id — or a config with no agent —
 /// yields `None`, and teardown prints no resume hint it couldn't honor.
-fn session_layout(
-    cfg: &Config,
-    ws_dir: &Path,
-    resume: Option<&str>,
-) -> Result<(ResolvedLayout, Option<String>)> {
+fn session_layout(cfg: &Config, ws_dir: &Path, resume: Option<&str>) -> Result<(ResolvedLayout, Option<String>)> {
     let Some(agent) = cfg.agent.as_ref() else {
         return Ok((cfg.resolve()?, None));
     };
@@ -375,12 +361,7 @@ fn should_save(save: &SaveMode, ws_id: &str) -> Result<bool> {
 /// drop its test DB, and remove the directory. `session_id` is `Some` only for
 /// the ephemeral flow, and only when workon knows the agent's session id — it
 /// drives the resume hint.
-fn teardown(
-    ws: &Workspace,
-    session_id: Option<&str>,
-    save: SaveMode,
-    vcs: &dyn Vcs,
-) -> Result<TeardownOutcome> {
+fn teardown(ws: &Workspace, session_id: Option<&str>, save: SaveMode, vcs: &dyn Vcs) -> Result<TeardownOutcome> {
     eprintln!();
     eprintln!("Cleaning up workspace {}...", ws.ws_id);
     if let Some(sid) = session_id {
@@ -467,16 +448,10 @@ fn teardown(
 fn load_workspace(reference: Option<&str>) -> Result<Workspace> {
     let ws_dir = resolve_ws_dir(reference)?;
     let project_dir = discover::project_dir_of(&ws_dir)?;
-    let project_name = project_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .context("project directory has no name")?;
-    let ws_id = discover::ws_id_of(&ws_dir, &project_name).with_context(|| {
-        format!(
-            "{} is not named <project>-<ws_id> for project {project_name}",
-            ws_dir.display()
-        )
-    })?;
+    let project_name =
+        project_dir.file_name().map(|n| n.to_string_lossy().into_owned()).context("project directory has no name")?;
+    let ws_id = discover::ws_id_of(&ws_dir, &project_name)
+        .with_context(|| format!("{} is not named <project>-<ws_id> for project {project_name}", ws_dir.display()))?;
     let meta = read_meta(&ws_dir);
 
     // Back-compat: a workspace written before the resources list carried a
@@ -566,12 +541,7 @@ pub struct CreateArgs<'a> {
 
 /// `workon create`: provision a persistent workspace and print its path to
 /// stdout (so `WS=$(workon create)` works). No session, no teardown.
-pub fn cmd_create(
-    project_dir: &Path,
-    project_name: &str,
-    args: CreateArgs<'_>,
-    vcs: &dyn Vcs,
-) -> Result<()> {
+pub fn cmd_create(project_dir: &Path, project_name: &str, args: CreateArgs<'_>, vcs: &dyn Vcs) -> Result<()> {
     let ws = provision(project_dir, project_name, args.skip_copy_ignored, args.name, args.config, vcs)?;
     if args.json {
         let dbs: Vec<&str> = ws.resources.iter().map(Resource::db_name).collect();
@@ -691,10 +661,8 @@ pub fn cmd_list(json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let cwd_c = std::fs::canonicalize(&cwd).unwrap_or(cwd);
 
-    let rows: Vec<WorkspaceRow> = discover::list_worktree_dirs()?
-        .iter()
-        .filter_map(|ws_dir| describe_workspace(ws_dir, &cwd_c))
-        .collect();
+    let rows: Vec<WorkspaceRow> =
+        discover::list_worktree_dirs()?.iter().filter_map(|ws_dir| describe_workspace(ws_dir, &cwd_c)).collect();
 
     if json {
         let arr: Vec<serde_json::Value> = rows
@@ -753,10 +721,8 @@ fn describe_workspace(ws_dir: &Path, cwd_c: &Path) -> Option<WorkspaceRow> {
                 return None;
             }
             let project_name = project_dir.file_name().map(|n| n.to_string_lossy().into_owned());
-            let ws_id = project_name
-                .as_deref()
-                .and_then(|pn| discover::ws_id_of(ws_dir, pn))
-                .unwrap_or_else(dir_basename);
+            let ws_id =
+                project_name.as_deref().and_then(|pn| discover::ws_id_of(ws_dir, pn)).unwrap_or_else(dir_basename);
             Some(WorkspaceRow {
                 ws_id,
                 name,
@@ -789,17 +755,17 @@ fn describe_workspace(ws_dir: &Path, cwd_c: &Path) -> Option<WorkspaceRow> {
 /// a jj error reads as "active" (this gates no mutation — a future guard that
 /// *acts* on divergence must instead read fail-closed).
 fn active_status(project_dir: &Path) -> &'static str {
-    let divergent = project_dir.join(".jj").is_dir()
-        && jj_divergent_change_ids(project_dir).is_ok_and(|ids| !ids.is_empty());
-    if divergent { "divergent" } else { "active" }
+    let divergent =
+        project_dir.join(".jj").is_dir() && jj_divergent_change_ids(project_dir).is_ok_and(|ids| !ids.is_empty());
+    if divergent {
+        "divergent"
+    } else {
+        "active"
+    }
 }
 
 fn workspace_age_seconds(ws_dir: &Path) -> u64 {
-    std::fs::metadata(ws_dir)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .map_or(0, |d| d.as_secs())
+    std::fs::metadata(ws_dir).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(0, |d| d.as_secs())
 }
 
 fn humanize_age(secs: u64) -> String {
@@ -842,23 +808,19 @@ fn enumerate_gitignored_files(project_dir: &Path) -> Result<Vec<String>> {
     let stdout = run_git_utf8(project_dir, &["ls-files", "--others", "--ignored", "--exclude-standard"])
         .map_err(|e| anyhow::anyhow!("failed to list gitignored files: {e}"))?;
 
-    Ok(stdout.lines()
+    Ok(stdout
+        .lines()
         .filter(|l| !l.is_empty() && !l.starts_with(".jj/"))
         .map(|l| l.strip_suffix('/').unwrap_or(l).to_string())
         .collect())
 }
 
-fn do_copy_files(
-    project_dir: &Path,
-    ws_dir: &Path,
-    files: &[String],
-    cancelled: &AtomicBool,
-    silent: &AtomicBool,
-) {
+fn do_copy_files(project_dir: &Path, ws_dir: &Path, files: &[String], cancelled: &AtomicBool, silent: &AtomicBool) {
     let total = files.len();
 
     // Collect unique first-level path components (dirs and root files).
-    let mut top_level: Vec<String> = files.iter()
+    let mut top_level: Vec<String> = files
+        .iter()
         .map(|l| match l.find('/') {
             Some(i) => l[..i].to_string(),
             None => l.clone(),
@@ -870,7 +832,9 @@ fn do_copy_files(
     let opts = clonetree::Options::new();
     let mut cloned: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for name in &top_level {
-        if cancelled.load(Ordering::Relaxed) { return; }
+        if cancelled.load(Ordering::Relaxed) {
+            return;
+        }
 
         let src = project_dir.join(name);
         let dst = ws_dir.join(name);
@@ -883,15 +847,14 @@ fn do_copy_files(
             if clonetree::clone_tree(&src, &dst, &opts).is_ok() {
                 cloned.insert(name);
             }
-        } else if src.is_file()
-            && std::fs::copy(&src, &dst).is_ok()
-        {
+        } else if src.is_file() && std::fs::copy(&src, &dst).is_ok() {
             cloned.insert(name);
         }
     }
 
     // Copy any stragglers whose top-level clone failed.
-    let stragglers: Vec<&str> = files.iter()
+    let stragglers: Vec<&str> = files
+        .iter()
         .filter(|l| {
             let top = match l.find('/') {
                 Some(i) => &l[..i],
@@ -904,10 +867,14 @@ fn do_copy_files(
 
     let mut copied = 0usize;
     for rel_path in &stragglers {
-        if cancelled.load(Ordering::Relaxed) { return; }
+        if cancelled.load(Ordering::Relaxed) {
+            return;
+        }
 
         let dst = ws_dir.join(rel_path);
-        if dst.exists() { continue; }
+        if dst.exists() {
+            continue;
+        }
         let src = project_dir.join(rel_path);
         if src.is_dir() {
             // Nested git repos (e.g. bundler git gem checkouts) appear as
@@ -938,15 +905,9 @@ fn do_copy_files(
     }
 
     if !silent.load(Ordering::Relaxed) {
-        eprintln!(
-            "Cloned {total} gitignored files ({} dirs cloned, {copied} copied individually)",
-            cloned.len(),
-        );
+        eprintln!("Cloned {total} gitignored files ({} dirs cloned, {copied} copied individually)", cloned.len(),);
     }
 }
-
-
-
 
 /// The environment handed to the workspace session: mise env plus any provisioner
 /// session env recorded in `.workon.json`. Session env wins on conflict — it
@@ -985,9 +946,7 @@ fn trust_mise_configs(ws_dir: &Path) -> Result<()> {
 /// bin dirs are injected directly), so the shims check below would be a false
 /// alarm — `which ruby` resolves correctly without shims on PATH.
 fn mise_activated() -> bool {
-    ["MISE_SHELL", "__MISE_DIFF", "__MISE_SESSION"]
-        .iter()
-        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+    ["MISE_SHELL", "__MISE_DIFF", "__MISE_SESSION"].iter().any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
 }
 
 /// Warn only when tool versions could actually go unresolved: adding shims to
@@ -1114,10 +1073,7 @@ fn migrate_claude_session(session_id: &str, new_ws_dir: &Path) {
 /// Non-alphanumeric characters are replaced with `-`.
 /// `/Users/foo/.worktrees/bar` → `-Users-foo--worktrees-bar`
 fn encode_claude_project_path(path: &Path) -> String {
-    path_str(path)
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    path_str(path).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 fn generate_ws_id() -> String {
@@ -1398,8 +1354,10 @@ mod tests {
         let worktrees = tmp.path().join("worktrees");
         let none: Vec<Box<dyn Provisioner>> = Vec::new();
 
-        let copied = provision_in(&worktrees, &repo, "proj", false, None, None, &crate::vcs::GitBackend, &none).unwrap();
-        let skipped = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &none).unwrap();
+        let copied =
+            provision_in(&worktrees, &repo, "proj", false, None, None, &crate::vcs::GitBackend, &none).unwrap();
+        let skipped =
+            provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &none).unwrap();
 
         assert_eq!(std::fs::read_to_string(copied.ws_dir.join(".env")).unwrap(), "SECRET=1\n");
         assert!(!skipped.ws_dir.join(".env").exists(), "--skip-copy-ignored still copied .env");
@@ -1470,7 +1428,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
+        let ws = provision_in(
+            &worktrees,
+            &repo,
+            "proj",
+            true,
+            None,
+            None,
+            &crate::vcs::GitBackend,
+            &provision::provisioners(),
+        )
+        .unwrap();
         let ws_dir = ws.ws_dir.clone();
 
         let outcome = teardown(&ws, None, SaveMode::NoSave, &crate::vcs::GitBackend).unwrap();
@@ -1485,7 +1453,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
+        let ws = provision_in(
+            &worktrees,
+            &repo,
+            "proj",
+            true,
+            None,
+            None,
+            &crate::vcs::GitBackend,
+            &provision::provisioners(),
+        )
+        .unwrap();
 
         // Commit work on the detached HEAD that no branch names — exactly what
         // would be lost on teardown.
@@ -1506,7 +1484,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
+        let ws = provision_in(
+            &worktrees,
+            &repo,
+            "proj",
+            true,
+            None,
+            None,
+            &crate::vcs::GitBackend,
+            &provision::provisioners(),
+        )
+        .unwrap();
 
         std::fs::write(ws.ws_dir.join("new.txt"), "work").unwrap();
         git(&ws.ws_dir, &["add", "-A"]);
@@ -1524,12 +1512,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = cloned_repo(tmp.path());
         let worktrees = tmp.path().join("worktrees");
-        let ws = provision_in(&worktrees, &repo, "proj", true, Some("fix bug"), None, &crate::vcs::GitBackend, &provision::provisioners()).unwrap();
+        let ws = provision_in(
+            &worktrees,
+            &repo,
+            "proj",
+            true,
+            Some("fix bug"),
+            None,
+            &crate::vcs::GitBackend,
+            &provision::provisioners(),
+        )
+        .unwrap();
 
-        let values: Vec<String> = ref_candidates_from(&worktrees)
-            .iter()
-            .map(|c| c.get_value().to_string_lossy().into_owned())
-            .collect();
+        let values: Vec<String> =
+            ref_candidates_from(&worktrees).iter().map(|c| c.get_value().to_string_lossy().into_owned()).collect();
 
         assert!(values.contains(&ws.ws_id), "ws_id offered: {values:?}");
         assert!(values.iter().any(|v| v == "fix-bug"), "nickname slug offered: {values:?}");
@@ -1544,10 +1540,8 @@ mod tests {
             provision_in(&worktrees, &repo, "proj", true, Some("fix bug"), None, &crate::vcs::GitBackend, &[]).unwrap();
         }
 
-        let values: Vec<String> = ref_candidates_from(&worktrees)
-            .iter()
-            .map(|c| c.get_value().to_string_lossy().into_owned())
-            .collect();
+        let values: Vec<String> =
+            ref_candidates_from(&worktrees).iter().map(|c| c.get_value().to_string_lossy().into_owned()).collect();
 
         assert_eq!(values.iter().filter(|v| *v == "fix-bug").count(), 1, "{values:?}");
     }
@@ -1997,14 +1991,8 @@ mod tests {
 
         copy_gitignored_files(&project, &ws).unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(ws.join("config/creds/secret.key")).unwrap(),
-            "hidden"
-        );
-        assert_eq!(
-            std::fs::read_to_string(ws.join("config/settings.toml")).unwrap(),
-            "tracked"
-        );
+        assert_eq!(std::fs::read_to_string(ws.join("config/creds/secret.key")).unwrap(), "hidden");
+        assert_eq!(std::fs::read_to_string(ws.join("config/settings.toml")).unwrap(), "tracked");
     }
 
     #[test]
@@ -2091,9 +2079,7 @@ mod tests {
         std::fs::write(root.join("services/web/.tool-versions"), "").unwrap();
 
         let configs = find_mise_configs(root);
-        let rel: Vec<_> = configs.iter()
-            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().to_string())
-            .collect();
+        let rel: Vec<_> = configs.iter().map(|p| p.strip_prefix(root).unwrap().to_string_lossy().to_string()).collect();
 
         assert!(rel.contains(&".mise.toml".to_string()));
         assert!(rel.contains(&"services/api/.mise.toml".to_string()));
@@ -2127,9 +2113,7 @@ mod tests {
         std::fs::write(root.join("a/b/c/d/.mise.toml"), "").unwrap();
 
         let configs = find_mise_configs(root);
-        let rel: Vec<_> = configs.iter()
-            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().to_string())
-            .collect();
+        let rel: Vec<_> = configs.iter().map(|p| p.strip_prefix(root).unwrap().to_string_lossy().to_string()).collect();
 
         assert!(rel.contains(&"a/b/c/.mise.toml".to_string()));
         assert!(!rel.contains(&"a/b/c/d/.mise.toml".to_string()), "should not scan beyond depth 3");
@@ -2272,13 +2256,7 @@ mod tests {
 
         copy_gitignored_files(&project, &ws).unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(ws.join("target/debug/app")).unwrap(),
-            "binary"
-        );
-        assert_eq!(
-            std::fs::read_to_string(ws.join(".env")).unwrap(),
-            "SECRET=123"
-        );
+        assert_eq!(std::fs::read_to_string(ws.join("target/debug/app")).unwrap(), "binary");
+        assert_eq!(std::fs::read_to_string(ws.join(".env")).unwrap(), "SECRET=123");
     }
 }

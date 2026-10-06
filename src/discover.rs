@@ -54,10 +54,7 @@ pub fn project_dir_of(ws_dir: &Path) -> Result<PathBuf> {
     let common = run_git_utf8(ws_dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .with_context(|| format!("{} is not inside a git/jj worktree", ws_dir.display()))?;
     let common = PathBuf::from(common.trim());
-    common
-        .parent()
-        .map(Path::to_path_buf)
-        .with_context(|| format!("git common dir {} has no parent", common.display()))
+    common.parent().map(Path::to_path_buf).with_context(|| format!("git common dir {} has no parent", common.display()))
 }
 
 /// The immediate directory entries under `~/.worktrees` (each a workspace).
@@ -74,11 +71,7 @@ pub fn list_dirs_in(root: &Path) -> Vec<PathBuf> {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
+    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
     dirs.sort();
     dirs
 }
@@ -93,16 +86,11 @@ pub fn assert_under_worktrees(ws_dir: &Path) -> Result<()> {
 
 /// [`assert_under_worktrees`] against any root, so tests need not touch `$HOME`.
 fn assert_under(worktrees: &Path, ws_dir: &Path) -> Result<()> {
-    let root = std::fs::canonicalize(worktrees)
-        .with_context(|| format!("{} does not exist", worktrees.display()))?;
-    let target = std::fs::canonicalize(ws_dir)
-        .with_context(|| format!("cannot resolve workspace path {}", ws_dir.display()))?;
+    let root = std::fs::canonicalize(worktrees).with_context(|| format!("{} does not exist", worktrees.display()))?;
+    let target =
+        std::fs::canonicalize(ws_dir).with_context(|| format!("cannot resolve workspace path {}", ws_dir.display()))?;
     if !is_strictly_inside(&target, &root) {
-        bail!(
-            "refusing to operate on {} — not a workspace under {}",
-            target.display(),
-            root.display()
-        );
+        bail!("refusing to operate on {} — not a workspace under {}", target.display(), root.display());
     }
     Ok(())
 }
@@ -130,15 +118,9 @@ mod tests {
 
     #[test]
     fn ws_id_of_strips_project_prefix() {
-        assert_eq!(
-            ws_id_of(Path::new("/w/acme-ws-abc123"), "acme"),
-            Some("ws-abc123".to_string())
-        );
+        assert_eq!(ws_id_of(Path::new("/w/acme-ws-abc123"), "acme"), Some("ws-abc123".to_string()));
         // Nickname suffix stays part of the ws_id.
-        assert_eq!(
-            ws_id_of(Path::new("/w/acme-ws-abc123-fix-bug"), "acme"),
-            Some("ws-abc123-fix-bug".to_string())
-        );
+        assert_eq!(ws_id_of(Path::new("/w/acme-ws-abc123-fix-bug"), "acme"), Some("ws-abc123-fix-bug".to_string()));
     }
 
     #[test]

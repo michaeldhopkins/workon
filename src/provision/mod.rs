@@ -186,7 +186,11 @@ pub(crate) fn run_step(cmd: Cmd, what: &str) -> bool {
 
 fn env_host(value: Option<String>, default: &str) -> String {
     let host = value.unwrap_or_default();
-    if host.is_empty() || host.starts_with('/') { default.to_string() } else { host }
+    if host.is_empty() || host.starts_with('/') {
+        default.to_string()
+    } else {
+        host
+    }
 }
 
 pub(crate) fn auth_prefix(user: &str, password: Option<String>) -> String {
@@ -236,11 +240,8 @@ fn mysqladmin(args: &[&str]) -> Cmd {
 /// suffix are always kept; the project name is truncated if the whole would
 /// overflow. Matches today's `{project}_{ws_id}_test` for normal-length names.
 pub fn test_db_name(project_name: &str, ws_id: &str) -> String {
-    let sanitize = |s: &str| {
-        s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-            .collect::<String>()
-    };
+    let sanitize =
+        |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect::<String>();
     let suffix = format!("_{}_test", sanitize(ws_id));
     let proj = sanitize(project_name);
     let max_proj = 63usize.saturating_sub(suffix.len());
@@ -318,7 +319,8 @@ mod tests {
 
     #[test]
     fn postgres_url_is_built_from_the_pg_variables() {
-        let env = [("PGHOST", "db.local"), ("PGPORT", "5433"), ("PGUSER", "app"), ("PGPASSWORD", "s@cret"), ("USER", "os")];
+        let env =
+            [("PGHOST", "db.local"), ("PGPORT", "5433"), ("PGUSER", "app"), ("PGPASSWORD", "s@cret"), ("USER", "os")];
         assert_eq!(DbEngine::Postgres.url_in("t", &env_of(&env)), "postgresql://app:s%40cret@db.local:5433/t");
         // No PGUSER: the OS user; a socket-path PGHOST: localhost, since a URL needs TCP.
         let env = [("PGHOST", "/tmp"), ("USER", "os")];
@@ -328,7 +330,13 @@ mod tests {
 
     #[test]
     fn mysql_url_is_built_from_the_mysql_variables() {
-        let env = [("MYSQL_HOST", "db.local"), ("MYSQL_TCP_PORT", "3307"), ("MYSQL_USER", "app"), ("MYSQL_PWD", "pw"), ("USER", "os")];
+        let env = [
+            ("MYSQL_HOST", "db.local"),
+            ("MYSQL_TCP_PORT", "3307"),
+            ("MYSQL_USER", "app"),
+            ("MYSQL_PWD", "pw"),
+            ("USER", "os"),
+        ];
         assert_eq!(DbEngine::Mysql.url_in("t", &env_of(&env)), "mysql://app:pw@db.local:3307/t");
         // An empty port is MySQL's default, not an empty `host:`.
         let env = [("MYSQL_HOST", "/var/run/mysqld.sock"), ("MYSQL_TCP_PORT", ""), ("USER", "os")];

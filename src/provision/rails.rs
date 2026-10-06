@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, run_step, Setup};
+use super::{run_step, test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
 
 pub struct Rails;
 
@@ -187,10 +187,7 @@ mod tests {
         let setup = Rails.setup(&ctx).unwrap();
         assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
 
-        let out = Command::new("psql")
-            .args(["-tAc", "select to_regclass('public.widgets')", &name])
-            .output()
-            .unwrap();
+        let out = Command::new("psql").args(["-tAc", "select to_regclass('public.widgets')", &name]).output().unwrap();
         let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Resource::PostgresDb { name: name.clone() }.teardown(); // clean up before asserting
 

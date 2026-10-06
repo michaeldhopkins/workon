@@ -27,7 +27,7 @@ const LIMIT: usize = 400;
 /// Files over the limit, each pinned at its production size when the gate went in: it may
 /// shrink, never grow. New code goes in a new module, never into a pinned file.
 fn pinned() -> HashMap<&'static str, usize> {
-    HashMap::from([("src/vcs/jj.rs", 426), ("src/workspace.rs", 1159)])
+    HashMap::from([("src/workspace.rs", 1115)])
 }
 
 /// Is this item compiled only for tests (`#[test]`, `#[tokio::test]`, `#[cfg(test)]`)?
@@ -242,8 +242,14 @@ fn the_ratchet_holds_a_pinned_file_to_its_size() {
         verdict("a.rs", 450, 400, &pinned).is_some_and(|m| m.contains("Lower its pin to 450")),
         "a shrink must lower the pin, or the file could grow back"
     );
-    assert!(verdict("a.rs", 501, 400, &pinned).is_some_and(|m| m.contains("up from its pinned")), "a pinned file may not grow");
-    assert!(verdict("a.rs", 400, 400, &pinned).is_some_and(|m| m.contains("remove its entry")), "once under the limit the pin must go");
+    assert!(
+        verdict("a.rs", 501, 400, &pinned).is_some_and(|m| m.contains("up from its pinned")),
+        "a pinned file may not grow"
+    );
+    assert!(
+        verdict("a.rs", 400, 400, &pinned).is_some_and(|m| m.contains("remove its entry")),
+        "once under the limit the pin must go"
+    );
     assert!(verdict("b.rs", 400, 400, &pinned).is_none(), "unpinned, at the limit");
     assert!(verdict("b.rs", 401, 400, &pinned).is_some_and(|m| m.contains("over the")), "unpinned, over the limit");
 }
@@ -264,9 +270,21 @@ fn only_test_items_are_left_out_of_the_count() {
     assert_eq!(count("fn a() {}\n"), 1, "a file with no tests counts whole");
     assert_eq!(count(""), 0);
     let cases: &[(&str, &str, usize)] = &[
-        ("a test-only mod declaration is its own line, not the rest of the file", "mod real;\n#[cfg(test)]\nmod test_support;\n\nfn a() {}\nfn b() {}\n", 4),
-        ("a test-only helper is the helper, not the rest of the file", "fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\nfn c() {}\n", 3),
-        ("an attribute between the guard and the item goes with the item", "#[cfg(test)]\n#[path = \"t.rs\"]\nmod tests;\n\nfn a() {}\nfn b() {}\n", 3),
+        (
+            "a test-only mod declaration is its own line, not the rest of the file",
+            "mod real;\n#[cfg(test)]\nmod test_support;\n\nfn a() {}\nfn b() {}\n",
+            4,
+        ),
+        (
+            "a test-only helper is the helper, not the rest of the file",
+            "fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\nfn c() {}\n",
+            3,
+        ),
+        (
+            "an attribute between the guard and the item goes with the item",
+            "#[cfg(test)]\n#[path = \"t.rs\"]\nmod tests;\n\nfn a() {}\nfn b() {}\n",
+            3,
+        ),
         ("a same-line test module body is still skipped", "fn a() {}\n#[cfg(test)] mod tests {\n    fn t() {}\n}\n", 1),
         ("a one-line test module", "fn a() {}\n#[cfg(test)] mod tests { fn t() {} }\nfn b() {}\n", 2),
         (
@@ -274,8 +292,16 @@ fn only_test_items_are_left_out_of_the_count() {
             "fn a() {}\n#[cfg(test)]\nmod a_tests {\n    #[test]\n    fn t() {\n    }\n}\n\nfn b() {}\nfn c() {}\n",
             4,
         ),
-        ("a `}` in column 0 inside a test's string does not end the module", "#[cfg(test)]\nmod tests {\n    const FIX: &str = \"\n}\n\";\n    fn t() {}\n}\nfn b() {}\n", 1),
-        ("`#[cfg(test)]` in a string or comment is not an attribute", "// #[cfg(test)]\nconst A: &str = \"\n#[cfg(test)]\nmod x {\";\nfn b() {}\n", 5),
+        (
+            "a `}` in column 0 inside a test's string does not end the module",
+            "#[cfg(test)]\nmod tests {\n    const FIX: &str = \"\n}\n\";\n    fn t() {}\n}\nfn b() {}\n",
+            1,
+        ),
+        (
+            "`#[cfg(test)]` in a string or comment is not an attribute",
+            "// #[cfg(test)]\nconst A: &str = \"\n#[cfg(test)]\nmod x {\";\nfn b() {}\n",
+            5,
+        ),
         ("a test-only method in a production impl", "impl A {\n    fn a() {}\n    #[cfg(test)]\n    fn t() {}\n}\n", 3),
         ("doc comments go with their item", "/// tests\n#[cfg(test)]\nmod t {}\nfn b() {}\n", 1),
         ("an async test under a runtime's attribute is a test", "#[tokio::test]\nasync fn t() {\n}\nfn b() {}\n", 1),
@@ -315,12 +341,20 @@ fn a_test_only_module_file_is_found_from_its_declaration() {
     .map(PathBuf::from)
     .collect();
     let beside_mod_rs = OutOfLine { name: "tests".into(), path: None };
-    assert!(module_files(Path::new("src/vcs/git/mod.rs"), &beside_mod_rs).contains(&PathBuf::from("src/vcs/git/tests.rs")));
+    assert!(
+        module_files(Path::new("src/vcs/git/mod.rs"), &beside_mod_rs).contains(&PathBuf::from("src/vcs/git/tests.rs"))
+    );
     let under_named_dir = OutOfLine { name: "fixtures".into(), path: None };
     let roots = module_files(Path::new("src/app.rs"), &under_named_dir);
-    assert!(roots.contains(&PathBuf::from("src/app/fixtures/mod.rs")), "a non-mod.rs file's children live in a directory named after it");
+    assert!(
+        roots.contains(&PathBuf::from("src/app/fixtures/mod.rs")),
+        "a non-mod.rs file's children live in a directory named after it"
+    );
     let with_path = OutOfLine { name: "t".into(), path: Some("elsewhere/t.rs".into()) };
-    assert_eq!(module_files(Path::new("src/vcs/git/mod.rs"), &with_path), vec![PathBuf::from("src/vcs/git/elsewhere/t.rs")]);
+    assert_eq!(
+        module_files(Path::new("src/vcs/git/mod.rs"), &with_path),
+        vec![PathBuf::from("src/vcs/git/elsewhere/t.rs")]
+    );
 
     let tests_dir = std::env::temp_dir().join(format!("workon-file-length-{}", std::process::id()));
     for f in &files {
@@ -341,5 +375,8 @@ fn a_test_only_module_file_is_found_from_its_declaration() {
             .iter()
             .map(|f| tests_dir.join(f))
             .collect();
-    assert_eq!(found, expected, "the test module files and everything under a test module's directory, and nothing else");
+    assert_eq!(
+        found, expected,
+        "the test module files and everything under a test module's directory, and nothing else"
+    );
 }

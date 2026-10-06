@@ -78,10 +78,7 @@ fn running_descendant_commands(name: &str) -> Result<HashSet<String>> {
     let Some(server_pid) = server_pid_for(name)? else {
         return Ok(HashSet::new());
     };
-    let out = Cmd::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,comm="])
-        .timeout(ZELLIJ_TIMEOUT)
-        .run()?;
+    let out = Cmd::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).timeout(ZELLIJ_TIMEOUT).run()?;
     Ok(parse_descendants(&out.stdout_lossy(), server_pid))
 }
 
@@ -147,10 +144,7 @@ fn session_exists(zellij: &str, name: &str) -> Result<bool> {
 }
 
 fn delete_session(zellij: &str, name: &str) -> Result<()> {
-    let result = Cmd::new(zellij)
-        .args(["delete-session", name, "--force"])
-        .timeout(ZELLIJ_TIMEOUT)
-        .run();
+    let result = Cmd::new(zellij).args(["delete-session", name, "--force"]).timeout(ZELLIJ_TIMEOUT).run();
     if delete_hung(&result) {
         recover_session(name)
     } else {
@@ -164,10 +158,7 @@ fn recover_session(name: &str) -> Result<()> {
     eprintln!("Warning: zellij session '{name}' appears hung, recovering...");
 
     let pattern = anchored_server_pattern(name);
-    let _ = Cmd::new("pkill")
-        .args(["-9", "-f", &pattern])
-        .timeout(ZELLIJ_TIMEOUT)
-        .run();
+    let _ = Cmd::new("pkill").args(["-9", "-f", &pattern]).timeout(ZELLIJ_TIMEOUT).run();
 
     if let Ok(socket) = session_socket(name) {
         let _ = std::fs::remove_file(&socket);
@@ -196,22 +187,15 @@ fn socket_dir() -> Result<PathBuf> {
 }
 
 fn current_uid() -> Result<String> {
-    let out = Cmd::new("id")
-        .arg("-u")
-        .timeout(ZELLIJ_TIMEOUT)
-        .run()
-        .context("failed to read current uid")?;
+    let out = Cmd::new("id").arg("-u").timeout(ZELLIJ_TIMEOUT).run().context("failed to read current uid")?;
     Ok(out.stdout_lossy().trim().to_string())
 }
 
 fn zellij_version() -> Result<String> {
     // `zellij --version` prints from the binary; does not touch IPC, so it's
     // safe even when a server is hung.
-    let out = Cmd::new("zellij")
-        .arg("--version")
-        .timeout(ZELLIJ_TIMEOUT)
-        .run()
-        .context("failed to read zellij version")?;
+    let out =
+        Cmd::new("zellij").arg("--version").timeout(ZELLIJ_TIMEOUT).run().context("failed to read zellij version")?;
     let stdout = out.stdout_lossy();
     stdout
         .split_whitespace()
@@ -232,22 +216,7 @@ pub(crate) fn anchored_server_pattern(name: &str) -> String {
 fn regex_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if matches!(
-            c,
-            '.' | '+'
-                | '*'
-                | '?'
-                | '('
-                | ')'
-                | '|'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '^'
-                | '$'
-                | '\\'
-        ) {
+        if matches!(c, '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '\\') {
             out.push('\\');
         }
         out.push(c);
@@ -270,12 +239,7 @@ pub fn launch(
     // Interactive: needs full TTY (stdin/stdout/stderr inherited from parent),
     // which procpilot's Cmd doesn't support — use std::process::Command directly.
     Command::new("zellij")
-        .args([
-            "--new-session-with-layout",
-            &layout.to_string_lossy(),
-            "--session",
-            name,
-        ])
+        .args(["--new-session-with-layout", &layout.to_string_lossy(), "--session", name])
         .env("ZELLIJ_CONFIG_FILE", config.path())
         .envs(extra_env)
         .current_dir(working_dir)
@@ -314,10 +278,7 @@ fn preflight_socket(name: &str) {
 /// Probe IPC with a short `list-sessions`. If it times out, recover this
 /// session's server before handing the TTY to a no-timeout `zellij attach`.
 fn preflight_responsive(name: &str) {
-    let result = Cmd::new("zellij")
-        .args(["list-sessions", "--no-formatting"])
-        .timeout(ZELLIJ_TIMEOUT)
-        .run();
+    let result = Cmd::new("zellij").args(["list-sessions", "--no-formatting"]).timeout(ZELLIJ_TIMEOUT).run();
     if let Err(e) = result
         && e.is_timeout()
     {
@@ -327,16 +288,8 @@ fn preflight_responsive(name: &str) {
 
 fn server_pid_for(name: &str) -> Result<Option<u32>> {
     let pattern = anchored_server_pattern(name);
-    match Cmd::new("pgrep")
-        .args(["-f", &pattern])
-        .timeout(ZELLIJ_TIMEOUT)
-        .run()
-    {
-        Ok(out) => Ok(out
-            .stdout_lossy()
-            .lines()
-            .next()
-            .and_then(|s| s.trim().parse().ok())),
+    match Cmd::new("pgrep").args(["-f", &pattern]).timeout(ZELLIJ_TIMEOUT).run() {
+        Ok(out) => Ok(out.stdout_lossy().lines().next().and_then(|s| s.trim().parse().ok())),
         Err(RunError::NonZeroExit { .. }) => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -547,8 +500,7 @@ mod tests {
             s.insert("claude".to_string());
             s
         };
-        let err = ensure_layout_compatible_inner("foo", layout, "my-config", &running)
-            .expect_err("should refuse");
+        let err = ensure_layout_compatible_inner("foo", layout, "my-config", &running).expect_err("should refuse");
         let msg = err.to_string();
         // The recovery hint must use the requested config name verbatim so the
         // user can copy-paste it.
@@ -557,21 +509,14 @@ mod tests {
 
     #[test]
     fn timed_run_returns_stdout_on_success() {
-        let output = Cmd::new("echo")
-            .arg("hello")
-            .timeout(Duration::from_secs(5))
-            .run()
-            .unwrap();
+        let output = Cmd::new("echo").arg("hello").timeout(Duration::from_secs(5)).run().unwrap();
         assert_eq!(output.stdout_lossy().trim(), "hello");
     }
 
     #[test]
     fn timed_run_returns_error_on_hang() {
         let start = std::time::Instant::now();
-        let result = Cmd::new("sleep")
-            .arg("60")
-            .timeout(Duration::from_secs(1))
-            .run();
+        let result = Cmd::new("sleep").arg("60").timeout(Duration::from_secs(1)).run();
         let elapsed = start.elapsed();
 
         assert!(matches!(result, Err(RunError::Timeout { .. })));
@@ -636,12 +581,7 @@ mod tests {
     fn spawn_fake_server(socket_path: &str) -> std::process::Child {
         use std::process::Stdio;
         Command::new("bash")
-            .args([
-                "-c",
-                "exec -a \"zellij --server $1\" sleep 60",
-                "decoy",
-                socket_path,
-            ])
+            .args(["-c", "exec -a \"zellij --server $1\" sleep 60", "decoy", socket_path])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -675,10 +615,7 @@ mod tests {
         let _ = foo_bar.wait();
 
         assert!(foo_pid.is_some(), "expected to find server for {foo_session}");
-        assert!(
-            foo_bar_pid.is_some(),
-            "expected to find server for {foo_bar_session}"
-        );
+        assert!(foo_bar_pid.is_some(), "expected to find server for {foo_bar_session}");
         // Critically: the foo lookup must NOT have matched the foo-bar decoy.
         assert_ne!(
             foo_pid, foo_bar_pid,
@@ -717,10 +654,7 @@ mod tests {
         let _ = target_proc.wait();
         let _ = bystander_proc.wait();
 
-        assert!(
-            target_pid_after.is_none(),
-            "recover_session left target alive (pid {target_pid_after:?})"
-        );
+        assert!(target_pid_after.is_none(), "recover_session left target alive (pid {target_pid_after:?})");
         assert_eq!(
             bystander_pid_before, bystander_pid_after,
             "recover_session killed unrelated session — bystander pid changed"

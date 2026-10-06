@@ -51,7 +51,6 @@ pub fn percent_encode_userinfo(s: &str) -> String {
     crate::provision::percent_encode_userinfo(s)
 }
 
-
 pub fn anchored_server_pattern(name: &str) -> String {
     crate::session::anchored_server_pattern(name)
 }

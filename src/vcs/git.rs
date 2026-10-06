@@ -47,11 +47,8 @@ impl Vcs for GitBackend {
             .with_context(|| {
                 format!("trunk ref `{remote}/{trunk}` doesn't resolve — the repo may have no commits on {trunk} yet")
             })?;
-        run_git(
-            project_dir,
-            &["worktree", "add", "--detach", &path_str(ws_dir), &base],
-        )
-        .context("failed to create git worktree")?;
+        run_git(project_dir, &["worktree", "add", "--detach", &path_str(ws_dir), &base])
+            .context("failed to create git worktree")?;
         Ok(base)
     }
 
@@ -94,8 +91,7 @@ impl Vcs for GitBackend {
 
         let hash = run_git_utf8(ws_dir, &["rev-parse", "HEAD"]).context("failed to get commit hash")?;
 
-        run_git(project_dir, &["branch", &format!("workon/{ws_id}"), &hash])
-            .context("failed to create branch")?;
+        run_git(project_dir, &["branch", &format!("workon/{ws_id}"), &hash]).context("failed to create branch")?;
 
         eprintln!("Saved as branch workon/{ws_id}");
         Ok(())
@@ -125,7 +121,9 @@ impl Vcs for GitBackend {
                 &["for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads", "refs/remotes"],
             )
             .is_ok_and(|s| !s.trim().is_empty());
-            if ahead && !on_stack && !on_ref
+            if ahead
+                && !on_stack
+                && !on_ref
                 && let Ok(desc) = run_git_utf8(ws_dir, &["log", "-1", "--format=%h  %s", sha])
             {
                 stranded.push(desc.trim().to_string());
@@ -136,8 +134,7 @@ impl Vcs for GitBackend {
 
     fn save_stranded(&self, project_dir: &Path, ws_id: &str, commit_id: &str) -> Result<()> {
         let name = format!("workon/{ws_id}-{commit_id}");
-        run_git(project_dir, &["branch", &name, commit_id])
-            .context("failed to branch stranded commit")?;
+        run_git(project_dir, &["branch", &name, commit_id]).context("failed to branch stranded commit")?;
         eprintln!("Saved stranded commit {commit_id} as branch {name}");
         Ok(())
     }
@@ -169,50 +166,110 @@ mod tests {
         let origin = tmp.join("origin.git");
         let repo = tmp.join("repo");
 
-        Command::new("git").args(["init", "--bare", "--initial-branch=main", &path_str(&origin)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main", &path_str(&origin)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
-        Command::new("git").args(["clone", &path_str(&origin), &path_str(&repo)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["clone", &path_str(&origin), &path_str(&repo)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
-        Command::new("git").args(["-C", &path_str(&repo), "config", "user.email", "test@test.com"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "config", "user.name", "Test"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "config", "user.email", "test@test.com"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "config", "user.name", "Test"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         std::fs::write(repo.join("README.md"), "hello").unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "add", "."])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "commit", "-m", "init"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "push"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "add", "."])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "push"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         (origin, repo)
     }
 
-    fn init_repo_with_named_remote(tmp: &Path, remote_name: &str, branch: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn init_repo_with_named_remote(
+        tmp: &Path,
+        remote_name: &str,
+        branch: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let origin = tmp.join("origin.git");
         let repo = tmp.join("repo");
 
-        Command::new("git").args(["init", "--bare", &format!("--initial-branch={branch}"), &path_str(&origin)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["init", "--bare", &format!("--initial-branch={branch}"), &path_str(&origin)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
-        Command::new("git").args(["clone", "-o", remote_name, &path_str(&origin), &path_str(&repo)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["clone", "-o", remote_name, &path_str(&origin), &path_str(&repo)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
-        Command::new("git").args(["-C", &path_str(&repo), "config", "user.email", "test@test.com"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "config", "user.name", "Test"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "config", "user.email", "test@test.com"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "config", "user.name", "Test"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         std::fs::write(repo.join("README.md"), "hello").unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "add", "."])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "commit", "-m", "init"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "push"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "add", "."])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "commit", "-m", "init"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "push"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         (origin, repo)
     }
@@ -224,12 +281,24 @@ mod tests {
     fn detect_git_remote_prefers_origin_over_alphabetically_first() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
-        Command::new("git").args(["init", &path_str(&repo)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "remote", "add", "heroku_test", "https://git.heroku.com/x.git"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "remote", "add", "origin", "git@github.com:o/r.git"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["init", &path_str(&repo)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "remote", "add", "heroku_test", "https://git.heroku.com/x.git"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "remote", "add", "origin", "git@github.com:o/r.git"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         assert_eq!(detect_git_remote(&repo), "origin");
     }
@@ -238,10 +307,18 @@ mod tests {
     fn detect_git_remote_falls_back_to_sole_remote_when_no_origin() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
-        Command::new("git").args(["init", &path_str(&repo)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        Command::new("git").args(["-C", &path_str(&repo), "remote", "add", "heroku", "https://git.heroku.com/x.git"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git")
+            .args(["init", &path_str(&repo)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &path_str(&repo), "remote", "add", "heroku", "https://git.heroku.com/x.git"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         assert_eq!(detect_git_remote(&repo), "heroku");
     }
@@ -278,7 +355,10 @@ mod tests {
         let repo = tmp.path().join("repo");
         Command::new("git")
             .args(["init", "--initial-branch=main", &path_str(&repo)])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
 
         let ws = tmp.path().join("ws");
         let err = GitBackend.create_workspace(&repo, &ws, "ws-x", "main").unwrap_err();
@@ -422,8 +502,7 @@ mod tests {
         let dir_path = path_str(dir);
         let mut full = vec!["-C", &*dir_path];
         full.extend_from_slice(args);
-        Command::new("git").args(&full)
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        Command::new("git").args(&full).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
     }
 
     /// Regression for the git analog of the jj bug: an agent that commits in a
@@ -443,7 +522,10 @@ mod tests {
         git_c(&ws, &["commit", "-m", "feature work"]);
 
         let changed = backend.changed_files("ws-x", &base, &repo, &ws);
-        assert!(changed.contains(&"feature.txt".to_string()), "unnamed committed work should be detected, got {changed:?}");
+        assert!(
+            changed.contains(&"feature.txt".to_string()),
+            "unnamed committed work should be detected, got {changed:?}"
+        );
 
         backend.forget_workspace("ws-x", &repo, &ws);
     }
