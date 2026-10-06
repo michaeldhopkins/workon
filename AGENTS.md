@@ -162,6 +162,10 @@ CI figure.
   fixture). Giving the mutants jobs that environment would add those
   toolchains' setup to every run; the helpers they call (adapter parsing,
   `test_db_name`, the URL and Npgsql encoders) are still mutated.
+- `session_layout`'s `agent.command == CLAUDE`: its only effect is copying a
+  resumed transcript under `$HOME`, which a unit test cannot redirect while
+  other tests read it in parallel.
+- `Vcs::stranded_work -> vec![]`: the default body is `Vec::new()`.
 
 jj must be on PATH (the workflow pins it): the jj-backed tests return early
 without it, which reads as a pass and would turn their mutants into false
@@ -205,6 +209,13 @@ real zellij; reading its reply moved to `zellij_reply` (`read_listing`,
 `delete_hung`), tested with real timeout and non-zero-exit errors, which took
 `session.rs` under the length limit. `parse_descendants`' `<`→`>` is killed by a
 `comm` path with spaces, as macOS prints.
+
+**2026-10-05** (CI runs 37339001486, 37339008529): sixteen MISSED. `session_exists`
+and `delete_session` take the zellij program, as `mise_env` does, and a stand-in
+logs what it was asked; `preflight_socket` and `locked_config` are tested with
+`ZELLIJ_SOCKET_DIR` and `ZELLIJ_CONFIG_FILE` set under `ENV_MUTEX`;
+`append_git_exclude`'s newline handling, `provision_in`'s `skip_copy_ignored`
+and the `stranded_work` default each have a test. Two excluded (above).
 
 ## Release process
 
