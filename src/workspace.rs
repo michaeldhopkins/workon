@@ -432,7 +432,7 @@ fn teardown(ws: &Workspace, session_id: Option<&str>, save: SaveMode, vcs: &dyn 
 
     // Spawn rm -rf in the background so the user gets their shell back
     // immediately. The OS will finish the deletion asynchronously.
-    match Cmd::new("rm").args(["-rf", &path_str(&ws.ws_dir)]).spawn() {
+    match crate::background::remove_dir_in_background(&ws.ws_dir) {
         Ok(_) => eprintln!("Removing workspace directory in background"),
         Err(_) => {
             let _ = std::fs::remove_dir_all(&ws.ws_dir);

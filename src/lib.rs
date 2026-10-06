@@ -3,6 +3,7 @@
 //! `cli::Cli` through here to render the man page and completion scripts.
 
 pub mod agent;
+pub mod background;
 pub mod claude_trust;
 pub mod cli;
 pub mod deps;
