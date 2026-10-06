@@ -60,16 +60,21 @@ impl Provisioner for EfCore {
         let conn = npgsql_connection_string(&db);
         let env_key = format!("ConnectionStrings__{CONN_KEY}");
 
-        // Restore the local dotnet-ef tool if a manifest declares one, then apply.
-        let _ = Cmd::new("dotnet").arg("tool").arg("restore").in_dir(ctx.ws_dir).run();
+        // Restore the local dotnet-ef tool if a manifest declares one, then apply. Without a
+        // manifest the restore restores nothing and exits 0 (SDK 10.0.400).
+        let mut restore = Cmd::new("dotnet").args(["tool", "restore"]).in_dir(ctx.ws_dir);
+        for (k, v) in ctx.mise_vars {
+            restore = restore.env(k, v);
+        }
+        let restored = run_step(restore, "dotnet tool restore");
         eprintln!("Applying migrations (dotnet ef database update)...");
         let mut cmd = Cmd::new("dotnet").args(["ef", "database", "update"]).env(&env_key, &conn).in_dir(ctx.ws_dir);
         for (k, v) in ctx.mise_vars {
             cmd = cmd.env(k, v);
         }
-        run_step(cmd, "dotnet ef database update");
+        let failed_steps = restored.into_iter().chain(run_step(cmd, "dotnet ef database update")).collect();
 
-        Ok(Setup { resources: vec![resource], env: vec![(env_key, conn)], ..Setup::default() })
+        Ok(Setup { resources: vec![resource], env: vec![(env_key, conn)], failed_steps, ..Setup::default() })
     }
 }
 

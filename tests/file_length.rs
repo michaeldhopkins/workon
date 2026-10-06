@@ -27,7 +27,7 @@ const LIMIT: usize = 400;
 /// Files over the limit, each pinned at its production size when the gate went in: it may
 /// shrink, never grow. New code goes in a new module, never into a pinned file.
 fn pinned() -> HashMap<&'static str, usize> {
-    HashMap::from([("src/workspace.rs", 1115)])
+    HashMap::from([("src/workspace.rs", 1081)])
 }
 
 /// Is this item compiled only for tests (`#[test]`, `#[tokio::test]`, `#[cfg(test)]`)?

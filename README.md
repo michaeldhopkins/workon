@@ -80,7 +80,7 @@ workon attach fix-bug                # open it in a session (survives on quit)
 workon destroy fix-bug               # tear down, saving rescued work
 ```
 
-- `create` provisions the worktree (jj/git workspace, gitignored-file copy, Rails DB, mise) and prints its path to stdout. It does not start a session. `--json` prints `{ ws_id, path, db }`.
+- `create` provisions the worktree (jj/git workspace, gitignored-file copy, Rails DB, mise) and prints its path to stdout. It does not start a session. `--json` prints `{ ws_id, path, dbs, failed_steps }`. A setup step that fails (a schema load or migration) does not stop `create`: its error is printed, it is listed in `failed_steps`, and the last line says the workspace is not ready.
 - `attach [REF]` opens an existing workspace and returns when the session quits — no teardown. `REF` is a ws_id, a `--name` nickname (given as stored or slugified), or a path; omit it to use the workspace the cwd is inside.
 - `destroy [REF]` bookmarks rescued work under `workon/<ws_id>` and removes the worktree. `--no-save` discards instead. `--json` prints `{ ws_id, saved, dropped_db }`. It refuses any path that isn't under `~/.worktrees`.
 - `list` shows workspaces whose project is at or under the cwd, plus any `stale` worktrees (a leaked `create` with no matching `destroy`), which are shown from anywhere. `--json` prints an array.

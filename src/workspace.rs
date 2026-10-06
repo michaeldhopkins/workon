@@ -67,6 +67,8 @@ struct Workspace {
     /// External resources provisioners created (test DBs, …) — teardown undoes
     /// each. Empty when nothing was provisioned.
     resources: Vec<Resource>,
+    /// Setup steps that failed during this process's `provision`; never read back from disk.
+    failed_steps: Vec<String>,
 }
 
 /// On-disk contents of `.workon.json`. Every field is written explicitly (as
@@ -125,6 +127,7 @@ fn read_meta(ws_dir: &Path) -> WorkspaceMeta {
 pub fn run_workspace(project_dir: &Path, project_name: &str, opts: WorkspaceOptions<'_>, vcs: &dyn Vcs) -> Result<()> {
     let WorkspaceOptions { skip_copy_ignored, label, resume, config, cfg } = opts;
     let ws = provision(project_dir, project_name, skip_copy_ignored, label, config, vcs)?;
+    provision::warn_if_not_ready(&ws.failed_steps);
     let session_id = attach(&ws, cfg, resume)?;
     teardown(&ws, session_id.as_deref(), SaveMode::Prompt, vcs)?;
     Ok(())
@@ -222,12 +225,14 @@ fn provision_in(
     let mut resources = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
     let mut session_env: Vec<(String, String)> = Vec::new();
+    let mut failed_steps = Vec::new();
     for p in provisioners {
         if p.detect(&ws_dir) {
             match p.setup(&ctx) {
                 Ok(s) => {
                     resources.extend(s.resources);
                     session_env.extend(s.session_env);
+                    failed_steps.extend(s.failed_steps);
                     if !s.env.is_empty() {
                         // Each provisioner names the env file its framework loads
                         // (Rails/dotenv -> .env.test.local, Laravel -> .env.testing).
@@ -239,7 +244,10 @@ fn provision_in(
                         env.extend(s.env);
                     }
                 }
-                Err(e) => eprintln!("Warning: {} provisioning failed: {e}", p.name()),
+                Err(e) => {
+                    eprintln!("Warning: {} provisioning failed: {e}", p.name());
+                    failed_steps.push(format!("{} provisioning", p.name()));
+                }
             }
         }
     }
@@ -267,6 +275,7 @@ fn provision_in(
         base: Some(base),
         config: config.map(String::from),
         resources,
+        failed_steps,
     })
 }
 
@@ -473,6 +482,7 @@ fn load_workspace(reference: Option<&str>) -> Result<Workspace> {
         base: meta.base,
         config: meta.config,
         resources,
+        failed_steps: Vec::new(),
     })
 }
 
@@ -549,6 +559,7 @@ pub fn cmd_create(project_dir: &Path, project_name: &str, args: CreateArgs<'_>, 
             "ws_id": ws.ws_id,
             "path": path_str(&ws.ws_dir),
             "dbs": dbs,
+            "failed_steps": ws.failed_steps,
         });
         println!("{obj}");
     } else {
@@ -557,6 +568,7 @@ pub fn cmd_create(project_dir: &Path, project_name: &str, args: CreateArgs<'_>, 
         eprintln!("  Attach:  workon attach {}", ws.ws_id);
         eprintln!("  Destroy: workon destroy {}", ws.ws_id);
     }
+    provision::warn_if_not_ready(&ws.failed_steps);
     Ok(())
 }
 
@@ -935,56 +947,10 @@ fn trust_mise_configs(ws_dir: &Path) -> Result<()> {
     }
 
     if !configs.is_empty() {
-        warn_mise_shims();
+        crate::mise_env::warn_mise_shims();
     }
 
     Ok(())
-}
-
-/// Whether `mise activate` is live in the current environment. Activation exports
-/// these markers; their presence means mise is already managing PATH (the install
-/// bin dirs are injected directly), so the shims check below would be a false
-/// alarm — `which ruby` resolves correctly without shims on PATH.
-fn mise_activated() -> bool {
-    ["MISE_SHELL", "__MISE_DIFF", "__MISE_SESSION"].iter().any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
-}
-
-/// Warn only when tool versions could actually go unresolved: adding shims to
-/// PATH would help (the dir exists and isn't already on PATH) *and* `mise
-/// activate` isn't already handling it. Pure so the (otherwise I/O-bound)
-/// decision can be tested directly.
-fn should_warn_mise_shims(activated: bool, shims_would_help: bool) -> bool {
-    !activated && shims_would_help
-}
-
-/// Warn if mise shims aren't on PATH *and* `mise activate` isn't handling it.
-/// Without either, non-interactive shells (like those spawned by Claude Code)
-/// won't resolve the correct tool versions.
-fn warn_mise_shims() {
-    let shims_dir = match home_dir() {
-        Ok(h) => h.join(".local/share/mise/shims"),
-        Err(_) => return,
-    };
-    let shims_str = path_str(&shims_dir);
-    let on_path = std::env::var("PATH").unwrap_or_default().split(':').any(|p| p == shims_str);
-    let shims_would_help = shims_dir.is_dir() && !on_path;
-
-    if should_warn_mise_shims(mise_activated(), shims_would_help) {
-        eprintln!();
-        eprintln!("Warning: mise shims directory is not on your PATH, and");
-        eprintln!("`mise activate` isn't set up either. Non-interactive shells");
-        eprintln!("(e.g. Claude Code) may not pick up the correct tool versions.");
-        eprintln!();
-        // .zshenv, not .zshrc: only .zshenv is sourced by non-interactive zsh,
-        // which is exactly the context this warning is about.
-        eprintln!("Add this to ~/.zshenv (sourced by non-interactive shells too):");
-        eprintln!();
-        eprintln!("  export PATH=\"$HOME/.local/share/mise/shims:$PATH\"");
-        eprintln!();
-        eprintln!("workon will inject the correct env vars for this session,");
-        eprintln!("but fixing your shell profile avoids the issue everywhere.");
-        eprintln!();
-    }
 }
 
 const MISE_CONFIG_NAMES: &[&str] = &[".mise.toml", ".mise.local.toml", "mise.toml", ".tool-versions"];
@@ -1406,6 +1372,53 @@ mod tests {
         // env, not a file), so it is not written to the dotenv file.
         assert_eq!(meta.session_env.get("MOCK_SESSION_VAR").map(String::as_str), Some(ws.ws_id.as_str()));
         assert!(!envfile.contains("MOCK_SESSION_VAR"), "session_env must not leak into the dotenv file: {envfile}");
+    }
+
+    /// A provisioner whose migration ran and failed, as Rails' schema load did in issue #2.
+    struct FailedStepProvisioner;
+    impl Provisioner for FailedStepProvisioner {
+        fn name(&self) -> &'static str {
+            "failed-step"
+        }
+        fn detect(&self, _ws_dir: &Path) -> bool {
+            true
+        }
+        fn setup(&self, _ctx: &provision::ProvisionCtx<'_>) -> Result<provision::Setup> {
+            Ok(provision::Setup { failed_steps: vec!["rails db:schema:load".to_string()], ..Default::default() })
+        }
+    }
+
+    /// A provisioner that could not run at all.
+    struct ErroringProvisioner;
+    impl Provisioner for ErroringProvisioner {
+        fn name(&self) -> &'static str {
+            "erroring"
+        }
+        fn detect(&self, _ws_dir: &Path) -> bool {
+            true
+        }
+        fn setup(&self, _ctx: &provision::ProvisionCtx<'_>) -> Result<provision::Setup> {
+            bail!("no toolchain")
+        }
+    }
+
+    #[test]
+    fn provision_reports_the_setup_steps_that_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        let worktrees = tmp.path().join("worktrees");
+        let provisioners: Vec<Box<dyn Provisioner>> =
+            vec![Box::new(MockProvisioner), Box::new(FailedStepProvisioner), Box::new(ErroringProvisioner)];
+
+        let ws =
+            provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provisioners).unwrap();
+
+        assert_eq!(ws.failed_steps, ["rails db:schema:load", "erroring provisioning"]);
+        assert_eq!(ws.resources.len(), 1, "a failed step does not lose the resources already made");
+
+        let mine: Vec<Box<dyn Provisioner>> = vec![Box::new(MockProvisioner)];
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &mine).unwrap();
+        assert!(ws.failed_steps.is_empty());
     }
 
     #[test]
@@ -2117,17 +2130,6 @@ mod tests {
 
         assert!(rel.contains(&"a/b/c/.mise.toml".to_string()));
         assert!(!rel.contains(&"a/b/c/d/.mise.toml".to_string()), "should not scan beyond depth 3");
-    }
-
-    #[test]
-    fn should_warn_mise_shims_only_when_genuinely_missing() {
-        // The fix: `mise activate` being live suppresses the warning even when
-        // shims would otherwise help — that was the false alarm being reported.
-        assert!(!should_warn_mise_shims(true, true), "activated => never warn");
-        assert!(!should_warn_mise_shims(true, false), "activated => never warn");
-        // Without activation, warn only when adding shims to PATH would help.
-        assert!(should_warn_mise_shims(false, true), "shims would help => warn");
-        assert!(!should_warn_mise_shims(false, false), "shims wouldn't help => no warn");
     }
 
     #[test]

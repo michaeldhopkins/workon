@@ -52,12 +52,13 @@ impl Provisioner for Laravel {
         for (k, v) in ctx.mise_vars {
             cmd = cmd.env(k, v);
         }
-        run_step(cmd, "php artisan migrate");
+        let failed_steps = run_step(cmd, "php artisan migrate").into_iter().collect();
 
         Ok(Setup {
             resources: vec![resource],
             env: vec![("DB_CONNECTION".to_string(), connection), ("DB_URL".to_string(), url)],
             env_file: Some(".env.testing".to_string()),
+            failed_steps,
             ..Setup::default()
         })
     }

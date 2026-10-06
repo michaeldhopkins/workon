@@ -59,6 +59,9 @@ pub struct Setup {
     /// Which generated env file the vars go in. `None` = `.env.test.local`
     /// (Rails/dotenv default); Laravel needs `.env.testing`, etc.
     pub env_file: Option<String>,
+    /// Setup steps that ran and failed (`rails db:schema:load`, …). The resources and env
+    /// above still stand, but the workspace is not ready, and `create` says so (issue #2).
+    pub failed_steps: Vec<String>,
 }
 
 /// Something a provisioner created that teardown must undo. Serialized into
@@ -173,14 +176,30 @@ pub(crate) fn url_authority(host: &str, port: Option<&str>) -> String {
 
 /// Run a setup step (a migration, a client generate) whose failure does not stop
 /// provisioning but must be seen: swallowed, a failed migration leaves a workspace
-/// that looks provisioned and has no schema. Returns whether it succeeded.
-pub(crate) fn run_step(cmd: Cmd, what: &str) -> bool {
+/// that looks provisioned and has no schema. Returns `what` when it failed, for
+/// [`Setup::failed_steps`].
+pub(crate) fn run_step(cmd: Cmd, what: &str) -> Option<String> {
     match cmd.run() {
-        Ok(_) => true,
+        Ok(_) => None,
         Err(e) => {
             eprintln!("Warning: {what} failed: {e}");
-            false
+            Some(what.to_string())
         }
+    }
+}
+
+/// The last line `workon create` prints when setup steps failed, so a workspace whose test
+/// database has no schema is never reported as simply created. Each failure's own output was
+/// printed when it happened.
+pub fn not_ready_note(failed_steps: &[String]) -> Option<String> {
+    (!failed_steps.is_empty())
+        .then(|| format!("Warning: the workspace is not ready; failed (output above): {}", failed_steps.join(", ")))
+}
+
+/// Print [`not_ready_note`] to stderr when there is one.
+pub fn warn_if_not_ready(failed_steps: &[String]) {
+    if let Some(note) = not_ready_note(failed_steps) {
+        eprintln!("{note}");
     }
 }
 
@@ -285,9 +304,18 @@ mod tests {
 
     #[test]
     fn run_step_reports_whether_the_step_succeeded() {
-        assert!(run_step(Cmd::new("true"), "a passing step"));
-        assert!(!run_step(Cmd::new("false"), "a failing step"));
-        assert!(!run_step(Cmd::new("workon-no-such-binary"), "a missing tool"));
+        assert_eq!(run_step(Cmd::new("true"), "a passing step"), None);
+        assert_eq!(run_step(Cmd::new("false"), "a failing step").as_deref(), Some("a failing step"));
+        assert_eq!(run_step(Cmd::new("workon-no-such-binary"), "a missing tool").as_deref(), Some("a missing tool"));
+    }
+
+    #[test]
+    fn not_ready_note_names_every_failed_step() {
+        assert_eq!(not_ready_note(&[]), None);
+        assert_eq!(
+            not_ready_note(&["prisma schema apply".into(), "prisma generate".into()]).as_deref(),
+            Some("Warning: the workspace is not ready; failed (output above): prisma schema apply, prisma generate")
+        );
     }
 
     #[test]

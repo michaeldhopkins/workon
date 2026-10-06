@@ -65,7 +65,7 @@ impl Provisioner for Phoenix {
         for (k, v) in ctx.mise_vars {
             migrate = migrate.env(k, v);
         }
-        run_step(migrate, "mix ecto.migrate");
+        let failed_steps = run_step(migrate, "mix ecto.migrate").into_iter().collect();
 
         // Session env, not a file: MIX_TEST_PARTITION must be set when the user
         // runs `mix test` in the workspace, and it's safe session-wide because it
@@ -73,6 +73,7 @@ impl Provisioner for Phoenix {
         Ok(Setup {
             resources: vec![resource],
             session_env: vec![("MIX_TEST_PARTITION".to_string(), partition)],
+            failed_steps,
             ..Setup::default()
         })
     }

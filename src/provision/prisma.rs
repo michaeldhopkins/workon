@@ -60,7 +60,7 @@ impl Provisioner for Prisma {
         for (k, v) in ctx.mise_vars {
             apply = apply.env(k, v);
         }
-        run_step(apply, "prisma schema apply");
+        let applied = run_step(apply, "prisma schema apply");
 
         // Regenerate the client: the copied one can be stale or built for another
         // platform target.
@@ -68,9 +68,14 @@ impl Provisioner for Prisma {
         for (k, v) in ctx.mise_vars {
             generate = generate.env(k, v);
         }
-        run_step(generate, "prisma generate");
+        let generated = run_step(generate, "prisma generate");
 
-        Ok(Setup { resources: vec![resource], env: vec![(env_var, url)], ..Setup::default() })
+        Ok(Setup {
+            resources: vec![resource],
+            env: vec![(env_var, url)],
+            failed_steps: applied.into_iter().chain(generated).collect(),
+            ..Setup::default()
+        })
     }
 }
 

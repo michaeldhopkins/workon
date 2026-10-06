@@ -49,9 +49,14 @@ impl Provisioner for Alembic {
         for (k, v) in ctx.mise_vars {
             cmd = cmd.env(k, v);
         }
-        run_step(cmd, "alembic upgrade head");
+        let failed_steps = run_step(cmd, "alembic upgrade head").into_iter().collect();
 
-        Ok(Setup { resources: vec![resource], env: vec![("DATABASE_URL".to_string(), url)], ..Setup::default() })
+        Ok(Setup {
+            resources: vec![resource],
+            env: vec![("DATABASE_URL".to_string(), url)],
+            failed_steps,
+            ..Setup::default()
+        })
     }
 }
 

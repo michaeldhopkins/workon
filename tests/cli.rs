@@ -161,7 +161,9 @@ fn create_json(world: &World, proj: &Path, name: &str) -> serde_json::Value {
 fn create_name_labels_the_ws_id_and_empty_name_is_no_name() {
     let world = World::new();
     let proj = world.project(&[]);
-    let labelled = create_json(&world, &proj, "Fix Bug")["ws_id"].as_str().unwrap().to_string();
+    let labelled = create_json(&world, &proj, "Fix Bug");
+    assert_eq!(labelled["failed_steps"], serde_json::json!([]), "nothing failed: {labelled}");
+    let labelled = labelled["ws_id"].as_str().unwrap().to_string();
     assert!(labelled.starts_with("ws-") && labelled.ends_with("-fix-bug"), "{labelled}");
     assert_eq!(labelled.len(), "ws-abcdef-fix-bug".len(), "{labelled}");
 
@@ -247,4 +249,25 @@ fn create_warns_when_mise_shims_are_off_path() {
     assert!(stderr.contains("Warning: mise shims directory is not on your PATH"), "{stderr}");
     let trusted = Path::new(&world.stubs.call("mise", "trust").args[1]).to_path_buf();
     assert!(trusted.starts_with(world.worktrees()) && trusted.ends_with("mise.toml"), "{trusted:?}");
+}
+
+/// Issue #2: a Rails schema load that fails is reported by `create`, in its JSON and in a last
+/// line, never as a plain success. `createdb` and `bundle` are stand-ins, so no server is needed.
+#[test]
+fn create_reports_a_failed_schema_load() {
+    let world = World::new();
+    let proj = world.project(&[("config/database.yml", "test:\n  adapter: postgresql\n")]);
+    world.stubs.set("bundle", "echo 'bundler: cannot load' >&2; exit 1");
+
+    let out = world.workon(&proj).args(["create", "--json"]).assert().success().get_output().clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["rails db:schema:load"]), "{report}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("bundler: cannot load"), "the step's own error is shown: {stderr}");
+    assert_eq!(
+        stderr.lines().last(),
+        Some("Warning: the workspace is not ready; failed (output above): rails db:schema:load"),
+        "{stderr}"
+    );
 }
