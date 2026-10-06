@@ -7,8 +7,10 @@ Rust CLI tool — development workspace launcher with Zellij, Claude CLI, and br
 ```bash
 cargo check --locked        # type-check
 cargo test --locked         # run tests
+cargo fmt --all --check     # formatting (rustfmt.toml is set to the existing style)
+cargo fmt --all --check --manifest-path fuzz/Cargo.toml   # the fuzz workspace too
 cargo clippy --locked -- -D warnings   # lint (warnings are errors)
-cargo deny check licenses   # license audit
+cargo deny check            # advisories, bans, licenses, sources
 cargo install --path .      # install locally so the user can test
 ```
 
@@ -36,6 +38,7 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - Changelog generation via `git-cliff` (`cliff.toml`)
 - `mise.toml` pins the runtimes the cycle tests' fixtures run on (Ruby, Node, PHP, .NET, Erlang, Elixir). ci.yml reads them in a step, and `tests/runtime_pin.rs` fails when a workflow names a version itself. Move a fixture to a new major there, and nowhere else.
 - `tests/file_length.rs` fails when a file under `src` passes 400 production lines (inline test modules are not counted). Files already over are pinned at their size and may only shrink; new code goes in a new module, never into a pinned file.
+- `tests/ci_rules.rs` fails when a workflow narrows `cargo deny check` (to `licenses`, say) or ci.yml or release.yml stops running `cargo deny check` or `cargo fmt --all --check`.
 
 ## Fuzzing
 

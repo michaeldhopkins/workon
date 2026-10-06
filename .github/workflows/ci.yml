@@ -17,9 +17,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: |
+          cargo fmt --all --check
+          cargo fmt --all --check --manifest-path fuzz/Cargo.toml
 
       - name: cargo check
         run: cargo check --locked
@@ -32,8 +37,8 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-deny
 
-      - name: cargo deny check licenses
-        run: cargo deny check licenses
+      - name: cargo deny (advisories, bans, licenses, sources)
+        run: cargo deny check
 
   # DB-backed provisioner tests. Their cycles self-skip when no server is
   # reachable (like the jj tests gate on jj_available), so they run for real
