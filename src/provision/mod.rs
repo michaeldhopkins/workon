@@ -64,6 +64,15 @@ pub struct Setup {
     pub failed_steps: Vec<String>,
 }
 
+impl Setup {
+    /// A test database reached through `DATABASE_URL` in the generated env file: what
+    /// Rails, Alembic and Django return once the database exists. Kept apart from
+    /// their `setup`, which needs a live server, so each field can be tested.
+    pub(crate) fn database_url(resources: Vec<Resource>, url: String, failed_steps: Vec<String>) -> Self {
+        Self { resources, env: vec![("DATABASE_URL".to_string(), url)], failed_steps, ..Self::default() }
+    }
+}
+
 /// Something a provisioner created that teardown must undo. Serialized into
 /// `.workon.json` so a fresh-process `destroy` can undo it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -307,6 +316,23 @@ mod tests {
         assert_eq!(run_step(Cmd::new("true"), "a passing step"), None);
         assert_eq!(run_step(Cmd::new("false"), "a failing step").as_deref(), Some("a failing step"));
         assert_eq!(run_step(Cmd::new("workon-no-such-binary"), "a missing tool").as_deref(), Some("a missing tool"));
+    }
+
+    /// Each field is checked on its own, so dropping any of them from the builder fails.
+    #[test]
+    fn database_url_setup_carries_the_database_its_url_and_failed_steps() {
+        let db = Resource::PostgresDb { name: "proj_ws_test".into() };
+        let setup = Setup::database_url(
+            vec![db.clone()],
+            "postgresql://u@localhost/proj_ws_test".into(),
+            vec!["migrate".into()],
+        );
+
+        assert_eq!(setup.resources, vec![db]);
+        assert_eq!(setup.env, vec![("DATABASE_URL".to_string(), "postgresql://u@localhost/proj_ws_test".to_string())]);
+        assert_eq!(setup.failed_steps, vec!["migrate".to_string()]);
+        assert!(setup.session_env.is_empty(), "a URL never goes in the session env");
+        assert_eq!(setup.env_file, None, "the default .env.test.local");
     }
 
     #[test]

@@ -60,13 +60,8 @@ impl Provisioner for Rails {
         }
         let failed_steps = run_step(cmd, "rails db:schema:load").into_iter().collect();
 
-        Ok(Setup {
-            resources: vec![resource],
-            env: vec![("DATABASE_URL".to_string(), url)],
-            env_file: None, // .env.test.local — dotenv-rails loads it under RAILS_ENV=test
-            failed_steps,
-            ..Setup::default()
-        })
+        // No env_file: .env.test.local, which dotenv-rails loads under RAILS_ENV=test.
+        Ok(Setup::database_url(vec![resource], url, failed_steps))
     }
 }
 

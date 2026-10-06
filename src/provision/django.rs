@@ -14,7 +14,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
+use super::{test_db_name, DbEngine, ProvisionCtx, Provisioner, Resource, Setup};
 
 pub struct Django;
 
@@ -45,12 +45,15 @@ impl Provisioner for Django {
         }
         let url = engine.url(&base);
 
-        // Django prepends `test_` to the NAME for its test database. Record both
-        // so teardown drops whatever survives (default runner drops test_<name>
-        // itself; --keepdb or an interrupted run leaves it).
-        let resources = vec![engine.resource(&base), engine.resource(&format!("test_{base}"))];
-        Ok(Setup { resources, env: vec![("DATABASE_URL".to_string(), url)], ..Setup::default() })
+        Ok(Setup::database_url(databases(&engine, &base), url, Vec::new()))
     }
+}
+
+/// Django prepends `test_` to the NAME for its test database. Record both so
+/// teardown drops whatever survives (the default runner drops `test_<name>`
+/// itself; `--keepdb` or an interrupted run leaves it).
+fn databases(engine: &DbEngine, base: &str) -> Vec<Resource> {
+    vec![engine.resource(base), engine.resource(&format!("test_{base}"))]
 }
 
 /// Whether a `settings.py` in the project reads `DATABASE_URL` (directly or via
@@ -73,6 +76,14 @@ fn reads_database_url(ws_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_the_base_database_and_the_one_djangos_runner_makes() {
+        assert_eq!(
+            databases(&DbEngine::Postgres, "proj_ws"),
+            vec![Resource::PostgresDb { name: "proj_ws".into() }, Resource::PostgresDb { name: "test_proj_ws".into() }]
+        );
+    }
 
     #[test]
     fn detects_by_manage_py() {

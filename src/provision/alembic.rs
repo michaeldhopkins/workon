@@ -51,12 +51,7 @@ impl Provisioner for Alembic {
         }
         let failed_steps = run_step(cmd, "alembic upgrade head").into_iter().collect();
 
-        Ok(Setup {
-            resources: vec![resource],
-            env: vec![("DATABASE_URL".to_string(), url)],
-            failed_steps,
-            ..Setup::default()
-        })
+        Ok(Setup::database_url(vec![resource], url, failed_steps))
     }
 }
 
