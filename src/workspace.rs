@@ -1536,6 +1536,48 @@ mod tests {
     }
 
     #[test]
+    fn ref_candidates_offer_a_shared_nickname_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        let worktrees = tmp.path().join("worktrees");
+        for _ in 0..2 {
+            provision_in(&worktrees, &repo, "proj", true, Some("fix bug"), None, &crate::vcs::GitBackend, &[]).unwrap();
+        }
+
+        let values: Vec<String> = ref_candidates_from(&worktrees)
+            .iter()
+            .map(|c| c.get_value().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(values.iter().filter(|v| *v == "fix-bug").count(), 1, "{values:?}");
+    }
+
+    #[test]
+    fn list_row_lines_up_its_columns() {
+        assert_eq!(
+            list_row("ws-a1b2c3", "fix", "3m", "proj", "active"),
+            format!("ws-a1b2c3{}  fix{}     3m  proj{}  active", " ".repeat(17), " ".repeat(13), " ".repeat(16))
+        );
+    }
+
+    /// `workon list` shows only workspaces whose project is at or under cwd.
+    #[test]
+    fn describe_workspace_skips_projects_outside_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let worktrees = tmp.path().join("worktrees");
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &[]).unwrap();
+
+        let inside = describe_workspace(&ws.ws_dir, &std::fs::canonicalize(&repo).unwrap());
+        let outside = describe_workspace(&ws.ws_dir, &std::fs::canonicalize(&elsewhere).unwrap());
+
+        assert_eq!(inside.map(|r| r.ws_id), Some(ws.ws_id));
+        assert!(outside.is_none(), "a project outside cwd was listed");
+    }
+
+    #[test]
     fn ref_candidates_empty_for_missing_root() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(ref_candidates_from(&tmp.path().join("nope")).is_empty());

@@ -30,6 +30,10 @@ exclude_re = [
     # That copy is the only effect, and a unit test cannot redirect HOME: it is
     # process-global and other tests read it in parallel. The copy itself is migrate_claude_session's job.
     '^src/workspace\.rs:.*replace == with != in session_layout',
+    # session::run hands the terminal to a real zellij (attach or a new
+    # session); its decisions are session_exists and delete_session, tested
+    # with a stand-in. Replacing the whole body changes only that hand-off.
+    '^src/session\.rs:.*replace run -> Result<\(\)> with Ok\(\(\)\)',
     # The default body is `Vec::new()`, so `vec![]` is the same value.
     '^src/vcs/mod\.rs:.*replace Vcs::stranded_work -> Vec<String> with vec!\[\]$',
 ]

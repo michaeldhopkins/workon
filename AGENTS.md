@@ -166,6 +166,8 @@ CI figure.
   resumed transcript under `$HOME`, which a unit test cannot redirect while
   other tests read it in parallel.
 - `Vcs::stranded_work -> vec![]`: the default body is `Vec::new()`.
+- `session::run -> Ok(())`: it hands the terminal to a real zellij; its
+  decisions (`session_exists`, `delete_session`) are tested with a stand-in.
 
 jj must be on PATH (the workflow pins it): the jj-backed tests return early
 without it, which reads as a pass and would turn their mutants into false
@@ -216,6 +218,10 @@ logs what it was asked; `preflight_socket` and `locked_config` are tested with
 `ZELLIJ_SOCKET_DIR` and `ZELLIJ_CONFIG_FILE` set under `ENV_MUTEX`;
 `append_git_exclude`'s newline handling, `provision_in`'s `skip_copy_ignored`
 and the `stranded_work` default each have a test. Two excluded (above).
+
+**2026-10-06** (CI run 37498529534): four MISSED in `ref_candidates_from`'s
+duplicate-nickname guard, `list_row` and `describe_workspace`'s cwd filter, all
+now tested; `session::run`, picked by `--in-diff`, excluded (above).
 
 ## Release process
 
