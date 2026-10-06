@@ -1,3 +1,13 @@
+# Supply-chain policy, enforced in CI by a bare `cargo deny check` (advisories, bans, licenses,
+# sources). tests/ci_rules.rs fails on a call narrowed to `licenses`.
+
+[advisories]
+version = 2
+
+[bans]
+# Duplicate versions are reported, not failed: they come from upstream crates.
+multiple-versions = "warn"
+
 [licenses]
 allow = [
     "MIT",
