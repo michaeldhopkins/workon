@@ -231,6 +231,11 @@ and the `stranded_work` default each have a test. Two excluded (above).
 duplicate-nickname guard, `list_row` and `describe_workspace`'s cwd filter, all
 now tested; `session::run`, picked by `--in-diff`, excluded (above).
 
+**2026-10-08** (CI run 37808055148): three MISSED in `vcs/jj.rs`: `add_workspace`'s
+stale-working-copy guard (`true` and `false`) and `cleanup_partial_workspace`. Each
+now has a test against a real jj; a stale working copy is made with an `op restore`
+from another workspace, since jj recovers by itself from a plain rewrite.
+
 ## Dependencies
 
 Dependencies move through the owner's `workon-deps` upkeep job, never Dependabot. It also adopts each new release of vcs-runner.

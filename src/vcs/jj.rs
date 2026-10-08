@@ -484,6 +484,77 @@ mod tests {
         );
     }
 
+    /// A colocated jj repo with one commit on `main`, or `None` without jj on PATH.
+    fn jj_repo(tmp: &Path) -> Option<std::path::PathBuf> {
+        if !vcs_runner::jj_available() {
+            return None;
+        }
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@t.com"]);
+        git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("README"), "hi").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+        Some(repo)
+    }
+
+    fn workspace_names(repo: &Path) -> String {
+        run_jj_utf8(repo, &["workspace", "list", "--ignore-working-copy"]).unwrap()
+    }
+
+    /// The main working copy made stale from another workspace (an `op restore` to before its
+    /// last snapshot): `jj workspace add` then fails, and `add_workspace` refreshes it and
+    /// retries. jj recovers by itself from a plain rewrite of `default@`, so that is not enough.
+    #[test]
+    fn add_workspace_recovers_from_a_stale_main_working_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = jj_repo(tmp.path()) else { return };
+        let other = tmp.path().join("other");
+        run_jj(&repo, &["workspace", "add", &path_str(&other), "--name", "other", "-r", "main"]).unwrap();
+        let before =
+            run_jj_utf8(&repo, &["op", "log", "--ignore-working-copy", "--no-graph", "-n1", "-T", "id.short()"])
+                .unwrap();
+        std::fs::write(repo.join("notes"), "work").unwrap();
+        run_jj(&repo, &["status"]).unwrap();
+        run_jj(&other, &["op", "restore", before.trim()]).unwrap();
+        assert!(run_jj(&repo, &["status"]).is_err(), "the main working copy is stale");
+
+        let ws = tmp.path().join("ws");
+        JjBackend.add_workspace(&repo, &ws, "ws-stale", "main").unwrap();
+
+        assert!(ws.is_dir());
+        assert!(workspace_names(&repo).contains("ws-stale"), "{}", workspace_names(&repo));
+    }
+
+    /// Any other failure is not retried as a stale working copy: it is reported as it is.
+    #[test]
+    fn add_workspace_reports_another_failure_without_refreshing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = jj_repo(tmp.path()) else { return };
+
+        let err = JjBackend.add_workspace(&repo, &tmp.path().join("ws"), "ws-bad", "no-such-rev").unwrap_err();
+
+        assert_eq!(err.to_string(), "failed to create jj workspace", "{err:#}");
+        assert!(!workspace_names(&repo).contains("ws-bad"));
+    }
+
+    #[test]
+    fn cleanup_partial_workspace_forgets_it_and_removes_its_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = jj_repo(tmp.path()) else { return };
+        let ws = tmp.path().join("ws");
+        run_jj(&repo, &["workspace", "add", &path_str(&ws), "--name", "ws-half", "-r", "main"]).unwrap();
+        assert!(workspace_names(&repo).contains("ws-half"));
+
+        JjBackend.cleanup_partial_workspace("ws-half", &repo, &ws);
+
+        assert!(!workspace_names(&repo).contains("ws-half"), "{}", workspace_names(&repo));
+        assert!(!ws.exists());
+    }
+
     #[test]
     fn setup_git_worktree_enables_git_commands() {
         let tmp = tempfile::tempdir().unwrap();

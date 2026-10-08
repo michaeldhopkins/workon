@@ -15,3 +15,5 @@
 
 # burst.sh working directory for one target's new finds.
 /fuzz/new/
+mutants.out/
+mutants.out.old/
