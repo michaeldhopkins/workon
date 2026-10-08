@@ -22,6 +22,13 @@ on:
     paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   TRIPLE: x86_64-unknown-linux-gnu

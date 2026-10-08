@@ -51,7 +51,8 @@ jobs:
           # History to diff against the base ref (PR) or the replaced commit (push).
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -228,7 +229,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 

@@ -1,0 +1,14 @@
+# Pinned so the CI gates are reproducible.
+#
+# `clippy -D warnings` and `cargo fmt --check` both fail on a toolchain bump nobody asked for: a
+# new stable can add a lint or change a wrapping rule and turn CI red on a change that touched
+# nothing. Pinning makes the upgrade a deliberate one-line commit whose diff is the fix, made on
+# purpose. Move to each new stable within 30 days.
+#
+# Every workflow installs this toolchain with a bare `rustup toolchain install`, which reads this
+# file; `tests/ci_rules.rs` fails on a workflow that installs a moving `stable` over it. The fuzz
+# workflows name `+nightly` themselves, which outranks this file. The declared `rust-version`
+# (the MSRV) is checked by ci.yml's `msrv` job on its own toolchain.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

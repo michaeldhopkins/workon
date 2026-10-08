@@ -5,6 +5,13 @@ on:
     branches: ["**"]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,12 +19,13 @@ jobs:
   ci:
     name: Check, Test, Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # A bare install reads rust-toolchain.toml: the pinned version and its components.
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -40,6 +48,33 @@ jobs:
       - name: cargo deny (advisories, bans, licenses, sources)
         run: cargo deny check
 
+      - name: cargo doc (broken intra-doc links fail)
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - uses: taiki-e/install-action@cargo-machete
+
+      # Scans the fuzz workspace too: it walks every Cargo.toml under the directory.
+      - name: cargo machete (a dependency nothing uses fails)
+        run: cargo machete
+
+  # The declared rust-version is a promise to anyone building from crates.io; check it holds.
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(sed -nE 's/^rust-version = "([^"]+)".*/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - name: install the MSRV toolchain
+        run: rustup toolchain install "${{ steps.msrv.outputs.version }}" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check on the MSRV
+        run: cargo "+${{ steps.msrv.outputs.version }}" check --locked
+
   # DB-backed provisioner tests. Their cycles self-skip when no server is
   # reachable (like the jj tests gate on jj_available), so they run for real
   # here and are no-ops in the main job. One job per ecosystem will grow here as
@@ -48,6 +83,7 @@ jobs:
   provisioners:
     name: Provisioner tests (Postgres)
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:16
@@ -81,7 +117,8 @@ jobs:
       MYSQL_PWD: root
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: install db clients (createdb/dropdb, mysqladmin)
         run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
