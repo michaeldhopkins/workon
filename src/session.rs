@@ -547,6 +547,7 @@ mod tests {
         let dir = socket_dir().expect("socket_dir should respect override");
         assert_eq!(dir, PathBuf::from("/custom/zellij/sock"));
 
+        // SAFETY: still under ENV_MUTEX, held by `_guard`.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var("ZELLIJ_SOCKET_DIR", v),
@@ -565,6 +566,7 @@ mod tests {
         let socket = session_socket("my-project").expect("session_socket");
         assert_eq!(socket, PathBuf::from("/custom/zellij/sock/my-project"));
 
+        // SAFETY: still under ENV_MUTEX, held by `_guard`.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var("ZELLIJ_SOCKET_DIR", v),
@@ -702,6 +704,7 @@ mod tests {
         // SAFETY: env mutation is serialized with sibling tests via ENV_MUTEX.
         unsafe { std::env::set_var(var, value) };
         let out = body();
+        // SAFETY: still under ENV_MUTEX, held by `_guard`.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var(var, v),

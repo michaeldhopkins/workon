@@ -27,13 +27,12 @@ impl Provisioner for Laravel {
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
         let xml = std::fs::read_to_string(ctx.ws_dir.join("phpunit.xml")).unwrap_or_default();
-        let connection = phpunit_db_connection(&xml);
-        let engine = match connection.as_deref() {
-            Some("pgsql") => DbEngine::Postgres,
-            Some("mysql") | Some("mariadb") => DbEngine::Mysql,
-            _ => return Ok(Setup::default()), // sqlite / :memory: / unset -> self-managed
+        let Some(connection) = phpunit_db_connection(&xml) else { return Ok(Setup::default()) };
+        let engine = match connection.as_str() {
+            "pgsql" => DbEngine::Postgres,
+            "mysql" | "mariadb" => DbEngine::Mysql,
+            _ => return Ok(Setup::default()), // sqlite / :memory: -> self-managed
         };
-        let connection = connection.unwrap();
 
         let db = test_db_name(ctx.project_name, ctx.ws_id);
         eprintln!("Creating test database {db}...");

@@ -26,10 +26,15 @@ fn narrowed_deny_calls(name: &str, text: &str) -> Vec<String> {
 fn workflows() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
     let mut found: Vec<(String, String)> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
+        .expect("reading .github/workflows")
+        .map(|e| e.expect("a workflow entry").path())
         .filter(|p| p.extension().is_some_and(|x| x == "yml" || x == "yaml"))
-        .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), std::fs::read_to_string(&p).unwrap()))
+        .map(|p| {
+            (
+                p.file_name().expect("a file name").to_string_lossy().into_owned(),
+                std::fs::read_to_string(&p).expect("reading a workflow"),
+            )
+        })
         .collect();
     found.sort();
     found

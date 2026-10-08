@@ -53,6 +53,10 @@ collapsible_if = "deny"
 too_many_arguments = "deny"
 needless_range_loop = "deny"
 extend_with_drain = "deny"
+unwrap_used = "deny"
+dbg_macro = "deny"
+# The only `unsafe` is `std::env::set_var` in tests (unsafe since edition 2024).
+undocumented_unsafe_blocks = "deny"
 
 [lints.rust]
 # `cargo fuzz` builds with `--cfg fuzzing`, which gates `src/fuzz_api.rs`.

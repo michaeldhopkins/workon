@@ -11,7 +11,7 @@ fn git(dir: &Path, args: &[&str]) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .unwrap()
+        .expect("running git")
         .success();
     assert!(ok, "git {args:?} failed");
 }
@@ -206,14 +206,15 @@ fn invalid_config_name_with_path_traversal_is_rejected() {
 fn create_json(root: &Path, name: &str) -> serde_json::Value {
     let proj = root.join("proj");
     if !proj.exists() {
-        std::fs::create_dir(&proj).unwrap();
+        std::fs::create_dir(&proj).expect("creating the project");
         git(&proj, &["init", "-q", "-b", "main"]);
         git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
         // The git backend (used when jj is not on PATH) branches from
         // `origin/<trunk>`, so the repo needs a remote carrying main.
         let origin = root.join("origin.git");
-        git(root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
-        git(&proj, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        let origin = origin.to_str().expect("a UTF-8 temp path");
+        git(root, &["init", "-q", "--bare", origin]);
+        git(&proj, &["remote", "add", "origin", origin]);
         git(&proj, &["push", "-q", "origin", "main"]);
     }
     let out = cargo_bin_cmd!("workon")
@@ -226,7 +227,7 @@ fn create_json(root: &Path, name: &str) -> serde_json::Value {
         .get_output()
         .stdout
         .clone();
-    serde_json::from_slice(&out).unwrap()
+    serde_json::from_slice(&out).expect("create --json prints JSON")
 }
 
 /// `--name` becomes the ws_id's label, and `--name ""` means no name: a bare
