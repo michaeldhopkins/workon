@@ -64,7 +64,8 @@ impl JjBackend {
     }
 
     fn run_workspace_add(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, rev: &str) -> Result<(), RunError> {
-        run_jj(project_dir, &["workspace", "add", &path_str(ws_dir), "--name", ws_id, "-r", rev]).map(|_| ())
+        let args = ["workspace", "add", "--config", "git.colocate=false", &path_str(ws_dir)];
+        run_jj(project_dir, &[&args[..], &["--name", ws_id, "-r", rev]].concat()).map(|_| ())
     }
 
     /// Remove a workspace `jj workspace add` left half-created on failure: forget
@@ -815,6 +816,36 @@ mod tests {
             leaked.contains(&"upstream.rb".to_string()),
             "sanity: a moved-trunk base leaks upstream.rb (the bug), got {leaked:?}"
         );
+    }
+
+    /// jj 0.46 builds a git worktree of its own for a new workspace in a colocated repo, under the
+    /// workspace directory's name. workon makes one under the workspace id, so without
+    /// `git.colocate=false` the same directory is registered twice. Exactly one worktree must
+    /// exist, detached at the base, as on 0.45.
+    #[test]
+    fn create_workspace_registers_one_git_worktree_pinned_at_the_base() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@t.com"]);
+        git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("README"), "hi").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+
+        let ws = tmp.path().join("ws-head");
+        let base = JjBackend.create_workspace(&repo, &ws, "wshead", "main").unwrap();
+
+        let listing = run_git_utf8(&repo, &["worktree", "list", "--porcelain"]).unwrap();
+        let worktrees = listing.lines().filter(|l| l.starts_with("worktree ")).count();
+        assert_eq!(worktrees, 2, "the repo and one workspace, got:\n{listing}");
+        let head = run_git_utf8(&ws, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), base, "git HEAD must be pinned at the base");
     }
 
     /// A repo with no commits has no `main` to branch from. create_workspace must
