@@ -41,6 +41,7 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - `tests/ci_rules.rs` fails when a workflow narrows `cargo deny check` (to `licenses`, say) or ci.yml or release.yml stops running `cargo deny check` or `cargo fmt --all --check`; when a workflow lacks a top-level concurrency group or `permissions`, or a job lacks `timeout-minutes`; when a workflow installs a moving `stable` over `rust-toolchain.toml`; when ci.yml stops building docs with `-D warnings`, running `cargo machete` or checking the MSRV; and when Dependabot appears or this file stops naming the upkeep job.
 - `rust-toolchain.toml` pins an exact stable, and every workflow installs it with a bare `rustup toolchain install`. Move it to each new stable within 30 days, fixing what the new lints find, as its own commit. ci.yml's `msrv` job checks the declared `rust-version` on its own toolchain.
 - Dependencies move through the `workon-deps` upkeep job on the maintainer's machine, never Dependabot: it prepares the update, checks it, and asks the owner; a yes pushes main through the push guard. It never bumps the version, so an update ships with the next release.
+- `tests/lint_suppressions.rs` pins the `#[allow]`/`#[expect]` count (2) and `clippy.toml`'s loosened thresholds (cognitive complexity 30, arguments 8); both may only fall, and the pin falls with them. It also fails when `[lints]` drops or weakens a baseline lint (`unwrap_used`, `dbg_macro`, `undocumented_unsafe_blocks`, …). Touching an item that carries an `#[allow]` means removing it.
 
 ## Fuzzing
 
