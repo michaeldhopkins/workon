@@ -50,9 +50,8 @@ impl Provisioner for Phoenix {
         for (k, v) in ctx.mise_vars {
             create = create.env(k, v);
         }
-        if create.run().is_err() {
-            eprintln!("Warning: mix ecto.create failed for {db}");
-            return Ok(Setup::default());
+        if let Err(e) = create.run() {
+            return Ok(Setup::database_not_created(&db, &e));
         }
         // The DB exists now — record it before migrating (resource-before-risk).
         let resource = DbEngine::Postgres.resource(&db);

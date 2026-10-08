@@ -23,6 +23,7 @@ owed = []
   "parse_major_minor_needs_a_numeric_minor",
 ]
 "src/discover.rs" = ["is_strictly_inside_is_a_proper_component_prefix"]
+"src/not_ready.rs" = ["only_n_or_no_keeps_the_session_closed"]
 "src/layout.rs" = [
   "a_valid_config_name_stays_inside_the_configs_dir",
   "command_in_line_reads_the_pane_command_back",
@@ -52,6 +53,7 @@ owed = []
 "src/mise_env.rs" = "runs mise; its output is parsed by serde_json"
 "src/provision/django.rs" = "runs manage.py; detection reads settings files from disk"
 "src/provision/python_venv.rs" = "rewrites a copied virtualenv's files in place"
+"src/save_prompt.rs" = "reads the answer to the save prompt from stdin"
 "src/resolve.rs" = "reads the current directory and the repository root"
 "src/session.rs" = "drives zellij and ps; its parsers (parse_descendants, anchored_server_pattern) are fuzzed by ps_tree and encoders"
 "src/trust.rs" = "reads and writes the trust manifest and the configs it hashes"

@@ -59,8 +59,9 @@ What it does:
 2. Creates a jj workspace branched from trunk (main/master)
 3. Clones gitignored files (build artifacts, `node_modules/`, `target/`, etc.) using APFS `clonefile(2)` on macOS for near-instant copy-on-write directory cloning, with cross-platform reflink fallback via [clonetree](https://crates.io/crates/clonetree)
 4. For Rails apps: creates an isolated test database and loads the schema
-5. Launches a Zellij session in the workspace
-6. On exit: prompts to bookmark uncommitted work, forgets the jj workspace, drops any test database, and removes the directory in the background
+5. If a setup step fails (a test database, schema load or migration, for any framework), says so and asks `Open it anyway? [Y/n]`; `n` removes the workspace
+6. Launches a Zellij session in the workspace
+7. On exit: prompts to bookmark uncommitted work, forgets the jj workspace, drops any test database, and removes the directory in the background
 
 The primary session (plain `workon`) is unaffected — it works directly in the project directory as before.
 
@@ -80,9 +81,9 @@ workon attach fix-bug                # open it in a session (survives on quit)
 workon destroy fix-bug               # tear down, saving rescued work
 ```
 
-- `create` provisions the worktree (jj/git workspace, gitignored-file copy, Rails DB, mise) and prints its path to stdout. It does not start a session. `--json` prints `{ ws_id, path, dbs, failed_steps }`. A setup step that fails (a schema load or migration) does not stop `create`: its error is printed, it is listed in `failed_steps`, and the last line says the workspace is not ready.
+- `create` provisions the worktree (jj/git workspace, gitignored-file copy, Rails DB, mise) and prints its path to stdout. It does not start a session. `--json` prints `{ ws_id, path, dbs, failed_steps }`. A setup step that fails (a test database, schema load or migration) does not stop `create`: its error is printed, it is listed in `failed_steps`, and the last lines say the workspace is not ready and give the command that opens it anyway (`workon attach <ws_id>`). `create` then exits with status 3 and keeps the workspace.
 - `attach [REF]` opens an existing workspace and returns when the session quits — no teardown. `REF` is a ws_id, a `--name` nickname (given as stored or slugified), or a path; omit it to use the workspace the cwd is inside.
-- `destroy [REF]` bookmarks rescued work under `workon/<ws_id>` and removes the worktree. `--no-save` discards instead. `--json` prints `{ ws_id, saved, dropped_db }`. It refuses any path that isn't under `~/.worktrees`.
+- `destroy [REF]` bookmarks rescued work under `workon/<ws_id>` and removes the worktree. `--no-save` discards instead. `--json` prints `{ ws_id, saved, dropped }`. It refuses any path that isn't under `~/.worktrees`.
 - `list` shows workspaces whose project is at or under the cwd, plus any `stale` worktrees (a leaked `create` with no matching `destroy`), which are shown from anywhere. `--json` prints an array.
 - `path [REF]` prints a workspace's directory. A process can't change its parent shell's directory, so to browse or hand-edit a workspace without a session, `cd` to the printed path:
 

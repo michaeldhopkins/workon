@@ -71,6 +71,13 @@ impl Setup {
     pub(crate) fn database_url(resources: Vec<Resource>, url: String, failed_steps: Vec<String>) -> Self {
         Self { resources, env: vec![("DATABASE_URL".to_string(), url)], failed_steps, ..Self::default() }
     }
+
+    /// A test database that could not be created: nothing to tear down and no env to write, so
+    /// the workspace's tests would reach the shared database. A failed step, with its reason.
+    pub(crate) fn database_not_created(db: &str, reason: &dyn std::fmt::Display) -> Self {
+        eprintln!("Warning: could not create test database {db}: {reason}");
+        Self { failed_steps: vec![format!("create test database {db}")], ..Self::default() }
+    }
 }
 
 /// Something a provisioner created that teardown must undo. Serialized into
@@ -194,21 +201,6 @@ pub(crate) fn run_step(cmd: Cmd, what: &str) -> Option<String> {
             eprintln!("Warning: {what} failed: {e}");
             Some(what.to_string())
         }
-    }
-}
-
-/// The last line `workon create` prints when setup steps failed, so a workspace whose test
-/// database has no schema is never reported as simply created. Each failure's own output was
-/// printed when it happened.
-pub fn not_ready_note(failed_steps: &[String]) -> Option<String> {
-    (!failed_steps.is_empty())
-        .then(|| format!("Warning: the workspace is not ready; failed (output above): {}", failed_steps.join(", ")))
-}
-
-/// Print [`not_ready_note`] to stderr when there is one.
-pub fn warn_if_not_ready(failed_steps: &[String]) {
-    if let Some(note) = not_ready_note(failed_steps) {
-        eprintln!("{note}");
     }
 }
 
@@ -336,12 +328,10 @@ mod tests {
     }
 
     #[test]
-    fn not_ready_note_names_every_failed_step() {
-        assert_eq!(not_ready_note(&[]), None);
-        assert_eq!(
-            not_ready_note(&["prisma schema apply".into(), "prisma generate".into()]).as_deref(),
-            Some("Warning: the workspace is not ready; failed (output above): prisma schema apply, prisma generate")
-        );
+    fn a_database_not_created_is_a_failed_step_with_nothing_to_tear_down() {
+        let setup = Setup::database_not_created("proj_ws_test", &"connection refused");
+        assert_eq!(setup.failed_steps, ["create test database proj_ws_test"]);
+        assert!(setup.resources.is_empty() && setup.env.is_empty() && setup.session_env.is_empty());
     }
 
     #[test]

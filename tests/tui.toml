@@ -65,19 +65,28 @@ test = "tests/tui/mod.rs::new_session_deletes_the_running_session_and_launches_a
 what = "attach hands an existing workspace to zellij and leaves it in place"
 test = "tests/tui/mod.rs::attach_hands_an_existing_workspace_to_zellij_and_keeps_it"
 
-# Reserved: the -w not-ready pause (issue #2). When a setup step fails, -w prints
-# "Open it anyway? [Y/n] " before zellij takes the screen. Its change adds two [[pty]]
-# entries here, Enter opening the session and n removing the workspace, plus a [[key]]
-# entry for how the answer is read.
+# The -w not-ready pause (issue #2): when a setup step fails, -w asks
+# "Open it anyway? [Y/n] " before zellij takes the screen.
+[[pty]]
+what = "not-ready pause: Enter opens the session anyway"
+test = "tests/tui/mod.rs::not_ready_pause_enter_opens_the_session_anyway"
+
+[[pty]]
+what = "not-ready pause: n removes the workspace without launching, exit 3"
+test = "tests/tui/mod.rs::not_ready_pause_n_removes_the_workspace_without_launching"
 
 # How an answer to a prompt is read, with its unit test.
 [[key]]
 what = "save prompt: empty, EOF, y and yes save"
-test = "src/workspace.rs::is_affirmative_defaults_to_yes"
+test = "src/save_prompt.rs::is_affirmative_defaults_to_yes"
 
 [[key]]
 what = "save prompt: n and anything else discard"
-test = "src/workspace.rs::is_affirmative_explicit_no_declines"
+test = "src/save_prompt.rs::is_affirmative_explicit_no_declines"
+
+[[key]]
+what = "not-ready pause: only n or no declines; Enter, EOF, a typo or a read error opens"
+test = "src/not_ready.rs::a_failed_step_asks_and_only_n_or_no_declines"
 
 # workon draws no views of its own: zellij owns the screen once launched.
 

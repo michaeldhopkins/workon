@@ -87,11 +87,16 @@ impl Tui {
 
     /// Wait for workon to exit and return whether it succeeded.
     pub fn wait_for_exit(&mut self) -> bool {
+        self.wait_for_exit_code() == 0
+    }
+
+    /// The exit code, once workon has exited (bounded by the same deadline).
+    pub fn wait_for_exit_code(&mut self) -> u32 {
         let start = Instant::now();
         loop {
             if let Some(status) = self.child.try_wait().expect("a status") {
                 self.drain();
-                return status.success();
+                return status.exit_code();
             }
             let screen = self.screen();
             assert!(start.elapsed() < TIMEOUT, "workon did not exit. Screen:\n{screen}");

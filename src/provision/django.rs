@@ -39,9 +39,8 @@ impl Provisioner for Django {
         let engine = DbEngine::Postgres;
         let base = test_db_name(ctx.project_name, ctx.ws_id);
         eprintln!("Creating base database {base} (Django's runner will create test_{base})...");
-        if engine.create(&base).is_err() {
-            eprintln!("Warning: could not create database {base}");
-            return Ok(Setup::default());
+        if let Err(e) = engine.create(&base) {
+            return Ok(Setup::database_not_created(&base, &e));
         }
         let url = engine.url(&base);
 

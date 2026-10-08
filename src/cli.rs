@@ -57,6 +57,9 @@ pub struct SessionArgs {
 #[derive(Subcommand)]
 pub enum Command {
     /// Provision a persistent workspace and print its path (no session)
+    #[command(
+        after_help = "Exits 3 when a setup step failed: the workspace is kept, not ready, and `workon attach` opens it."
+    )]
     Create {
         /// Nickname for the worktree
         #[arg(long)]
@@ -67,7 +70,7 @@ pub enum Command {
         /// Skip copying gitignored files into the workspace
         #[arg(long)]
         skip_copy_ignored: bool,
-        /// Print `{ ws_id, path, db }` as JSON on stdout
+        /// Print `{ ws_id, path, dbs, failed_steps }` as JSON on stdout
         #[arg(long)]
         json: bool,
     },
@@ -88,7 +91,7 @@ pub enum Command {
         /// Discard unsaved work instead of bookmarking it
         #[arg(long)]
         no_save: bool,
-        /// Print `{ ws_id, saved, dropped_db }` as JSON on stdout
+        /// Print `{ ws_id, saved, dropped }` as JSON on stdout
         #[arg(long)]
         json: bool,
     },

@@ -34,9 +34,8 @@ impl Provisioner for Alembic {
         let engine = DbEngine::Postgres;
         let db = test_db_name(ctx.project_name, ctx.ws_id);
         eprintln!("Creating test database {db}...");
-        if engine.create(&db).is_err() {
-            eprintln!("Warning: could not create test database {db}");
-            return Ok(Setup::default());
+        if let Err(e) = engine.create(&db) {
+            return Ok(Setup::database_not_created(&db, &e));
         }
         let resource = engine.resource(&db);
         let url = engine.url(&db);

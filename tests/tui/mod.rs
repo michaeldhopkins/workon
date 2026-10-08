@@ -146,3 +146,53 @@ fn attach_hands_an_existing_workspace_to_zellij_and_keeps_it() {
     assert_eq!(launch.cwd.to_str(), created["path"].as_str());
     assert!(launch.cwd.exists(), "attach leaves the workspace in place");
 }
+
+/// Issue #2: a Rails app whose schema load fails, so `-w` stops to ask before zellij.
+fn world_whose_schema_load_fails() -> (World, std::path::PathBuf) {
+    let world = World::new();
+    let proj = world.project(&[("config/database.yml", "test:\n  adapter: postgresql\n")]);
+    world.stubs.set("bundle", "echo 'bundler: cannot load' >&2; exit 1");
+    (world, proj)
+}
+
+#[test]
+fn not_ready_pause_enter_opens_the_session_anyway() {
+    let (world, proj) = world_whose_schema_load_fails();
+
+    let mut tui = world.tui(&proj, &["-w"]);
+    tui.wait_for_text("Open it anyway? [Y/n]");
+    assert!(world
+        .stubs
+        .calls("zellij")
+        .iter()
+        .all(|c| c.args.first().is_none_or(|a| a != "--new-session-with-layout")));
+    tui.press("\r");
+    assert!(tui.wait_for_exit(), "{}", tui.screen());
+
+    let launch = world.stubs.call("zellij", "--new-session-with-layout");
+    assert!(launch.cwd.starts_with(world.worktrees()), "{launch:?}");
+    assert_removed_soon(&launch.cwd);
+}
+
+#[test]
+fn not_ready_pause_n_removes_the_workspace_without_launching() {
+    let (world, proj) = world_whose_schema_load_fails();
+
+    let mut tui = world.tui(&proj, &["-w"]);
+    tui.wait_for_text("Open it anyway? [Y/n]");
+    tui.press("n\r");
+    assert_eq!(tui.wait_for_exit_code(), 3, "{}", tui.screen());
+
+    assert!(world
+        .stubs
+        .calls("zellij")
+        .iter()
+        .all(|c| c.args.first().is_none_or(|a| a != "--new-session-with-layout")));
+    assert!(tui.screen().contains("Cleaning up workspace"), "{}", tui.screen());
+    assert!(!tui.screen().contains("Save under"), "declining asks nothing more");
+    assert_eq!(world.stubs.calls("dropdb").len(), 1, "the test database is dropped");
+    let left: Vec<_> = std::fs::read_dir(world.worktrees()).unwrap().flatten().map(|e| e.path()).collect();
+    for dir in &left {
+        assert_removed_soon(dir);
+    }
+}

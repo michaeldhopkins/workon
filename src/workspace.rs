@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,7 +12,9 @@ use crate::claude_trust;
 use crate::deps;
 use crate::discover::{self, WsRef};
 use crate::layout::{self, Config, ResolvedLayout};
+use crate::not_ready;
 use crate::provision::{self, Provisioner, Resource};
+use crate::save_prompt::{should_save, SaveMode};
 use crate::session;
 use crate::vcs::Vcs;
 
@@ -122,24 +123,26 @@ fn read_meta(ws_dir: &Path) -> WorkspaceMeta {
 }
 
 /// Ephemeral workspace flow (`workon -w`): provision, attach, and tear down on
-/// quit. Same observable behavior as before, now composed from the three phases
-/// the headless subcommands also use.
-pub fn run_workspace(project_dir: &Path, project_name: &str, opts: WorkspaceOptions<'_>, vcs: &dyn Vcs) -> Result<()> {
+/// quit, composed from the three phases the headless subcommands also use. When a
+/// setup step failed it asks first; declined, it removes the workspace and returns
+/// `false`. A failed read of the answer opens the session, as end of input does.
+pub fn run_workspace(
+    project_dir: &Path,
+    project_name: &str,
+    opts: WorkspaceOptions<'_>,
+    vcs: &dyn Vcs,
+) -> Result<bool> {
     let WorkspaceOptions { skip_copy_ignored, label, resume, config, cfg } = opts;
     let ws = provision(project_dir, project_name, skip_copy_ignored, label, config, vcs)?;
-    provision::warn_if_not_ready(&ws.failed_steps);
+    // The stdin lock is released at the end of this statement; teardown's save prompt reads stdin too.
+    let open = not_ready::ask_open_anyway(&ws.failed_steps, &mut std::io::stdin().lock(), &mut std::io::stderr());
+    if !open {
+        teardown(&ws, None, SaveMode::NoSave, vcs)?;
+        return Ok(false);
+    }
     let session_id = attach(&ws, cfg, resume)?;
     teardown(&ws, session_id.as_deref(), SaveMode::Prompt, vcs)?;
-    Ok(())
-}
-
-/// How teardown decides whether to rescue unsaved work. `Prompt` is the
-/// interactive `[Y/n]` (ephemeral quit); `Save`/`NoSave` are the non-interactive
-/// `destroy` choices, since a headless run can't block on stdin.
-enum SaveMode {
-    Prompt,
-    Save,
-    NoSave,
+    Ok(true)
 }
 
 /// What teardown did, for `destroy --json` and tests.
@@ -339,33 +342,6 @@ fn session_layout(cfg: &Config, ws_dir: &Path, resume: Option<&str>) -> Result<(
     }
 }
 
-/// Default-yes save prompt: empty input (bare Enter, or EOF from a closed
-/// session) and any `y`/`yes` mean save; only an explicit `n`/`no`/other
-/// declines.
-fn is_affirmative(answer: &str) -> bool {
-    let a = answer.trim();
-    a.is_empty() || a.eq_ignore_ascii_case("y") || a.eq_ignore_ascii_case("yes")
-}
-
-/// Decide whether teardown saves the unsaved work it found. `Save`/`NoSave` are
-/// non-interactive; `Prompt` asks on stderr and reads stdin (default yes).
-fn should_save(save: &SaveMode, ws_id: &str) -> Result<bool> {
-    match save {
-        SaveMode::Save => Ok(true),
-        SaveMode::NoSave => Ok(false),
-        SaveMode::Prompt => {
-            // Default yes: the prompt only fires for work that would otherwise
-            // be lost, so preserving is almost always what you want. Empty/EOF
-            // (you closed the session without answering) counts as yes.
-            eprint!("Save under workon/{ws_id}? [Y/n] ");
-            std::io::stderr().flush()?;
-            let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer)?;
-            Ok(is_affirmative(&answer))
-        }
-    }
-}
-
 /// Final phase: rescue unsaved work (per `save`), then forget the workspace,
 /// drop its test DB, and remove the directory. `session_id` is `Some` only for
 /// the ephemeral flow, and only when workon knows the agent's session id — it
@@ -550,8 +526,9 @@ pub struct CreateArgs<'a> {
 }
 
 /// `workon create`: provision a persistent workspace and print its path to
-/// stdout (so `WS=$(workon create)` works). No session, no teardown.
-pub fn cmd_create(project_dir: &Path, project_name: &str, args: CreateArgs<'_>, vcs: &dyn Vcs) -> Result<()> {
+/// stdout (so `WS=$(workon create)` works). No session, no teardown. Returns
+/// `false` when a setup step failed; the workspace is kept either way.
+pub fn cmd_create(project_dir: &Path, project_name: &str, args: CreateArgs<'_>, vcs: &dyn Vcs) -> Result<bool> {
     let ws = provision(project_dir, project_name, args.skip_copy_ignored, args.name, args.config, vcs)?;
     if args.json {
         let dbs: Vec<&str> = ws.resources.iter().map(Resource::db_name).collect();
@@ -568,8 +545,9 @@ pub fn cmd_create(project_dir: &Path, project_name: &str, args: CreateArgs<'_>, 
         eprintln!("  Attach:  workon attach {}", ws.ws_id);
         eprintln!("  Destroy: workon destroy {}", ws.ws_id);
     }
-    provision::warn_if_not_ready(&ws.failed_steps);
-    Ok(())
+    let not_ready = not_ready::create_lines(&ws.ws_id, &ws.failed_steps);
+    not_ready.iter().for_each(|line| eprintln!("{line}"));
+    Ok(not_ready.is_empty())
 }
 
 /// `workon attach [REF]`: open an existing workspace in a session and return
@@ -1645,24 +1623,6 @@ mod tests {
         assert!(ws.base.is_none());
         assert!(ws.config.is_none());
         assert!(ws.name.is_none());
-    }
-
-    #[test]
-    fn is_affirmative_defaults_to_yes() {
-        // Bare Enter and EOF (closed session) both arrive as empty -> save.
-        assert!(is_affirmative(""));
-        assert!(is_affirmative("\n"));
-        assert!(is_affirmative("y"));
-        assert!(is_affirmative("Y\n"));
-        assert!(is_affirmative("yes"));
-    }
-
-    #[test]
-    fn is_affirmative_explicit_no_declines() {
-        assert!(!is_affirmative("n"));
-        assert!(!is_affirmative("N\n"));
-        assert!(!is_affirmative("no"));
-        assert!(!is_affirmative("nope"));
     }
 
     #[test]

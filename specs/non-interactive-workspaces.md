@@ -137,7 +137,9 @@ project makes a stored `project_dir` lie, while an inferred one adapts).
 ### `workon` / `workon -w` (unchanged)
 
 Default: normal session in cwd. `-w`: `provision -> attach -> teardown` — same
-observable behavior as today, now through the extracted phases.
+observable behavior as today, now through the extracted phases. When a setup
+step failed, `-w` asks `Open it anyway? [Y/n]` before attaching; `n` or `no`
+tears the workspace down and exits 3.
 
 ### `workon create`
 
@@ -145,8 +147,10 @@ observable behavior as today, now through the extracted phases.
 2. `ws = provision(project, {name, config, skip_copy_ignored})` — writes
    `.workon.json`.
 3. Print `ws.ws_dir` to **stdout** (so `WS=$(workon create)` works); ws_id +
-   hints to stderr. `--json` -> `{ "ws_id", "path", "db" }` on stdout.
-4. Exit 0. No session, no teardown — the workspace persists.
+   hints to stderr. `--json` -> `{ "ws_id", "path", "dbs", "failed_steps" }` on stdout.
+4. Exit 0, or 3 when a setup step failed: then the last lines say the workspace
+   is not ready and name `workon attach <ws_id>`. No session, no teardown — the
+   workspace persists either way.
 
 `provision` is today's steps minus the claude session id, layout, and
 `session::launch`: ws_id, ensure `~/.worktrees`, `detect_trunk`,
@@ -168,7 +172,7 @@ observable behavior as today, now through the extracted phases.
 1. `ws = load_workspace(REF)`.
 2. **Safety:** assert `ws.ws_dir` is under `~/.worktrees/`; refuse otherwise.
 3. `teardown(ws, save_mode)`, `save_mode = if --no-save { NoSave } else { Save }`.
-4. Print outcome to stderr; `--json` -> `{ "ws_id", "saved":[..], "dropped_db":.. }`.
+4. Print outcome to stderr; `--json` -> `{ "ws_id", "saved":[..], "dropped":[..] }`.
 
 Tolerates a missing dir or db (skip, don't error).
 

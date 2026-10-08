@@ -1,10 +1,12 @@
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
 use workon::workspace::{self, WorkspaceOptions};
-use workon::{cli, deps, layout, resolve, session, vcs};
+use workon::{cli, deps, layout, not_ready, resolve, session, vcs};
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     // Serve shell-completion requests (COMPLETE=<shell> workon …) and exit;
     // a no-op on a normal invocation. Enables dynamic ws_id/nickname candidates.
     clap_complete::CompleteEnv::with_factory(cli::Cli::command).complete();
@@ -16,7 +18,16 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_subcommand(command: cli::Command) -> Result<()> {
+/// `true` (ready) is success; `false` means a setup step failed and the workspace is not ready.
+fn exit_code(ready: bool) -> ExitCode {
+    if ready {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(not_ready::EXIT_NOT_READY)
+    }
+}
+
+fn run_subcommand(command: cli::Command) -> Result<ExitCode> {
     match command {
         cli::Command::Create { name, config, skip_copy_ignored, json } => {
             let project = resolve::resolve()?;
@@ -27,20 +38,22 @@ fn run_subcommand(command: cli::Command) -> Result<()> {
                 config: config.as_deref(),
                 json,
             };
-            workspace::cmd_create(&project.dir, &project.name, args, &*vcs)
+            workspace::cmd_create(&project.dir, &project.name, args, &*vcs).map(exit_code)
         }
-        cli::Command::Attach { reference, config } => workspace::cmd_attach(reference.as_deref(), config.as_deref()),
+        cli::Command::Attach { reference, config } => {
+            workspace::cmd_attach(reference.as_deref(), config.as_deref()).map(|()| ExitCode::SUCCESS)
+        }
         cli::Command::Destroy { reference, no_save, json } => {
-            workspace::cmd_destroy(reference.as_deref(), no_save, json)
+            workspace::cmd_destroy(reference.as_deref(), no_save, json).map(|()| ExitCode::SUCCESS)
         }
-        cli::Command::List { json } => workspace::cmd_list(json),
-        cli::Command::Path { reference } => workspace::cmd_path(reference.as_deref()),
+        cli::Command::List { json } => workspace::cmd_list(json).map(|()| ExitCode::SUCCESS),
+        cli::Command::Path { reference } => workspace::cmd_path(reference.as_deref()).map(|()| ExitCode::SUCCESS),
     }
 }
 
 /// The default (no-subcommand) flow: a session in cwd, or the ephemeral `-w`
 /// workspace. Unchanged from before subcommands existed.
-fn run_session(session: cli::SessionArgs) -> Result<()> {
+fn run_session(session: cli::SessionArgs) -> Result<ExitCode> {
     let project = resolve::resolve()?;
     let config = session.config.as_deref();
 
@@ -71,18 +84,16 @@ fn run_session(session: cli::SessionArgs) -> Result<()> {
             config,
             cfg: &cfg,
         };
-        workspace::run_workspace(&project.dir, &project.name, opts, &*vcs)?;
-    } else {
-        let layout = cfg.resolve()?;
-        session::run(
-            name.unwrap_or(&project.name),
-            layout.path(),
-            &project.dir,
-            session.new_session,
-            &cfg.layout,
-            config.unwrap_or("default"),
-        )?;
+        return workspace::run_workspace(&project.dir, &project.name, opts, &*vcs).map(exit_code);
     }
-
-    Ok(())
+    let layout = cfg.resolve()?;
+    session::run(
+        name.unwrap_or(&project.name),
+        layout.path(),
+        &project.dir,
+        session.new_session,
+        &cfg.layout,
+        config.unwrap_or("default"),
+    )?;
+    Ok(ExitCode::SUCCESS)
 }

@@ -251,23 +251,111 @@ fn create_warns_when_mise_shims_are_off_path() {
     assert!(trusted.starts_with(world.worktrees()) && trusted.ends_with("mise.toml"), "{trusted:?}");
 }
 
-/// Issue #2: a Rails schema load that fails is reported by `create`, in its JSON and in a last
-/// line, never as a plain success. `createdb` and `bundle` are stand-ins, so no server is needed.
+const RAILS: (&str, &str) = ("config/database.yml", "test:\n  adapter: postgresql\n");
+
+/// Runs `workon create` with `args` in a project holding `files`, where `stubs` replace the
+/// default stand-ins; asserts exit 3 (not ready) and returns stdout and stderr.
+fn create_not_ready(files: &[(&str, &str)], stubs: &[(&str, &str)], args: &[&str]) -> (World, String, String) {
+    let world = World::new();
+    let proj = world.project(files);
+    for (name, body) in stubs {
+        world.stubs.set(name, body);
+    }
+    let out = world.workon(&proj).arg("create").args(args).assert().code(3).get_output().clone();
+    let (stdout, stderr) =
+        (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned());
+    (world, stdout, stderr)
+}
+
+fn last_lines(text: &str, n: usize) -> Vec<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].to_vec()
+}
+
+/// Issue #2: a Rails schema load that fails is reported by `create`, in its JSON and in its last
+/// lines, which name the command that opens the workspace anyway. It exits 3 and keeps the
+/// workspace, so a script can tell it from a create that made nothing.
 #[test]
 fn create_reports_a_failed_schema_load() {
-    let world = World::new();
-    let proj = world.project(&[("config/database.yml", "test:\n  adapter: postgresql\n")]);
-    world.stubs.set("bundle", "echo 'bundler: cannot load' >&2; exit 1");
+    let failing = [("bundle", "echo 'bundler: cannot load' >&2; exit 1")];
+    let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &["--json"]);
 
-    let out = world.workon(&proj).args(["create", "--json"]).assert().success().get_output().clone();
-
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["failed_steps"], serde_json::json!(["rails db:schema:load"]), "{report}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let ws_id = report["ws_id"].as_str().unwrap();
+    assert!(Path::new(report["path"].as_str().unwrap()).is_dir(), "the workspace is kept: {report}");
     assert!(stderr.contains("bundler: cannot load"), "the step's own error is shown: {stderr}");
     assert_eq!(
-        stderr.lines().last(),
-        Some("Warning: the workspace is not ready; failed (output above): rails db:schema:load"),
+        last_lines(&stderr, 2),
+        [
+            "Warning: the workspace is not ready; failed (output above): rails db:schema:load".to_string(),
+            format!("Open it anyway with: workon attach {ws_id}"),
+        ],
         "{stderr}"
     );
+}
+
+/// Without --json the path still goes to stdout, and the same two lines end stderr.
+#[test]
+fn create_without_json_ends_with_the_same_lines() {
+    let failing = [("bundle", "exit 1")];
+    let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &[]);
+
+    let path = stdout.trim();
+    assert!(Path::new(path).is_dir(), "{stdout}");
+    let ws_id = path.rsplit_once("proj-").map(|(_, id)| id).unwrap();
+    assert_eq!(
+        last_lines(&stderr, 2),
+        [
+            "Warning: the workspace is not ready; failed (output above): rails db:schema:load".to_string(),
+            format!("Open it anyway with: workon attach {ws_id}"),
+        ],
+        "{stderr}"
+    );
+}
+
+/// A test database that cannot be created (the server is down) is a failed step too: the
+/// workspace would otherwise run its tests against the shared database.
+#[test]
+fn create_reports_a_test_database_it_could_not_create() {
+    let failing = [("createdb", "echo 'createdb: error: connection refused' >&2; exit 1")];
+    let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &["--json"]);
+
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let steps = report["failed_steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{report}");
+    assert!(steps[0].as_str().unwrap().starts_with("create test database proj_ws_"), "{report}");
+    assert_eq!(report["dbs"], serde_json::json!([]), "nothing to drop: {report}");
+    assert!(stderr.contains("is the Postgres server running?"), "the reason is shown: {stderr}");
+}
+
+/// Every provisioner with a setup step carries its failure through to `failed_steps`.
+#[test]
+fn each_provisioner_reports_its_failed_steps() {
+    let csproj = "<Project><ItemGroup><PackageReference Include=\"Npgsql.EntityFrameworkCore.PostgreSQL\" Version=\"9.0.0\" /></ItemGroup></Project>\n";
+    // The project's files, the stand-in that fails, and the steps it should report.
+    type Case<'a> = (&'a [(&'a str, &'a str)], (&'a str, &'a str), &'a [&'a str]);
+    let cases: [Case<'_>; 4] = [
+        (
+            &[("artisan", "#!/usr/bin/env php\n"), ("phpunit.xml", "<env name=\"DB_CONNECTION\" value=\"pgsql\"/>\n")],
+            ("php", "exit 1"),
+            &["php artisan migrate"],
+        ),
+        (
+            &[("prisma/schema.prisma", "datasource db {\n  provider = \"postgresql\"\n}\n")],
+            ("npx", "exit 1"),
+            &["prisma schema apply", "prisma generate"],
+        ),
+        (&[("App/App.csproj", csproj)], ("dotnet", "exit 1"), &["dotnet tool restore", "dotnet ef database update"]),
+        (
+            &[("mix.exs", "def project do [app: :shop, deps: [{:ecto_sql, \"~> 3.10\"}]] end\n")],
+            ("mix", "case \"$1\" in ecto.create) exit 0 ;; *) exit 1 ;; esac"),
+            &["mix ecto.migrate"],
+        ),
+    ];
+    for (files, stub, expected) in cases {
+        let (_world, stdout, _stderr) = create_not_ready(files, &[stub], &["--json"]);
+        let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(report["failed_steps"], serde_json::json!(expected), "{} failing: {report}", stub.0);
+    }
 }
