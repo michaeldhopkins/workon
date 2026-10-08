@@ -368,4 +368,31 @@ mod tests {
         Resource::PostgresDb { name: name.clone() }.teardown();
         assert!(table.contains("Widgets"), "database update should have created Widgets, got {table:?}");
     }
+
+    proptest::proptest! {
+        /// A value reads back under the ADO.NET rules: a quoted one by stripping the quotes
+        /// and undoubling `''`; an unquoted one is the value itself and holds nothing the
+        /// connection-string parser would split on or trim.
+        #[test]
+        fn npgsql_value_reads_back_as_the_original(v in "\\PC{0,20}") {
+            let out = npgsql_value(&v);
+            let back = if let Some(inner) = out.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+                inner.replace("''", "'")
+            } else {
+                proptest::prop_assert!(!out.contains([';', '=', '\'', '"']), "{out:?}");
+                proptest::prop_assert_eq!(out.trim(), out.as_str());
+                proptest::prop_assert!(!out.is_empty());
+                out.clone()
+            };
+            proptest::prop_assert_eq!(back, v);
+        }
+
+        /// A package name reads back from `Include=` in either quote style.
+        #[test]
+        fn include_value_reads_back_in_either_quote(name in "[A-Za-z0-9._-]{1,30}", single in proptest::bool::ANY) {
+            let q = if single { '\'' } else { '"' };
+            let tag = format!("<PackageReference Include={q}{name}{q} Version=\"8.0.0\" />");
+            proptest::prop_assert_eq!(include_value(&tag), Some(name));
+        }
+    }
 }

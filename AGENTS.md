@@ -42,6 +42,7 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - `rust-toolchain.toml` pins an exact stable, and every workflow installs it with a bare `rustup toolchain install`. Move it to each new stable within 30 days, fixing what the new lints find, as its own commit. ci.yml's `msrv` job checks the declared `rust-version` on its own toolchain.
 - Dependencies move through the `workon-deps` upkeep job on the maintainer's machine, never Dependabot: it prepares the update, checks it, and asks the owner; a yes pushes main through the push guard. It never bumps the version, so an update ships with the next release.
 - `tests/lint_suppressions.rs` pins the `#[allow]`/`#[expect]` count (2) and `clippy.toml`'s loosened thresholds (cognitive complexity 30, arguments 8); both may only fall, and the pin falls with them. It also fails when `[lints]` drops or weakens a baseline lint (`unwrap_used`, `dbg_macro`, `undocumented_unsafe_blocks`, …). Touching an item that carries an `#[allow]` means removing it.
+- `tests/properties.toml` classifies every file under `src` as pure (naming its `proptest!` properties) or effectful (with a reason); `tests/properties.rs` fails on an unclassified file, a named property that does not exist, or a pure file with none outside `owed`, which may only shrink. A bug fixed in a pure module comes with a property stating the invariant it broke.
 
 ## Fuzzing
 

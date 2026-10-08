@@ -963,4 +963,27 @@ layout {
             assert_eq!(values, ["--session-id", "x"], "{decoy:?}");
         }
     }
+
+    proptest::proptest! {
+        /// A name accepted as a config name can only name a file directly inside the
+        /// configs directory: never empty, never a separator or a `..`.
+        #[test]
+        fn a_valid_config_name_stays_inside_the_configs_dir(name in "[a-z./_ -]{0,8}") {
+            if is_valid_config_name(&name) {
+                proptest::prop_assert!(!name.is_empty());
+                proptest::prop_assert!(!name.contains(['/', '.', ' ']), "{name:?}");
+            }
+        }
+
+        /// A pane's command reads back from its line, whatever attributes surround it.
+        #[test]
+        fn command_in_line_reads_the_pane_command_back(
+            command in "[a-z0-9_./-]{1,20}",
+            lead in "( {0,8}pane| {0,8}pane size=1)",
+            trail in "( focus=true)?( \\{)?",
+        ) {
+            let line = format!("{lead} command=\"{command}\"{trail}");
+            proptest::prop_assert_eq!(command_in_line(&line), Some(command.as_str()));
+        }
+    }
 }

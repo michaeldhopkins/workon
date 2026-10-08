@@ -120,4 +120,18 @@ mod tests {
         Resource::PostgresDb { name: name.clone() }.teardown();
         assert_eq!(table, "widgets", "alembic upgrade should have created the widgets table");
     }
+
+    proptest::proptest! {
+        /// The first `sqlalchemy.url` with a value is read back whole, however the `=` is spaced.
+        #[test]
+        fn configured_url_is_the_first_non_blank_sqlalchemy_url(
+            blank_first in proptest::bool::ANY,
+            spacing in " ?= ?",
+            url in "[a-z+]{1,10}://[a-z0-9@:/._-]{0,20}",
+        ) {
+            let blank = if blank_first { "sqlalchemy.url =\n" } else { "" };
+            let ini = format!("[alembic]\nscript_location = migrations\n{blank}sqlalchemy.url{spacing}{url}\n");
+            proptest::prop_assert_eq!(configured_url(&ini), Some(url));
+        }
+    }
 }

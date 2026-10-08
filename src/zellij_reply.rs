@@ -151,4 +151,20 @@ dev [Created 1h ago] (EXITED - attach to resurrect)
         assert!(err.is_spawn_failure());
         assert!(!is_no_sessions_error(&err));
     }
+
+    proptest::proptest! {
+        /// A listing finds a session exactly when some line's first word is its name. The
+        /// short alphabet makes prefixes (`a` beside `ab`) common, the case a substring
+        /// match gets wrong.
+        #[test]
+        fn a_listing_finds_exactly_the_sessions_named_first_on_a_line(
+            names in proptest::collection::vec("[ab]{1,3}", 0..6),
+            name in "[ab]{1,3}",
+        ) {
+            let stdout: String =
+                names.iter().map(|n| format!("{n} [Created 1h ago] (EXITED - attach to resurrect)\n")).collect();
+            let found = read_listing(&name, Ok(stdout)).unwrap();
+            proptest::prop_assert_eq!(found, Listing::Found(names.contains(&name)));
+        }
+    }
 }

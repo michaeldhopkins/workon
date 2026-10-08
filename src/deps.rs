@@ -200,4 +200,23 @@ pane command="opencode""#;
         assert!(install_hint("branchdiff").contains("brew install"));
         assert_eq!(install_hint("opencode"), "");
     }
+
+    proptest::proptest! {
+        /// Any dotted version reads back as its first two numbers, whatever follows them.
+        #[test]
+        fn parse_major_minor_reads_the_first_two_numbers(
+            major in 0u32..100_000,
+            minor in 0u32..100_000,
+            rest in "(\\.[0-9a-z-]{0,6}){0,3}",
+        ) {
+            proptest::prop_assert_eq!(parse_major_minor(&format!("{major}.{minor}{rest}")), Some((major, minor)));
+        }
+
+        /// Without a numeric minor there is nothing to compare against, so no version.
+        #[test]
+        fn parse_major_minor_needs_a_numeric_minor(major in 0u32..100_000, tail in "[a-z]{0,4}") {
+            proptest::prop_assert_eq!(parse_major_minor(&major.to_string()), None);
+            proptest::prop_assert_eq!(parse_major_minor(&format!("{major}.{tail}")), None);
+        }
+    }
 }

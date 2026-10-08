@@ -265,4 +265,21 @@ mod tests {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
             .unwrap_or(false)
     }
+
+    proptest::proptest! {
+        /// The datasource's provider and its URL's env var read back, past the generator's
+        /// own `provider` line, however the `=` is spaced.
+        #[test]
+        fn the_datasource_provider_and_url_var_read_back(
+            provider in proptest::sample::select(vec!["postgresql", "mysql", "sqlite", "sqlserver", "cockroachdb", "mongodb"]),
+            spacing in " {0,6}= ?",
+            env_var in "[A-Z][A-Z0-9_]{0,15}",
+        ) {
+            let schema = format!(
+                "generator client {{\n  provider = \"prisma-client-js\"\n}}\n\ndatasource db {{\n  provider{spacing}\"{provider}\"\n  url      = env(\"{env_var}\")\n}}\n"
+            );
+            proptest::prop_assert_eq!(datasource_provider(&schema), Some(provider.to_string()));
+            proptest::prop_assert_eq!(url_env_var(&schema), Some(env_var));
+        }
+    }
 }

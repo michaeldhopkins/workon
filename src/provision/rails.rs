@@ -193,4 +193,20 @@ mod tests {
 
         assert_eq!(table, "widgets", "db:schema:load should have created the widgets table");
     }
+
+    proptest::proptest! {
+        /// Whatever surrounds it, the first `adapter:` line with a value names the adapter.
+        #[test]
+        fn adapter_is_the_first_adapter_line_with_a_value(
+            before in proptest::collection::vec("  (database|host|pool): [a-z0-9_]{0,8}", 0..4),
+            blank_first in proptest::bool::ANY,
+            indent in " {0,4}",
+            value in "[a-z0-9_]{1,12}",
+            after in proptest::collection::vec("  adapter: [a-z]{1,8}", 0..3),
+        ) {
+            let blank = if blank_first { "  adapter:\n" } else { "" };
+            let yml = format!("test:\n{}\n{blank}{indent}adapter: {value}\n{}\n", before.join("\n"), after.join("\n"));
+            proptest::prop_assert_eq!(adapter(&yml), Some(value));
+        }
+    }
 }

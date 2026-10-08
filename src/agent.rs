@@ -308,4 +308,26 @@ mod tests {
         let err = err_of("workon {\n    agent command=\"c\" {\n        new 42\n    }\n}");
         assert!(err.contains("string arguments"), "{err}");
     }
+
+    proptest::proptest! {
+        /// Expanding puts the session id exactly where each placeholder was and changes
+        /// nothing else. The pieces' alphabet has no braces, so none forms a placeholder.
+        #[test]
+        fn expand_replaces_every_placeholder_and_nothing_else(
+            parts in proptest::collection::vec(proptest::collection::vec("[a-z -]{0,5}", 1..4), 0..5),
+            id in "[0-9a-f-]{1,36}",
+        ) {
+            let template: Vec<String> = parts.iter().map(|p| p.join(SESSION_ID)).collect();
+            let expected: Vec<String> = parts.iter().map(|p| p.join(&id)).collect();
+            proptest::prop_assert_eq!(expand(&template, &id), expected);
+        }
+
+        /// A capability the agent does not declare yields no args for any session id.
+        #[test]
+        fn an_undeclared_capability_never_yields_args(id in "[0-9a-f-]{0,36}") {
+            let spec = AgentSpec { command: "c".to_string(), new: None, resume: None };
+            proptest::prop_assert_eq!(spec.new_args(&id), None);
+            proptest::prop_assert_eq!(spec.resume_args(&id), None);
+        }
+    }
 }

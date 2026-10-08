@@ -197,4 +197,31 @@ mod tests {
         Resource::PostgresDb { name: db.clone() }.teardown();
         assert_eq!(table, "widgets", "ecto.migrate should have created the widgets table");
     }
+
+    proptest::proptest! {
+        /// The partition is the ws id with every non-identifier character made `_`, after a
+        /// leading `_`, cut so the app's test database name stays within Postgres's 63 bytes.
+        #[test]
+        fn partition_is_the_sanitized_ws_id_cut_to_fit(app in "[a-z_]{1,70}", ws_id in "\\PC{0,80}") {
+            let partition = partition_for(&app, &ws_id);
+            let budget = 63usize.saturating_sub(app.len() + "_test".len());
+            let whole: String = std::iter::once('_')
+                .chain(ws_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }))
+                .collect();
+            proptest::prop_assert_eq!(partition.len(), whole.len().min(budget));
+            proptest::prop_assert!(whole.starts_with(&partition), "{partition:?} is not a prefix of {whole:?}");
+        }
+
+        /// The app atom reads back past a commented-out `app:` and an `app:` glued to a word.
+        #[test]
+        fn app_name_reads_the_app_atom_past_comments_and_lookalikes(
+            name in "[a-z_][a-z0-9_]{0,15}",
+            decoy in "[a-z]{1,6}",
+        ) {
+            let mix = format!(
+                "defmodule X.MixProject do\n  # app: :{decoy}_commented\n  def {decoy}app: :nope\n  def project do\n    [\n      app: :{name},\n      version: \"0.1.0\"\n    ]\n  end\nend\n"
+            );
+            proptest::prop_assert_eq!(app_name(&mix), Some(name));
+        }
+    }
 }

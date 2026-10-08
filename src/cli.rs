@@ -122,4 +122,13 @@ mod tests {
         assert_eq!(given_name(Some("")), None);
         assert_eq!(given_name(None), None);
     }
+
+    proptest::proptest! {
+        /// A name survives exactly when it is non-empty, and then comes back unchanged.
+        #[test]
+        fn given_name_drops_only_the_empty_name(name in "\\PC{0,12}") {
+            let expected = if name.is_empty() { None } else { Some(name.as_str()) };
+            proptest::prop_assert_eq!(given_name(Some(&name)), expected);
+        }
+    }
 }
