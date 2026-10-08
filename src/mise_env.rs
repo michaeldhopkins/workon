@@ -236,6 +236,43 @@ pub(crate) fn warn_mise_shims() {
 mod tests {
     use super::*;
 
+    fn env_of(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect();
+        move |var| map.get(var).cloned()
+    }
+
+    #[test]
+    fn shims_warning_only_when_the_shims_are_off_path_and_mise_is_not_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home").display().to_string();
+        let shims = format!("{home}/.local/share/mise/shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        let warning = |extra: &[(&str, String)]| {
+            let mut pairs = vec![("HOME", home.clone()), ("PATH", "/usr/bin:/bin".to_string())];
+            pairs.extend(extra.iter().cloned());
+            let env = env_of(&pairs);
+            shims_warning(&env, &|var| env(var).map(OsString::from))
+        };
+
+        let lines = warning(&[]).unwrap();
+        assert!(lines.contains(&"  export PATH=\"$HOME/.local/share/mise/shims:$PATH\"".to_string()), "{lines:?}");
+        assert_eq!(lines[1], "Warning: mise shims directory is not on your PATH, and");
+
+        assert_eq!(warning(&[("MISE_SHELL", "zsh".into())]), None, "mise activate is live");
+        assert_eq!(warning(&[("__MISE_SESSION", "x".into())]), None, "mise activate is live");
+        assert!(warning(&[("MISE_SHELL", String::new())]).is_some(), "an empty marker is not activation");
+        assert_eq!(warning(&[("PATH", format!("/usr/bin:{shims}"))]), None, "the shims are on PATH");
+        assert_eq!(warning(&[("MISE_SHIMS_DIR", format!("{home}/missing"))]), None, "no shims directory");
+    }
+
+    #[test]
+    fn shown_from_home_writes_home_as_a_variable_only_at_a_directory_boundary() {
+        assert_eq!(shown_from_home("/h/u/.local/share/mise/shims", "/h/u"), "$HOME/.local/share/mise/shims");
+        assert_eq!(shown_from_home("/h/user2/shims", "/h/user"), "/h/user2/shims", "not a boundary");
+        assert_eq!(shown_from_home("/other/shims", "/h/u"), "/other/shims");
+        assert_eq!(shown_from_home("/h/u/shims", ""), "/h/u/shims", "no HOME");
+    }
+
     #[test]
     fn should_warn_mise_shims_only_when_genuinely_missing() {
         // The fix: `mise activate` being live suppresses the warning even when

@@ -65,6 +65,10 @@ test = "tests/tui/mod.rs::new_session_deletes_the_running_session_and_launches_a
 what = "attach hands an existing workspace to zellij and leaves it in place"
 test = "tests/tui/mod.rs::attach_hands_an_existing_workspace_to_zellij_and_keeps_it"
 
+[[pty]]
+what = "-w --resume copies the agent transcript into the new workspace before launch"
+test = "tests/tui/mod.rs::w_resume_carries_the_transcript_into_the_new_workspace"
+
 # The -w not-ready pause (issue #2): when a setup step fails, -w asks
 # "Open it anyway? [Y/n] " before zellij takes the screen.
 [[pty]]

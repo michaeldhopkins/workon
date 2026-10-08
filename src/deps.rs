@@ -191,6 +191,40 @@ pane command="opencode""#;
         assert!(err.contains("  workon_fake_dep_abc123 — not found on PATH"), "{err}");
     }
 
+    /// A stand-in binary in `dir` that prints `version` for `--version`.
+    fn reports(dir: &std::path::Path, name: &str, version: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// zellij below 0.40 and branchdiff below 0.50 get a warning; the minimum itself, newer
+    /// versions and other programs do not.
+    #[test]
+    fn check_version_warns_only_below_each_minimum() {
+        let tmp = tempfile::tempdir().unwrap();
+        let warns = |name: &str, version: &str| check_version(name, &reports(tmp.path(), name, version));
+
+        let old_zellij = warns("zellij", "zellij 0.39.2").unwrap();
+        assert!(old_zellij.starts_with("zellij 0.39.2 is installed but 0.40+ is recommended"), "{old_zellij}");
+        assert_eq!(warns("zellij", "zellij 0.40.0"), None);
+        assert_eq!(warns("zellij", "zellij 0.43.1"), None);
+
+        let old_branchdiff = warns("branchdiff", "branchdiff 0.49.9").unwrap();
+        assert!(old_branchdiff.starts_with("branchdiff 0.49.9 is installed but 0.50+"), "{old_branchdiff}");
+        assert_eq!(warns("branchdiff", "branchdiff 0.50.0"), None);
+
+        assert_eq!(warns("claude", "claude 0.1.0"), None, "no minimum for other programs");
+    }
+
+    #[test]
+    fn extract_commands_skips_an_empty_command_and_reads_on() {
+        assert_eq!(extract_commands(r#"pane command="" pane command="a""#), ["a"]);
+        assert_eq!(extract_commands(r#"pane command="unterminated"#), Vec::<String>::new());
+    }
+
     #[test]
     fn install_hint_known_binaries() {
         assert!(install_hint("claude").contains("claude.ai"));

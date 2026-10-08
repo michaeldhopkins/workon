@@ -86,7 +86,9 @@ fn create_help_lists_its_flags() {
 
 #[test]
 fn path_unknown_reference_fails_cleanly() {
-    workon(&["path", "definitely-no-such-ws"]).failure().stderr(predicate::str::contains("definitely-no-such-ws"));
+    workon(&["path", "definitely-no-such-ws"])
+        .failure()
+        .stderr(predicate::str::contains("no workspace matches 'definitely-no-such-ws'"));
 }
 
 #[test]
@@ -333,29 +335,92 @@ fn create_reports_a_test_database_it_could_not_create() {
 #[test]
 fn each_provisioner_reports_its_failed_steps() {
     let csproj = "<Project><ItemGroup><PackageReference Include=\"Npgsql.EntityFrameworkCore.PostgreSQL\" Version=\"9.0.0\" /></ItemGroup></Project>\n";
-    // The project's files, the stand-in that fails, and the steps it should report.
-    type Case<'a> = (&'a [(&'a str, &'a str)], (&'a str, &'a str), &'a [&'a str]);
+    // The project's files, the stand-in that fails, the steps it should report, and the variable
+    // its Setup still records, and the env file the framework reads it from.
+    type Case<'a> = (&'a [(&'a str, &'a str)], (&'a str, &'a str), &'a [&'a str], &'a str, Option<&'a str>);
     let cases: [Case<'_>; 4] = [
         (
             &[("artisan", "#!/usr/bin/env php\n"), ("phpunit.xml", "<env name=\"DB_CONNECTION\" value=\"pgsql\"/>\n")],
             ("php", "exit 1"),
             &["php artisan migrate"],
+            "DB_URL",
+            Some(".env.testing"),
         ),
         (
             &[("prisma/schema.prisma", "datasource db {\n  provider = \"postgresql\"\n}\n")],
             ("npx", "exit 1"),
             &["prisma schema apply", "prisma generate"],
+            "DATABASE_URL",
+            Some(".env.test.local"),
         ),
-        (&[("App/App.csproj", csproj)], ("dotnet", "exit 1"), &["dotnet tool restore", "dotnet ef database update"]),
+        (
+            &[("App/App.csproj", csproj)],
+            ("dotnet", "exit 1"),
+            &["dotnet tool restore", "dotnet ef database update"],
+            "ConnectionStrings__",
+            Some(".env.test.local"),
+        ),
         (
             &[("mix.exs", "def project do [app: :shop, deps: [{:ecto_sql, \"~> 3.10\"}]] end\n")],
             ("mix", "case \"$1\" in ecto.create) exit 0 ;; *) exit 1 ;; esac"),
             &["mix ecto.migrate"],
+            "MIX_TEST_PARTITION",
+            None,
         ),
     ];
-    for (files, stub, expected) in cases {
+    for (files, stub, expected, var, env_file) in cases {
         let (_world, stdout, _stderr) = create_not_ready(files, &[stub], &["--json"]);
         let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(report["failed_steps"], serde_json::json!(expected), "{} failing: {report}", stub.0);
+        assert_eq!(report["dbs"].as_array().map(Vec::len), Some(1), "the database is kept for teardown: {report}");
+        let meta = std::fs::read_to_string(Path::new(report["path"].as_str().unwrap()).join(".workon.json")).unwrap();
+        assert!(meta.contains(var), "{} keeps {var} for the session: {meta}", stub.0);
+        if let Some(file) = env_file {
+            let written =
+                std::fs::read_to_string(Path::new(report["path"].as_str().unwrap()).join(file)).unwrap_or_default();
+            assert!(written.contains(var), "{} writes {var} to {file}: {written:?}", stub.0);
+        }
     }
+}
+
+/// A running session for this project whose process tree lacks the layout's focused command
+/// (`claude`) was started with another layout: plain `workon` refuses to attach to it rather
+/// than silently giving the user the running layout.
+#[test]
+fn workon_refuses_to_attach_to_a_session_running_another_layout() {
+    let world = World::new();
+    let proj = world.project(&[]);
+    world.stubs.set(
+        "zellij",
+        "case \"$1\" in --version) echo 'zellij 0.43.1' ;; list-sessions) echo 'proj [Created 1m ago]' ;; esac",
+    );
+    world.stubs.set("pgrep", "echo 4242");
+    world.stubs.set("ps", "printf '4243 4242 /bin/zsh\\n4244 4243 /opt/homebrew/bin/opencode\\n'");
+
+    let out = world.workon(&proj).assert().failure().get_output().clone();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("zellij session 'proj' is already running in the main worktree with a different layout"),
+        "{stderr}"
+    );
+    assert!(world.stubs.calls("zellij").iter().all(|c| c.args.first().is_none_or(|a| a != "attach")), "never attached");
+}
+
+/// With no reference, `path` finds the workspace the cwd is inside, from any depth, and
+/// refuses outside one.
+#[test]
+fn path_without_a_reference_finds_the_enclosing_workspace() {
+    let world = World::new();
+    let proj = world.project(&[]);
+    let created = create_json(&world, &proj, "deep");
+    let ws = Path::new(created["path"].as_str().unwrap()).to_path_buf();
+    let deep = ws.join("a/b");
+    std::fs::create_dir_all(&deep).unwrap();
+
+    for dir in [&ws, &deep] {
+        let out = world.workon(dir).arg("path").assert().success().get_output().stdout.clone();
+        assert_eq!(String::from_utf8_lossy(&out).trim(), ws.to_str().unwrap(), "from {}", dir.display());
+    }
+    world.workon(&proj).arg("path").assert().failure().stderr(predicate::str::contains("not inside a workspace"));
 }

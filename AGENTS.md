@@ -170,9 +170,6 @@ CI figure.
   fixture). Giving the mutants jobs that environment would add those
   toolchains' setup to every run; the helpers they call (adapter parsing,
   `test_db_name`, the URL and Npgsql encoders) are still mutated.
-- `session_layout`'s `agent.command == CLAUDE`: its only effect is copying a
-  resumed transcript under `$HOME`, which a unit test cannot redirect while
-  other tests read it in parallel.
 - `Vcs::stranded_work -> vec![]`: the default body is `Vec::new()`.
 - `session::run -> Ok(())`: it hands the terminal to a real zellij; its
   decisions (`session_exists`, `delete_session`) are tested with a stand-in.
@@ -235,6 +232,27 @@ now tested; `session::run`, picked by `--in-diff`, excluded (above).
 stale-working-copy guard (`true` and `false`) and `cleanup_partial_workspace`. Each
 now has a test against a real jj; a stale working copy is made with an `op restore`
 from another workspace, since jj recovers by itself from a plain rewrite.
+
+**2026-10-08, a full local sweep** (all 736 mutants, in 24 shards of 2-8 minutes):
+52 MISSED, plus six in `vcs/jj.rs` fixed just before it (`init_jj`,
+`detect_trunk_git`, `detect_trunk`'s git fallback). All are now caught:
+- `deps`: `check_version`'s minimums, through stand-in binaries.
+- `discover::looks_like_path`: `.` and `~` alone.
+- `mise_env`: the shims warning, built from an environment lookup that a test supplies.
+- `session`: refusing a running session with another layout (a CLI test with
+  `pgrep` and `ps` stand-ins); `zellij_version` and `preflight_responsive` take the
+  zellij program.
+- `workspace`: `path` from inside a workspace, `workspace_age_seconds`,
+  `find_mise_configs`' skipped directories, and `-w --resume` in a PTY. The resume
+  test also covers `session_layout`'s `agent.command == CLAUDE`, so that exclusion is gone.
+- Provisioners: each one's `Setup` (failed steps, kept database, session variable,
+  env file) through stand-ins; `npgsql_connection_string_in`; `collect_csprojs`' depth;
+  `PythonVenv::detect`; `repair`'s editable-artifact filter.
+- `vcs/jj`: `pre_copy_sync` and `forget_workspace`.
+
+Two mutants were equivalent and went with a rewrite rather than an exclusion:
+`extract_commands`' `end + 1` → `end * 1` (it now uses `split_once`) and
+`partition_for`'s `>` → `>=` (it now uses `min`).
 
 ## Dependencies
 

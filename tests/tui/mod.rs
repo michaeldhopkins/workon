@@ -196,3 +196,30 @@ fn not_ready_pause_n_removes_the_workspace_without_launching() {
         assert_removed_soon(dir);
     }
 }
+
+/// `-w --resume` copies the agent's transcript, found anywhere under the home directory's
+/// `.claude` `projects` directory, into the new workspace's project directory, so `claude --resume` finds
+/// it there.
+#[test]
+fn w_resume_carries_the_transcript_into_the_new_workspace() {
+    let world = World::new();
+    let proj = world.project(&[]);
+    let session = "0b7c9a52-3f1e-4d2b-9a8e-5c6d7e8f9a0b";
+    let old = world.home().join(".claude").join("projects").join("-elsewhere");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join(format!("{session}.jsonl")), "{\"transcript\":1}\n").unwrap();
+
+    let mut tui = world.tui(&proj, &["-w", "--resume", session]);
+    assert!(tui.wait_for_exit(), "{}", tui.screen());
+
+    assert!(tui.screen().contains("Migrated Claude session to new workspace"), "{}", tui.screen());
+    let projects = world.home().join(".claude").join("projects");
+    let copies: Vec<_> = std::fs::read_dir(&projects)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join(format!("{session}.jsonl")))
+        .filter(|p| p.is_file() && !p.starts_with(&old))
+        .collect();
+    assert_eq!(copies.len(), 1, "one copy beside the original: {copies:?}");
+    assert_eq!(std::fs::read_to_string(&copies[0]).unwrap(), "{\"transcript\":1}\n");
+}

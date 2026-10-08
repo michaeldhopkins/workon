@@ -245,6 +245,41 @@ mod tests {
         );
     }
 
+    fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn npgsql_connection_string_reads_the_pg_environment() {
+        let env = [("PGHOST", "db.local"), ("PGPORT", "5433"), ("PGUSER", "app"), ("PGPASSWORD", "pw")];
+        assert_eq!(
+            npgsql_connection_string_in("t", &env_of(&env)),
+            "Host=db.local;Port=5433;Database=t;Username=app;Password=pw"
+        );
+        let socket = [("PGHOST", "/tmp"), ("USER", "os")];
+        assert_eq!(
+            npgsql_connection_string_in("t", &env_of(&socket)),
+            "Host=localhost;Port=5432;Database=t;Username=os",
+            "a socket directory is reached over TCP on localhost"
+        );
+        assert_eq!(npgsql_connection_string_in("t", &env_of(&[])), "Host=localhost;Port=5432;Database=t;Username=''");
+        let process = |var: &str| std::env::var(var).ok();
+        assert_eq!(npgsql_connection_string("t"), npgsql_connection_string_in("t", &process));
+    }
+
+    /// `.csproj` files are found down to three directories below the root, and no deeper.
+    #[test]
+    fn collect_csprojs_looks_three_levels_down() {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in ["a/b/c", "a/b/c/d"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            std::fs::write(tmp.path().join(dir).join("App.csproj"), "").unwrap();
+        }
+        let mut found = Vec::new();
+        collect_csprojs(tmp.path(), 0, &mut found);
+        assert_eq!(found, [tmp.path().join("a/b/c/App.csproj")]);
+    }
+
     #[test]
     fn npgsql_value_quotes_any_surrounding_whitespace_and_control_characters() {
         // ADO.NET trims an unquoted value with char.IsWhiteSpace, not just ' ', and

@@ -605,6 +605,37 @@ mod tests {
         assert_eq!(JjBackend.detect_trunk(&repo).unwrap(), commit.trim());
     }
 
+    /// `pre_copy_sync` snapshots the working copy, so a new file is in `@` before the
+    /// gitignored-file copy asks git what is ignored.
+    #[test]
+    fn pre_copy_sync_snapshots_the_working_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = jj_repo(tmp.path()) else { return };
+        std::fs::write(repo.join("new.txt"), "x").unwrap();
+        let empty =
+            || run_jj_utf8(&repo, &["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", "empty"]).unwrap();
+        assert_eq!(empty(), "true", "not snapshotted yet");
+
+        JjBackend.pre_copy_sync(&repo);
+
+        assert_eq!(empty(), "false");
+    }
+
+    #[test]
+    fn forget_workspace_forgets_it_and_drops_its_git_worktree_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = jj_repo(tmp.path()) else { return };
+        let ws = tmp.path().join("ws");
+        run_jj(&repo, &["workspace", "add", &path_str(&ws), "--name", "ws-gone", "-r", "main"]).unwrap();
+        let git_entry = repo.join(".git/worktrees/ws-gone");
+        std::fs::create_dir_all(&git_entry).unwrap();
+
+        JjBackend.forget_workspace("ws-gone", &repo, &ws);
+
+        assert!(!workspace_names(&repo).contains("ws-gone"), "{}", workspace_names(&repo));
+        assert!(!git_entry.exists());
+    }
+
     #[test]
     fn cleanup_partial_workspace_forgets_it_and_removes_its_directory() {
         let tmp = tempfile::tempdir().unwrap();

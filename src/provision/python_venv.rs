@@ -164,6 +164,16 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn detects_a_venv_by_its_pyvenv_cfg() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!PythonVenv.detect(tmp.path()));
+        std::fs::create_dir_all(tmp.path().join(".venv")).unwrap();
+        assert!(!PythonVenv.detect(tmp.path()), "a .venv with no pyvenv.cfg is not a venv");
+        std::fs::write(tmp.path().join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        assert!(PythonVenv.detect(tmp.path()));
+    }
+
+    #[test]
     fn activate_root_parses_virtual_env() {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join(".venv/bin");
@@ -198,14 +208,21 @@ mod tests {
         std::fs::write(sp.join("__editable__.mypkg-0.0.0.pth"), "/old/proj/src\n").unwrap();
         std::fs::write(sp.join("__editable___mypkg_finder.py"), "MAPPING = {'mypkg': '/old/proj/src/mypkg'}\n")
             .unwrap();
+        std::fs::write(sp.join("mypkg.egg-link"), "/old/proj/src\n").unwrap();
+        // An ordinary module that happens to name the old path is not an editable artifact.
+        std::fs::write(sp.join("settings.py"), "ROOT = '/old/proj'\n").unwrap();
 
         let venv = tmp.path().join(".venv");
         let changed = repair(&venv, &["/old/proj".to_string()], &tmp.path().to_string_lossy());
-        assert!(changed >= 2, "activate + 2 editable files rewritten, got {changed}");
+        assert_eq!(changed, 4, "activate, the .pth, the finder and the .egg-link");
 
         let pth = std::fs::read_to_string(sp.join("__editable__.mypkg-0.0.0.pth")).unwrap();
         assert!(pth.contains(&format!("{}/src", tmp.path().display())), "{pth}");
         assert!(!pth.contains("/old/proj"), "old path gone: {pth}");
+        let finder = std::fs::read_to_string(sp.join("__editable___mypkg_finder.py")).unwrap();
+        assert!(!finder.contains("/old/proj"), "{finder}");
+        let settings = std::fs::read_to_string(sp.join("settings.py")).unwrap();
+        assert_eq!(settings, "ROOT = '/old/proj'\n", "left alone");
     }
 
     /// End-to-end against a real venv: create one, copy it elsewhere, delete the

@@ -1159,6 +1159,17 @@ mod tests {
     }
 
     #[test]
+    fn workspace_age_is_the_time_since_the_directory_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::open(tmp.path()).unwrap().set_modified(two_hours_ago).unwrap();
+
+        let age = workspace_age_seconds(tmp.path());
+        assert!((7200..7260).contains(&age), "{age}");
+        assert_eq!(workspace_age_seconds(&tmp.path().join("missing")), 0, "no directory, no age");
+    }
+
+    #[test]
     fn humanize_age_scales_by_unit() {
         assert_eq!(humanize_age(5), "5s");
         assert_eq!(humanize_age(59), "59s");
@@ -2070,6 +2081,10 @@ mod tests {
         std::fs::write(root.join("node_modules/pkg/.tool-versions"), "").unwrap();
         std::fs::create_dir_all(root.join("vendor/lib")).unwrap();
         std::fs::write(root.join("vendor/lib/.mise.toml"), "").unwrap();
+        for dep in ["target", "build", "dist"] {
+            std::fs::create_dir_all(root.join(dep)).unwrap();
+            std::fs::write(root.join(dep).join(".mise.toml"), "").unwrap();
+        }
 
         let configs = find_mise_configs(root);
         assert!(configs.is_empty(), "should skip hidden/dependency dirs, got: {configs:?}");

@@ -676,6 +676,18 @@ mod tests {
     }
 
     #[test]
+    fn zellij_version_is_the_second_word_of_its_version_line() {
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("log");
+        let zellij = stand_in(bin.path(), &log, "echo 'zellij 0.43.1'");
+        assert_eq!(zellij_version(zellij.to_str().unwrap()).unwrap(), "0.43.1");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "--version\n");
+
+        let zellij = stand_in(bin.path(), &log, "echo 'garbled'");
+        assert!(zellij_version(zellij.to_str().unwrap()).is_err(), "no version word");
+    }
+
+    #[test]
     fn session_exists_reads_the_listing_for_this_session() {
         let bin = tempfile::tempdir().unwrap();
         let log = bin.path().join("log");
@@ -726,6 +738,26 @@ mod tests {
         with_env("ZELLIJ_SOCKET_DIR", dir.path(), || preflight_socket(&name));
 
         assert!(!socket.exists(), "an orphaned socket should be removed before launch");
+    }
+
+    /// A `list-sessions` that times out means the server is wedged: its socket is removed
+    /// before attaching. One that answers leaves the socket alone.
+    #[test]
+    fn preflight_responsive_recovers_only_a_session_that_does_not_answer() {
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("log");
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("workon-wedged-{}", std::process::id());
+        let socket = dir.path().join(&name);
+
+        std::fs::write(&socket, "").unwrap();
+        let answers = stand_in(bin.path(), &log, "exit 0");
+        with_env("ZELLIJ_SOCKET_DIR", dir.path(), || preflight_responsive(answers.to_str().unwrap(), &name));
+        assert!(socket.exists(), "a responsive server keeps its socket");
+
+        let hangs = stand_in(bin.path(), &log, "exec sleep 30");
+        with_env("ZELLIJ_SOCKET_DIR", dir.path(), || preflight_responsive(hangs.to_str().unwrap(), &name));
+        assert!(!socket.exists(), "a wedged server's socket is removed");
     }
 
     #[test]

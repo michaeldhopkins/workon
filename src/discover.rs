@@ -114,6 +114,8 @@ mod tests {
         assert_eq!(classify_ref(Some("./rel")), WsRef::Path("./rel".into()));
         assert_eq!(classify_ref(Some("a/b")), WsRef::Path("a/b".into()));
         assert_eq!(classify_ref(Some("~/w")), WsRef::Path("~/w".into()));
+        assert_eq!(classify_ref(Some("..")), WsRef::Path("..".into()), "a dot with no slash");
+        assert_eq!(classify_ref(Some("~")), WsRef::Path("~".into()), "a tilde with no slash");
     }
 
     #[test]
