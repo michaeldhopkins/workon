@@ -163,11 +163,16 @@ fn collect_csprojs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// A Npgsql `Host=…;Port=…;Database=…;Username=…[;Password=…]` string from the
 /// `PG*` environment (OS-user fallback).
 fn npgsql_connection_string(name: &str) -> String {
-    let host = std::env::var("PGHOST").unwrap_or_default();
+    npgsql_connection_string_in(name, &|var| std::env::var(var).ok())
+}
+
+/// [`npgsql_connection_string`] with the variables read through `env`, so a test can supply them.
+fn npgsql_connection_string_in(name: &str, env: &dyn Fn(&str) -> Option<String>) -> String {
+    let host = env("PGHOST").unwrap_or_default();
     let host = if host.is_empty() || host.starts_with('/') { "localhost".to_string() } else { host };
-    let port = std::env::var("PGPORT").unwrap_or_default();
-    let user = std::env::var("PGUSER").ok().or_else(|| std::env::var("USER").ok()).unwrap_or_default();
-    npgsql_connection_string_from(&host, &port, name, &user, std::env::var("PGPASSWORD").ok().as_deref())
+    let port = env("PGPORT").unwrap_or_default();
+    let user = env("PGUSER").or_else(|| env("USER")).unwrap_or_default();
+    npgsql_connection_string_from(&host, &port, name, &user, env("PGPASSWORD").as_deref())
 }
 
 /// Every value goes through [`npgsql_value`], host and port included: they come

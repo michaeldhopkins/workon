@@ -182,7 +182,7 @@ fn socket_dir() -> Result<PathBuf> {
     }
     let mut p = std::env::temp_dir();
     p.push(format!("zellij-{}", current_uid()?));
-    p.push(zellij_version()?);
+    p.push(zellij_version("zellij")?);
     Ok(p)
 }
 
@@ -191,11 +191,12 @@ fn current_uid() -> Result<String> {
     Ok(out.stdout_lossy().trim().to_string())
 }
 
-fn zellij_version() -> Result<String> {
+/// `<zellij> --version`, as `0.43.1`. `zellij` is the program, which a test replaces.
+fn zellij_version(zellij: &str) -> Result<String> {
     // `zellij --version` prints from the binary; does not touch IPC, so it's
     // safe even when a server is hung.
     let out =
-        Cmd::new("zellij").arg("--version").timeout(ZELLIJ_TIMEOUT).run().context("failed to read zellij version")?;
+        Cmd::new(zellij).arg("--version").timeout(ZELLIJ_TIMEOUT).run().context("failed to read zellij version")?;
     let stdout = out.stdout_lossy();
     stdout
         .split_whitespace()
@@ -252,7 +253,7 @@ fn attach(name: &str, working_dir: &Path) -> Result<()> {
     // `zellij attach` has no timeout knob and inherits the TTY, so if IPC is
     // hung it blocks forever. Probe responsiveness first; recover surgically
     // if the IPC layer is wedged.
-    preflight_responsive(name);
+    preflight_responsive("zellij", name);
 
     Command::new("zellij")
         .args(["attach", name])
@@ -276,9 +277,10 @@ fn preflight_socket(name: &str) {
 }
 
 /// Probe IPC with a short `list-sessions`. If it times out, recover this
-/// session's server before handing the TTY to a no-timeout `zellij attach`.
-fn preflight_responsive(name: &str) {
-    let result = Cmd::new("zellij").args(["list-sessions", "--no-formatting"]).timeout(ZELLIJ_TIMEOUT).run();
+/// session's server before handing the TTY to a no-timeout `zellij attach`. `zellij` is the
+/// program, which a test replaces.
+fn preflight_responsive(zellij: &str, name: &str) {
+    let result = Cmd::new(zellij).args(["list-sessions", "--no-formatting"]).timeout(ZELLIJ_TIMEOUT).run();
     if let Err(e) = result
         && e.is_timeout()
     {

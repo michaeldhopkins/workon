@@ -58,16 +58,13 @@ pub(crate) fn extract_commands(layout: &str) -> Vec<String> {
     for line in layout.lines() {
         let mut rest = line;
         while let Some(idx) = rest.find("command=\"") {
-            let after = &rest[idx + "command=\"".len()..];
-            if let Some(end) = after.find('"') {
-                let cmd = after[..end].to_string();
-                if !cmd.is_empty() && !found.contains(&cmd) {
-                    found.push(cmd);
-                }
-                rest = &after[end + 1..];
-            } else {
+            let Some((cmd, tail)) = rest[idx + "command=\"".len()..].split_once('"') else {
                 break;
+            };
+            if !cmd.is_empty() && !found.iter().any(|f| f == cmd) {
+                found.push(cmd.to_string());
             }
+            rest = tail;
         }
     }
     found

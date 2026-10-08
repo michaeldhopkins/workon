@@ -2,6 +2,7 @@
 //! to provisioners.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
 
 use vcs_runner::Cmd;
@@ -166,12 +167,12 @@ fn parse(output: &str) -> Result<HashMap<String, String>, serde_json::Error> {
     Ok(map.into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect())
 }
 
-/// Whether `mise activate` is live in the current environment. Activation exports
-/// these markers; their presence means mise is already managing PATH (the install
-/// bin dirs are injected directly), so the shims check below would be a false
-/// alarm — `which ruby` resolves correctly without shims on PATH.
-fn mise_activated() -> bool {
-    ["MISE_SHELL", "__MISE_DIFF", "__MISE_SESSION"].iter().any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+/// Whether `mise activate` is live in `env_os`. Activation exports these markers;
+/// their presence means mise is already managing PATH (the install bin dirs are
+/// injected directly), so the shims check below would be a false alarm — `which
+/// ruby` resolves correctly without shims on PATH.
+fn mise_activated(env_os: &dyn Fn(&str) -> Option<OsString>) -> bool {
+    ["MISE_SHELL", "__MISE_DIFF", "__MISE_SESSION"].iter().any(|k| env_os(k).is_some_and(|v| !v.is_empty()))
 }
 
 /// Warn only when tool versions could actually go unresolved: adding shims to
@@ -182,36 +183,52 @@ fn should_warn_mise_shims(activated: bool, shims_would_help: bool) -> bool {
     !activated && shims_would_help
 }
 
+/// `dir` with a leading `home` written as `$HOME`, for a line the user pastes.
+fn shown_from_home(dir: &str, home: &str) -> String {
+    match dir.strip_prefix(home) {
+        Some(rest) if !home.is_empty() && rest.starts_with('/') => format!("$HOME{rest}"),
+        _ => dir.to_string(),
+    }
+}
+
+/// The warning [`warn_mise_shims`] prints for the environment, line by line, or `None` when
+/// mise's shims are on PATH, `mise activate` is live, or there is no shims directory. `env`
+/// reads a variable as UTF-8 and `env_os` as it is, since any non-empty activation marker counts.
+fn shims_warning(
+    env: &dyn Fn(&str) -> Option<String>,
+    env_os: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<Vec<String>> {
+    let shims_dir = user_shims_dir(env)?;
+    let on_path = env("PATH").unwrap_or_default().split(':').any(|p| is_shims(p, &shims_dir));
+    let shims_would_help = Path::new(&shims_dir).is_dir() && !on_path;
+    if !should_warn_mise_shims(mise_activated(env_os), shims_would_help) {
+        return None;
+    }
+    let shown = shown_from_home(&shims_dir, &env("HOME").unwrap_or_default());
+    Some(vec![
+        String::new(),
+        "Warning: mise shims directory is not on your PATH, and".into(),
+        "`mise activate` isn't set up either. Non-interactive shells".into(),
+        "(e.g. Claude Code) may not pick up the correct tool versions.".into(),
+        String::new(),
+        // .zshenv, not .zshrc: only .zshenv is sourced by non-interactive zsh,
+        // which is exactly the context this warning is about.
+        "Add this to ~/.zshenv (sourced by non-interactive shells too):".into(),
+        String::new(),
+        format!("  export PATH=\"{shown}:$PATH\""),
+        String::new(),
+        "workon will inject the correct env vars for this session,".into(),
+        "but fixing your shell profile avoids the issue everywhere.".into(),
+        String::new(),
+    ])
+}
+
 /// Warn if mise shims aren't on PATH *and* `mise activate` isn't handling it.
 /// Without either, non-interactive shells (like those spawned by Claude Code)
 /// won't resolve the correct tool versions.
 pub(crate) fn warn_mise_shims() {
-    let Some(shims_dir) = user_shims_dir(&|var| std::env::var(var).ok()) else {
-        return;
-    };
-    let on_path = std::env::var("PATH").unwrap_or_default().split(':').any(|p| is_shims(p, &shims_dir));
-    let shims_would_help = Path::new(&shims_dir).is_dir() && !on_path;
-
-    if should_warn_mise_shims(mise_activated(), shims_would_help) {
-        eprintln!();
-        eprintln!("Warning: mise shims directory is not on your PATH, and");
-        eprintln!("`mise activate` isn't set up either. Non-interactive shells");
-        eprintln!("(e.g. Claude Code) may not pick up the correct tool versions.");
-        eprintln!();
-        // .zshenv, not .zshrc: only .zshenv is sourced by non-interactive zsh,
-        // which is exactly the context this warning is about.
-        eprintln!("Add this to ~/.zshenv (sourced by non-interactive shells too):");
-        eprintln!();
-        let home = std::env::var("HOME").unwrap_or_default();
-        let shown = match shims_dir.strip_prefix(&home) {
-            Some(rest) if !home.is_empty() && rest.starts_with('/') => format!("$HOME{rest}"),
-            _ => shims_dir.clone(),
-        };
-        eprintln!("  export PATH=\"{shown}:$PATH\"");
-        eprintln!();
-        eprintln!("workon will inject the correct env vars for this session,");
-        eprintln!("but fixing your shell profile avoids the issue everywhere.");
-        eprintln!();
+    for line in shims_warning(&|var| std::env::var(var).ok(), &|var| std::env::var_os(var)).unwrap_or_default() {
+        eprintln!("{line}");
     }
 }
 

@@ -89,11 +89,7 @@ pub(crate) fn partition_for(app: &str, ws_id: &str) -> String {
         ws_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
     let raw = format!("_{sanitized}");
     let budget = 63usize.saturating_sub(app.len() + "_test".len());
-    if raw.len() > budget {
-        raw[..budget].to_string() // sanitized to ASCII, so a byte slice is char-safe
-    } else {
-        raw
-    }
+    raw[..raw.len().min(budget)].to_string() // sanitized to ASCII, so a byte slice is char-safe
 }
 
 /// The OTP app atom from `mix.exs` (`app: :my_app` -> `my_app`). Reads `app:` as
