@@ -541,6 +541,70 @@ mod tests {
         assert!(!workspace_names(&repo).contains("ws-bad"));
     }
 
+    /// A git repo whose only remote is `remote`, with `branch` pushed to it.
+    fn git_repo_with_remote(tmp: &Path, remote: &str, branch: &str) -> std::path::PathBuf {
+        let repo = tmp.join("repo");
+        let bare = tmp.join("bare.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(tmp, &["init", "--bare", "--initial-branch", branch, &path_str(&bare)]);
+        git(&repo, &["init", "--initial-branch", branch]);
+        git(&repo, &["config", "user.email", "t@t.com"]);
+        git(&repo, &["config", "user.name", "T"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        git(&repo, &["remote", "add", remote, &path_str(&bare)]);
+        git(&repo, &["push", remote, branch]);
+        git(&repo, &["fetch", remote]);
+        repo
+    }
+
+    #[test]
+    fn detect_trunk_git_names_the_branch_and_the_only_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_remote(tmp.path(), "upstream", "master");
+        assert_eq!(detect_trunk_git(&repo), ("master".to_string(), "upstream".to_string()));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_remote(tmp.path(), "origin", "main");
+        assert_eq!(detect_trunk_git(&repo), ("main".to_string(), "origin".to_string()), "no master falls back to main");
+    }
+
+    /// `init_jj` colocates jj, tracks the trunk on the remote, and auto-tracks the remote's
+    /// other bookmarks.
+    #[test]
+    fn init_jj_tracks_the_trunk_and_auto_tracks_the_remote() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_remote(tmp.path(), "origin", "main");
+
+        init_jj(&repo).unwrap();
+
+        assert!(repo.join(".jj").is_dir());
+        let tracked = run_jj_utf8(
+            &repo,
+            &["bookmark", "list", "--tracked", "--ignore-working-copy", "-T", r#"name ++ "@" ++ remote ++ "\n""#],
+        )
+        .unwrap();
+        assert!(tracked.lines().any(|l| l == "main@origin"), "{tracked}");
+        let auto =
+            run_jj_utf8(&repo, &["config", "get", "--ignore-working-copy", "remotes.origin.auto-track-bookmarks"])
+                .unwrap();
+        assert_eq!(auto.trim(), "glob:*");
+    }
+
+    /// When no jj bookmark names a trunk but git can (`origin/master` here is a local branch,
+    /// which jj imports as an ordinary bookmark), `detect_trunk` pins git's commit.
+    #[test]
+    fn detect_trunk_falls_back_to_the_commit_git_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(repo) = jj_repo(tmp.path()) else { return };
+        git(&repo, &["branch", "origin/master"]);
+        let commit = run_git_utf8(&repo, &["rev-parse", "origin/master"]).unwrap();
+
+        assert_eq!(JjBackend.detect_trunk(&repo).unwrap(), commit.trim());
+    }
+
     #[test]
     fn cleanup_partial_workspace_forgets_it_and_removes_its_directory() {
         let tmp = tempfile::tempdir().unwrap();
