@@ -721,11 +721,12 @@ dependencies = [
 
 [[package]]
 name = "procpilot"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e6b1bd540a7f41bd7c768a661a488d67b2e0803100683ecb7e3ff484190873e"
+checksum = "1ae5fb2eb55cca9d53bdbafed0ebccac3d3de38e6c9bc38f3278600be489e845"
 dependencies = [
  "backon",
+ "libc",
  "os_pipe",
  "shared_child",
  "wait-timeout",
@@ -1177,9 +1178,9 @@ dependencies = [
 
 [[package]]
 name = "vcs-runner"
-version = "0.16.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a5d6e8bee1b13e4aa5e71c2c1a7b863048a15ca4f04915ea0c687bbc9388c16"
+checksum = "ab6a92db3eba14bc610ce5441ae8091135a68eadf0af49ff6e2e451d9ab47fdb"
 dependencies = [
  "anyhow",
  "procpilot",
@@ -1429,7 +1430,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "workon"
-version = "0.24.3"
+version = "0.24.6"
 dependencies = [
  "anyhow",
  "clap",
