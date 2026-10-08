@@ -1,0 +1,17 @@
+programs = ["jj", "zellij"]
+
+[[runtime]]
+call = "src/main.rs: Cmd::new(gone)"
+why = "a call that no longer exists"
+
+[[pty]]
+what = "q quits"
+test = "tests/tui.rs::quits"
+
+[[pty]]
+what = "a resize repaints"
+test = "tests/tui.rs::resize_repaints"
+
+[[key]]
+what = "gone"
+test = "tests/missing.rs::gone"

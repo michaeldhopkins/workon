@@ -43,6 +43,7 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - Dependencies move through the `workon-deps` upkeep job on the maintainer's machine, never Dependabot: it prepares the update, checks it, and asks the owner; a yes pushes main through the push guard. It never bumps the version, so an update ships with the next release.
 - `tests/lint_suppressions.rs` pins the `#[allow]`/`#[expect]` count (2) and `clippy.toml`'s loosened thresholds (cognitive complexity 30, arguments 8); both may only fall, and the pin falls with them. It also fails when `[lints]` drops or weakens a baseline lint (`unwrap_used`, `dbg_macro`, `undocumented_unsafe_blocks`, …). Touching an item that carries an `#[allow]` means removing it.
 - `tests/properties.toml` classifies every file under `src` as pure (naming its `proptest!` properties) or effectful (with a reason); `tests/properties.rs` fails on an unclassified file, a named property that does not exist, or a pure file with none outside `owed`, which may only shrink. A bug fixed in a pure module comes with a property stating the invariant it broke.
+- `tests/tui_rules.rs` holds the terminal-UI rule (the `tui-testing` skill): every prompt and zellij hand-off is listed in `tests/tui.toml` with its pseudo-terminal test (`tests/tui/`), every test runs the built binary with a cleared environment and the stub directory (`tests/support`) as PATH, and every program `src/` runs has a stub. A new prompt or launch adds an entry; untested ones go in `owed`, which may only shrink.
 
 ## Fuzzing
 

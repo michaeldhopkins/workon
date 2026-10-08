@@ -41,6 +41,10 @@ clap_mangen = "0.2"
 predicates = "3"
 proptest = "1"
 tempfile = "3"
+# The real binary in a pseudo-terminal (tests/tui), and tests/tui_rules.rs reading call text.
+portable-pty = "0.9"
+vt100 = "0.15"
+quote = "1"
 
 [lints.clippy]
 struct_excessive_bools = "deny"

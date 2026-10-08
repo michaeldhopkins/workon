@@ -1,0 +1,87 @@
+# What workon does at the terminal that must be tested, and the test covering each.
+# Checked by tests/tui_rules.rs (the "Terminal UIs" rule; method: the `tui-testing` skill).
+# A test is named `<file under the repo>::<fn name>`.
+
+# Every program code under src/ runs by name. The harness (tests/support) stubs each one and
+# puts only the stub directory, then /usr/bin:/bin for the stubs' own `cat`, on PATH. The
+# `git` and `rm` stubs record their call and then run the real /usr/bin/git and /bin/rm:
+# workon's worktree handling is what the tests exercise. `jj` is run through vcs-runner
+# (`run_jj*`, `jj_available`, `jj_divergent_change_ids`); its stub fails `--version`, so
+# workon takes its git backend.
+programs = [
+    "bundle", "createdb", "dotnet", "dropdb", "git", "id", "jj", "mise", "mix", "mysqladmin",
+    "npx", "php", "pgrep", "pkill", "ps", "rm", "zellij",
+]
+
+# The commands the default layout (layouts/workon.kdl) runs in its panes. workon never runs
+# them, zellij does, but `deps::check_all` finds each on PATH and asks for its `--version`.
+layout_commands = ["branchdiff", "claude"]
+
+# Calls in src/ whose program is chosen at run time, each with why no stub can stand in for
+# it as a name. The text is the call as the rules test prints it (spaces removed).
+[[runtime]]
+call = "src/deps.rs: Cmd::new(path.to_string_lossy().as_ref())"
+why = "the `--version` of a layout command `which` just found: a stub when PATH is the stub directory"
+
+[[runtime]]
+call = "src/mise_env.rs: Cmd::new(program)"
+why = "always `mise` outside unit tests, which pass a stand-in script"
+
+[[runtime]]
+call = "src/session.rs: Cmd::new(zellij)"
+why = "always `zellij` outside unit tests (session_exists, delete_session), which pass a stand-in"
+
+[[runtime]]
+call = "src/provision/alembic.rs: Cmd::new(venv_python(ctx.ws_dir))"
+why = "the project's own .venv/bin/python inside the worktree, which the project supplies"
+
+# What crosses the terminal, each with the real-binary PTY test covering it. The -w flow's
+# prompts and launches go here; a new prompt adds an entry naming its test.
+[[pty]]
+what = "-w provisions a worktree, hands it to zellij, and removes it on quit with nothing to ask"
+test = "tests/tui/mod.rs::w_hands_a_new_workspace_to_zellij_and_removes_it_on_quit"
+
+[[pty]]
+what = "-w's save prompt: y keeps the work on workon/<ws_id>"
+test = "tests/tui/mod.rs::save_prompt_yes_keeps_the_work_on_a_branch"
+
+[[pty]]
+what = "-w's save prompt: n discards the work"
+test = "tests/tui/mod.rs::save_prompt_no_discards_the_work"
+
+[[pty]]
+what = "workon launches a session named for the project, in the project"
+test = "tests/tui/mod.rs::workon_launches_a_session_named_for_the_project_in_the_project"
+
+[[pty]]
+what = "workon attaches to the project's running session instead of launching"
+test = "tests/tui/mod.rs::workon_attaches_to_the_projects_running_session"
+
+[[pty]]
+what = "--new-session deletes the running session and launches a new one"
+test = "tests/tui/mod.rs::new_session_deletes_the_running_session_and_launches_anew"
+
+[[pty]]
+what = "attach hands an existing workspace to zellij and leaves it in place"
+test = "tests/tui/mod.rs::attach_hands_an_existing_workspace_to_zellij_and_keeps_it"
+
+# Reserved: the -w not-ready pause (issue #2). When a setup step fails, -w prints
+# "Open it anyway? [Y/n] " before zellij takes the screen. Its change adds two [[pty]]
+# entries here, Enter opening the session and n removing the workspace, plus a [[key]]
+# entry for how the answer is read.
+
+# How an answer to a prompt is read, with its unit test.
+[[key]]
+what = "save prompt: empty, EOF, y and yes save"
+test = "src/workspace.rs::is_affirmative_defaults_to_yes"
+
+[[key]]
+what = "save prompt: n and anything else discard"
+test = "src/workspace.rs::is_affirmative_explicit_no_declines"
+
+# workon draws no views of its own: zellij owns the screen once launched.
+
+# Launches without a PTY test yet. May only shrink.
+owed = [
+    "a hung zellij (list-sessions times out) is killed with pkill and its socket removed before launch",
+]

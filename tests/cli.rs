@@ -1,20 +1,14 @@
+//! The built `workon`, run piped in a cleared environment whose PATH is a stub directory
+//! (`support::World`). The pseudo-terminal tests are in `tui/`, compiled into this crate so
+//! they share the harness.
+
+mod support;
+mod tui;
+
 use std::path::Path;
-use std::process::{Command, Stdio};
 
-use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
-
-fn git(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("running git")
-        .success();
-    assert!(ok, "git {args:?} failed");
-}
+use support::World;
 
 /// End-to-end shell-completion check: with HOME pointed at a tempdir holding one
 /// worktree, the dynamic completer must surface that workspace's id when
@@ -22,23 +16,20 @@ fn git(dir: &Path, args: &[&str]) {
 /// wiring and the CompleteEnv shim, not just the candidate function.
 #[test]
 fn dynamic_completion_offers_workspace_ids() {
-    let home = tempfile::tempdir().unwrap();
-    let root = home.path();
-
-    let proj = root.join("proj");
+    let world = World::new();
+    let proj = world.path().join("proj");
     std::fs::create_dir(&proj).unwrap();
-    git(&proj, &["init", "-q"]);
-    git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+    world.git(&proj, &["init", "-q"]);
+    world.git(&proj, &["commit", "-q", "--allow-empty", "-m", "init"]);
 
-    let worktrees = root.join(".worktrees");
-    std::fs::create_dir_all(&worktrees).unwrap();
-    let wt = worktrees.join("proj-ws-abc123");
-    git(&proj, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "HEAD"]);
+    std::fs::create_dir_all(world.worktrees()).unwrap();
+    let wt = world.worktrees().join("proj-ws-abc123");
+    world.git(&proj, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "HEAD"]);
 
     // clap_complete's request protocol: `workon -- workon attach <cursor>` with
     // the cursor word index in _CLAP_COMPLETE_INDEX.
-    cargo_bin_cmd!("workon")
-        .env("HOME", root)
+    world
+        .workon(&world.path())
         .env("COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", "2")
         .args(["--", "workon", "attach", ""])
@@ -47,39 +38,35 @@ fn dynamic_completion_offers_workspace_ids() {
         .stdout(predicate::str::contains("ws-abc123"));
 }
 
+/// `workon` with `args`, from an empty directory in a fresh world.
+fn workon(args: &[&str]) -> assert_cmd::assert::Assert {
+    let world = World::new();
+    world.workon(&world.path()).args(args).assert()
+}
+
 #[test]
 fn version_flag() {
-    cargo_bin_cmd!("workon").arg("--version").assert().success().stdout(predicate::str::contains("workon 0."));
+    workon(&["--version"]).success().stdout(predicate::str::contains("workon 0."));
 }
 
 #[test]
 fn help_flag() {
-    cargo_bin_cmd!("workon")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Development workspace launcher"));
+    workon(&["--help"]).success().stdout(predicate::str::contains("Development workspace launcher"));
 }
 
 #[test]
 fn skip_copy_ignored_requires_workspace() {
-    cargo_bin_cmd!("workon")
-        .arg("--skip-copy-ignored")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--skip-copy-ignored"));
+    workon(&["--skip-copy-ignored"]).failure().stderr(predicate::str::contains("--skip-copy-ignored"));
 }
 
 #[test]
 fn help_lists_config_flag() {
-    cargo_bin_cmd!("workon").arg("--help").assert().success().stdout(predicate::str::contains("--config"));
+    workon(&["--help"]).success().stdout(predicate::str::contains("--config"));
 }
 
 #[test]
 fn help_lists_subcommands() {
-    cargo_bin_cmd!("workon")
-        .arg("--help")
-        .assert()
+    workon(&["--help"])
         .success()
         .stdout(predicate::str::contains("create"))
         .stdout(predicate::str::contains("attach"))
@@ -90,9 +77,7 @@ fn help_lists_subcommands() {
 
 #[test]
 fn create_help_lists_its_flags() {
-    cargo_bin_cmd!("workon")
-        .args(["create", "--help"])
-        .assert()
+    workon(&["create", "--help"])
         .success()
         .stdout(predicate::str::contains("--name"))
         .stdout(predicate::str::contains("--skip-copy-ignored"))
@@ -101,20 +86,12 @@ fn create_help_lists_its_flags() {
 
 #[test]
 fn path_unknown_reference_fails_cleanly() {
-    cargo_bin_cmd!("workon")
-        .args(["path", "definitely-no-such-ws"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("definitely-no-such-ws"));
+    workon(&["path", "definitely-no-such-ws"]).failure().stderr(predicate::str::contains("definitely-no-such-ws"));
 }
 
 #[test]
 fn destroy_help_lists_no_save() {
-    cargo_bin_cmd!("workon")
-        .args(["destroy", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--no-save"));
+    workon(&["destroy", "--help"]).success().stdout(predicate::str::contains("--no-save"));
 }
 
 /// A bare token (no slash) is a ws_id/nickname; with no matching workspace it
@@ -122,32 +99,24 @@ fn destroy_help_lists_no_save() {
 /// subcommand + positional parse and reaches lookup.
 #[test]
 fn destroy_unknown_reference_fails_cleanly() {
-    cargo_bin_cmd!("workon")
-        .args(["destroy", "definitely-no-such-ws"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("definitely-no-such-ws"));
+    workon(&["destroy", "definitely-no-such-ws"]).failure().stderr(predicate::str::contains("definitely-no-such-ws"));
 }
 
 /// `--resume` is workspace-only. Guards the `requires = "workspace"` constraint
 /// across the change of `-w` from an optional-value arg to a plain bool flag.
 #[test]
 fn resume_requires_workspace() {
-    cargo_bin_cmd!("workon")
-        .args(["--resume", "some-session-id"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--resume"));
+    workon(&["--resume", "some-session-id"]).failure().stderr(predicate::str::contains("--resume"));
 }
 
 #[test]
 fn help_lists_name_flag() {
-    cargo_bin_cmd!("workon").arg("--help").assert().success().stdout(predicate::str::contains("--name"));
+    workon(&["--help"]).success().stdout(predicate::str::contains("--name"));
 }
 
 #[test]
 fn help_lists_new_session_long_flag() {
-    cargo_bin_cmd!("workon").arg("--help").assert().success().stdout(predicate::str::contains("--new-session"));
+    workon(&["--help"]).success().stdout(predicate::str::contains("--new-session"));
 }
 
 /// `-n` used to force a new session; it's now an inert no-op. It must still
@@ -155,13 +124,7 @@ fn help_lists_new_session_long_flag() {
 /// rather than a clap parse error.
 #[test]
 fn reserved_n_short_flag_is_accepted_as_noop() {
-    let tmp = tempfile::tempdir().unwrap();
-    cargo_bin_cmd!("workon")
-        .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["-n", "--config", "no-such-config"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("no-such-config"));
+    workon(&["-n", "--config", "no-such-config"]).failure().stderr(predicate::str::contains("no-such-config"));
 }
 
 /// `-w` is now a pure boolean flag — it must not swallow the following
@@ -169,22 +132,12 @@ fn reserved_n_short_flag_is_accepted_as_noop() {
 /// we'd never see the "no-such-config" error.
 #[test]
 fn workspace_flag_takes_no_value() {
-    let tmp = tempfile::tempdir().unwrap();
-    cargo_bin_cmd!("workon")
-        .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["-w", "--config", "no-such-config"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("no-such-config"));
+    workon(&["-w", "--config", "no-such-config"]).failure().stderr(predicate::str::contains("no-such-config"));
 }
 
 #[test]
 fn missing_named_config_errors_cleanly() {
-    let tmp = tempfile::tempdir().unwrap();
-    cargo_bin_cmd!("workon")
-        .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["--config", "no-such-config"])
-        .assert()
+    workon(&["--config", "no-such-config"])
         .failure()
         .stderr(predicate::str::contains("no-such-config"))
         .stderr(predicate::str::contains("#creating-a-config"));
@@ -192,41 +145,13 @@ fn missing_named_config_errors_cleanly() {
 
 #[test]
 fn invalid_config_name_with_path_traversal_is_rejected() {
-    let tmp = tempfile::tempdir().unwrap();
-    cargo_bin_cmd!("workon")
-        .env("XDG_CONFIG_HOME", tmp.path())
-        .args(["--config", "../etc/hosts"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("invalid config name"));
+    workon(&["--config", "../etc/hosts"]).failure().stderr(predicate::str::contains("invalid config name"));
 }
 
-/// `workon create --json` in a fresh repo, with HOME pointed at `root` so the
-/// worktree and `~/.claude.json` land in the tempdir. Returns the JSON report.
-fn create_json(root: &Path, name: &str) -> serde_json::Value {
-    let proj = root.join("proj");
-    if !proj.exists() {
-        std::fs::create_dir(&proj).expect("creating the project");
-        git(&proj, &["init", "-q", "-b", "main"]);
-        git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
-        // The git backend (used when jj is not on PATH) branches from
-        // `origin/<trunk>`, so the repo needs a remote carrying main.
-        let origin = root.join("origin.git");
-        let origin = origin.to_str().expect("a UTF-8 temp path");
-        git(root, &["init", "-q", "--bare", origin]);
-        git(&proj, &["remote", "add", "origin", origin]);
-        git(&proj, &["push", "-q", "origin", "main"]);
-    }
-    let out = cargo_bin_cmd!("workon")
-        .env("HOME", root)
-        .env("XDG_CONFIG_HOME", root.join(".config"))
-        .current_dir(&proj)
-        .args(["create", "--name", name, "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+/// `workon create --name <name> --json` in `proj`. Returns the JSON report.
+fn create_json(world: &World, proj: &Path, name: &str) -> serde_json::Value {
+    let out =
+        world.workon(proj).args(["create", "--name", name, "--json"]).assert().success().get_output().stdout.clone();
     serde_json::from_slice(&out).expect("create --json prints JSON")
 }
 
@@ -234,12 +159,13 @@ fn create_json(root: &Path, name: &str) -> serde_json::Value {
 /// `ws-xxxxxx` rather than one ending in an empty `-` label.
 #[test]
 fn create_name_labels_the_ws_id_and_empty_name_is_no_name() {
-    let home = tempfile::tempdir().unwrap();
-    let labelled = create_json(home.path(), "Fix Bug")["ws_id"].as_str().unwrap().to_string();
+    let world = World::new();
+    let proj = world.project(&[]);
+    let labelled = create_json(&world, &proj, "Fix Bug")["ws_id"].as_str().unwrap().to_string();
     assert!(labelled.starts_with("ws-") && labelled.ends_with("-fix-bug"), "{labelled}");
     assert_eq!(labelled.len(), "ws-abcdef-fix-bug".len(), "{labelled}");
 
-    let unnamed = create_json(home.path(), "")["ws_id"].as_str().unwrap().to_string();
+    let unnamed = create_json(&world, &proj, "")["ws_id"].as_str().unwrap().to_string();
     assert_eq!(unnamed.len(), "ws-abcdef".len(), "{unnamed}");
     assert!(unnamed.starts_with("ws-") && !unnamed.ends_with('-'), "{unnamed}");
 }
@@ -248,12 +174,13 @@ fn create_name_labels_the_ws_id_and_empty_name_is_no_name() {
 /// `~/.claude.json` under `$HOME`.
 #[test]
 fn create_trusts_the_worktree_in_claude_json() {
-    let home = tempfile::tempdir().unwrap();
-    let report = create_json(home.path(), "");
+    let world = World::new();
+    let proj = world.project(&[]);
+    let report = create_json(&world, &proj, "");
     let path = report["path"].as_str().unwrap();
 
     let claude: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(home.path().join(".claude.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(world.home().join(".claude.json")).unwrap()).unwrap();
     assert_eq!(claude["projects"][path]["hasTrustDialogAccepted"], serde_json::Value::Bool(true), "{claude}");
 }
 
@@ -267,26 +194,16 @@ fn create_trusts_the_worktree_in_claude_json() {
 fn create_reports_the_gitignored_files_it_copies() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = tempfile::tempdir().unwrap();
-    let root = root.path();
-    let proj = root.join("proj");
-    std::fs::create_dir_all(proj.join("config")).unwrap();
-    git(&proj, &["init", "-q", "-b", "main"]);
-    std::fs::write(proj.join(".gitignore"), ".env\nconfig/*.key\nconfig/gem/\nconfig/bad/\n").unwrap();
-    std::fs::write(proj.join("config/app.yml"), "tracked\n").unwrap();
-    git(&proj, &["add", "."]);
-    git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
-    let origin = root.join("origin.git");
-    git(root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
-    git(&proj, &["remote", "add", "origin", origin.to_str().unwrap()]);
-    git(&proj, &["push", "-q", "origin", "main"]);
+    let world = World::new();
+    let proj = world
+        .project(&[(".gitignore", ".env\nconfig/*.key\nconfig/gem/\nconfig/bad/\n"), ("config/app.yml", "tracked\n")]);
 
     std::fs::write(proj.join(".env"), "SECRET=1\n").unwrap();
     std::fs::write(proj.join("config/master.key"), "key\n").unwrap();
     // Nested repos (a bundler git checkout) are listed as directories.
     for nested in ["config/gem", "config/bad"] {
         std::fs::create_dir_all(proj.join(nested)).unwrap();
-        git(&proj.join(nested), &["init", "-q"]);
+        world.git(&proj.join(nested), &["init", "-q"]);
         std::fs::write(proj.join(nested).join("file"), "x\n").unwrap();
     }
     let unreadable = [proj.join("config/locked.key"), proj.join("config/bad/file")];
@@ -297,13 +214,7 @@ fn create_reports_the_gitignored_files_it_copies() {
     // Root reads anything, so it would see no failures to warn about.
     let can_fail = std::fs::File::open(&unreadable[0]).is_err();
 
-    let output = cargo_bin_cmd!("workon")
-        .env("HOME", root)
-        .env("XDG_CONFIG_HOME", root.join(".config"))
-        .current_dir(&proj)
-        .args(["create", "--json"])
-        .output()
-        .unwrap();
+    let output = world.workon(&proj).args(["create", "--json"]).output().unwrap();
     for path in &unreadable {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
@@ -321,44 +232,19 @@ fn create_reports_the_gitignored_files_it_copies() {
 /// A project with a mise config, created by a user whose mise shims directory
 /// exists but is not on PATH and who has no `mise activate`, gets the warning that
 /// non-interactive shells will miss the pinned tool versions. The shims directory
-/// is looked up under `$HOME`.
+/// is looked up under `$HOME`; the stub `mise` answers `--version`, so `mise trust`
+/// runs and the shims check after it.
 #[test]
 fn create_warns_when_mise_shims_are_off_path() {
-    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let proj = world.project(&[("mise.toml", "[tools]\n")]);
+    std::fs::create_dir_all(world.home().join(".local/share/mise/shims")).unwrap();
 
-    let root = tempfile::tempdir().unwrap();
-    let root = root.path();
-    let proj = root.join("proj");
-    std::fs::create_dir(&proj).unwrap();
-    git(&proj, &["init", "-q", "-b", "main"]);
-    std::fs::write(proj.join("mise.toml"), "[tools]\n").unwrap();
-    git(&proj, &["add", "."]);
-    git(&proj, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
-    let origin = root.join("origin.git");
-    git(root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
-    git(&proj, &["remote", "add", "origin", origin.to_str().unwrap()]);
-    git(&proj, &["push", "-q", "origin", "main"]);
-
-    std::fs::create_dir_all(root.join(".local/share/mise/shims")).unwrap();
-    // A stand-in mise, so `mise trust` succeeds and the shims check runs.
-    let bin = root.join("bin");
-    std::fs::create_dir(&bin).unwrap();
-    std::fs::write(bin.join("mise"), "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(bin.join("mise"), std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let output = cargo_bin_cmd!("workon")
-        .env("HOME", root)
-        .env("XDG_CONFIG_HOME", root.join(".config"))
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-        .env_remove("MISE_SHELL")
-        .env_remove("__MISE_DIFF")
-        .env_remove("__MISE_SESSION")
-        .current_dir(&proj)
-        .args(["create", "--json"])
-        .output()
-        .unwrap();
+    let output = world.workon(&proj).args(["create", "--json"]).output().unwrap();
     assert!(output.status.success(), "{output:?}");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Warning: mise shims directory is not on your PATH"), "{stderr}");
+    let trusted = Path::new(&world.stubs.call("mise", "trust").args[1]).to_path_buf();
+    assert!(trusted.starts_with(world.worktrees()) && trusted.ends_with("mise.toml"), "{trusted:?}");
 }

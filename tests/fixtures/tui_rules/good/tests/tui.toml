@@ -1,0 +1,13 @@
+programs = ["jj", "git", "zellij"]
+
+[[runtime]]
+call = "src/main.rs: Cmd::new(zellij)"
+why = "always zellij outside unit tests"
+
+[[pty]]
+what = "launches"
+test = "tests/tui.rs::launches"
+
+[[key]]
+what = "y saves"
+test = "src/main.rs::y_saves"
