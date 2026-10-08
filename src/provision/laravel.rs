@@ -67,7 +67,9 @@ impl Provisioner for Laravel {
 /// (`<env name="DB_CONNECTION" value="X"/>`).
 pub(crate) fn phpunit_db_connection(xml: &str) -> Option<String> {
     let line = xml.lines().find(|l| l.contains("DB_CONNECTION"))?;
-    let value = line.split("value=").nth(1)?.trim().trim_start_matches('"');
+    let value = line.split("value=").nth(1)?.trim();
+    // One quote only: `value=""` is an empty value, not the `/>` after it.
+    let value = value.strip_prefix('"').unwrap_or(value);
     value.split('"').next().map(str::to_string)
 }
 
@@ -87,6 +89,7 @@ mod tests {
     fn phpunit_db_connection_parsing() {
         assert_eq!(phpunit_db_connection("<env name=\"DB_CONNECTION\" value=\"pgsql\"/>").as_deref(), Some("pgsql"));
         assert_eq!(phpunit_db_connection("<phpunit></phpunit>"), None);
+        assert_eq!(phpunit_db_connection("<env name=\"DB_CONNECTION\" value=\"\"/>").as_deref(), Some(""));
     }
 
     #[test]
@@ -201,5 +204,22 @@ mod tests {
         let found = String::from_utf8_lossy(&out.stdout).trim() == "1";
         Resource::MysqlDb { name: name.clone() }.teardown();
         assert!(found, "artisan migrate should have created the migrations table in mysql");
+    }
+
+    proptest::proptest! {
+        /// The `DB_CONNECTION` value reads back from among other env lines and attributes.
+        /// Other names are at most 8 letters, so none can contain `DB_CONNECTION`.
+        #[test]
+        fn the_db_connection_value_reads_back(
+            value in "[a-z0-9_]{0,10}",
+            attrs in "( force=\"true\")?",
+            others in proptest::collection::vec("    <env name=\"[A-Z_]{1,8}\" value=\"[a-z]{0,5}\"/>", 0..3),
+        ) {
+            let xml = format!(
+                "<phpunit>\n  <php>\n{}\n    <env name=\"DB_CONNECTION\" value=\"{value}\"{attrs}/>\n  </php>\n</phpunit>\n",
+                others.join("\n")
+            );
+            proptest::prop_assert_eq!(phpunit_db_connection(&xml), Some(value));
+        }
     }
 }
