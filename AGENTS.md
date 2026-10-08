@@ -38,7 +38,9 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - Changelog generation via `git-cliff` (`cliff.toml`)
 - `mise.toml` pins the runtimes the cycle tests' fixtures run on (Ruby, Node, PHP, .NET, Erlang, Elixir). ci.yml reads them in a step, and `tests/runtime_pin.rs` fails when a workflow names a version itself. Move a fixture to a new major there, and nowhere else.
 - `tests/file_length.rs` fails when a file under `src` passes 400 production lines (inline test modules are not counted). Files already over are pinned at their size and may only shrink; new code goes in a new module, never into a pinned file.
-- `tests/ci_rules.rs` fails when a workflow narrows `cargo deny check` (to `licenses`, say) or ci.yml or release.yml stops running `cargo deny check` or `cargo fmt --all --check`.
+- `tests/ci_rules.rs` fails when a workflow narrows `cargo deny check` (to `licenses`, say) or ci.yml or release.yml stops running `cargo deny check` or `cargo fmt --all --check`; when a workflow lacks a top-level concurrency group or `permissions`, or a job lacks `timeout-minutes`; when a workflow installs a moving `stable` over `rust-toolchain.toml`; when ci.yml stops building docs with `-D warnings`, running `cargo machete` or checking the MSRV; and when Dependabot appears or this file stops naming the upkeep job.
+- `rust-toolchain.toml` pins an exact stable, and every workflow installs it with a bare `rustup toolchain install`. Move it to each new stable within 30 days, fixing what the new lints find, as its own commit. ci.yml's `msrv` job checks the declared `rust-version` on its own toolchain.
+- Dependencies move through the `workon-deps` upkeep job on the maintainer's machine, never Dependabot: it prepares the update, checks it, and asks the owner; a yes pushes main through the push guard. It never bumps the version, so an update ships with the next release.
 
 ## Fuzzing
 
