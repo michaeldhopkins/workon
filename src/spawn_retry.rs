@@ -30,6 +30,12 @@ fn busy_executable(source: &io::Error) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_busy_kind_without_an_errno_is_still_busy() {
+        assert!(busy_executable(&io::Error::from(io::ErrorKind::ExecutableFileBusy)));
+        assert!(!busy_executable(&io::Error::from(io::ErrorKind::NotFound)));
+    }
+
     proptest::proptest! {
         /// Only ETXTBSY — errno 26 on Linux and macOS alike — reads as a busy
         /// executable; every other errno is some other spawn failure.
