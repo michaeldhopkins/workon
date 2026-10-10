@@ -7,6 +7,8 @@ use std::path::Path;
 
 use vcs_runner::Cmd;
 
+use crate::spawn_retry::retry_busy_executable;
+
 /// `<program> env --json` for `dir`, where `program` is `mise` (a test passes a
 /// stand-in). Empty when mise is absent or fails, since a project without mise is
 /// normal; a warning when mise ran but printed something that is not the JSON
@@ -40,7 +42,9 @@ fn mise_env_from(program: &str, dir: &Path, path: Option<&str>, shims: &[String]
     if let Some(given) = &given {
         cmd = cmd.env("PATH", given);
     }
-    let Ok(output) = cmd.run() else {
+    // A briefly busy executable — mise replaced under us, or in a test a stand-in still being
+    // written — is retried before it reads as absent: no env where there is one is the worse wrong.
+    let Ok(output) = retry_busy_executable(cmd).run() else {
         return HashMap::new();
     };
     let mut vars = parse(&output.stdout_lossy()).unwrap_or_else(|e| {
@@ -316,10 +320,8 @@ mod tests {
     /// A stand-in for `mise` that prints its arguments and working directory as the
     /// JSON `mise env --json` prints, so the test sees what was run and where.
     fn stand_in(dir: &Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("mise");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::stand_in::write(&path, &format!("#!/bin/sh\n{body}\n"));
         path
     }
 
@@ -340,10 +342,8 @@ mod tests {
     }
 
     fn executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::stand_in::write(path, "#!/bin/sh\n");
     }
 
     /// Issue #2. With the shims directory on PATH behind `/usr/bin` (`path_helper` moves the

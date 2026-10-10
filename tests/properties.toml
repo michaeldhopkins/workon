@@ -41,6 +41,7 @@ owed = []
 ]
 "src/provision/prisma.rs" = ["the_datasource_provider_and_url_var_read_back"]
 "src/provision/rails.rs" = ["adapter_is_the_first_adapter_line_with_a_value"]
+"src/spawn_retry.rs" = ["only_etxtbusy_reads_as_a_busy_executable"]
 "src/zellij_reply.rs" = ["a_listing_finds_exactly_the_sessions_named_first_on_a_line"]
 
 [effectful]
@@ -48,7 +49,7 @@ owed = []
 "src/claude_trust.rs" = "reads and rewrites ~/.claude.json"
 "src/fuzz_api.rs" = "fuzzing shims compiled only under --cfg fuzzing; the fuzz targets are its properties"
 "src/home.rs" = "reads $HOME"
-"src/lib.rs" = "module declarations only"
+"src/lib.rs" = "module declarations, plus a test-only helper that writes stand-in scripts"
 "src/main.rs" = "the binary's entry point: parses argv and dispatches"
 "src/mise_env.rs" = "runs mise; its output is parsed by serde_json"
 "src/provision/django.rs" = "runs manage.py; detection reads settings files from disk"

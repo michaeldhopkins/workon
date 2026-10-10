@@ -75,7 +75,16 @@ impl Stubs {
             log = log.display(),
         );
         let path = self.dir.path().join(name);
-        std::fs::write(&path, script).expect("a stub");
+        // Written by a short-lived `sh`, not this process: a stub open for writing here can be
+        // inherited by a sibling test thread's fork, and the built binary execs it without
+        // retry, so Linux would answer ETXTBSY ("Text file busy").
+        let status = Command::new("/bin/sh")
+            .args(["-c", "printf %s \"$WORKON_STUB\" > \"$1\"", "workon stub writer"])
+            .arg(&path)
+            .env("WORKON_STUB", script)
+            .status()
+            .expect("a stub writer");
+        assert!(status.success(), "writing the {name} stub: {status}");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("executable");
     }
 

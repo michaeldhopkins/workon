@@ -8,6 +8,7 @@ use tempfile::NamedTempFile;
 use vcs_runner::{Cmd, RunError};
 
 use crate::layout;
+use crate::spawn_retry::retry_busy_executable;
 use crate::zellij_reply::{delete_hung, read_listing, Listing};
 
 const ZELLIJ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -129,11 +130,10 @@ pub(crate) fn parse_descendants(ps_stdout: &str, root_pid: u32) -> HashSet<Strin
 }
 
 fn session_exists(zellij: &str, name: &str) -> Result<bool> {
-    let listing = Cmd::new(zellij)
-        .args(["list-sessions", "--no-formatting"])
-        .timeout(ZELLIJ_TIMEOUT)
-        .run()
-        .map(|output| output.stdout_lossy().into_owned());
+    let listing =
+        retry_busy_executable(Cmd::new(zellij).args(["list-sessions", "--no-formatting"]).timeout(ZELLIJ_TIMEOUT))
+            .run()
+            .map(|output| output.stdout_lossy().into_owned());
     match read_listing(name, listing)? {
         Listing::Found(found) => Ok(found),
         Listing::Hung => {
@@ -144,7 +144,8 @@ fn session_exists(zellij: &str, name: &str) -> Result<bool> {
 }
 
 fn delete_session(zellij: &str, name: &str) -> Result<()> {
-    let result = Cmd::new(zellij).args(["delete-session", name, "--force"]).timeout(ZELLIJ_TIMEOUT).run();
+    let result =
+        retry_busy_executable(Cmd::new(zellij).args(["delete-session", name, "--force"]).timeout(ZELLIJ_TIMEOUT)).run();
     if delete_hung(&result) {
         recover_session(name)
     } else {
@@ -195,8 +196,9 @@ fn current_uid() -> Result<String> {
 fn zellij_version(zellij: &str) -> Result<String> {
     // `zellij --version` prints from the binary; does not touch IPC, so it's
     // safe even when a server is hung.
-    let out =
-        Cmd::new(zellij).arg("--version").timeout(ZELLIJ_TIMEOUT).run().context("failed to read zellij version")?;
+    let out = retry_busy_executable(Cmd::new(zellij).arg("--version").timeout(ZELLIJ_TIMEOUT))
+        .run()
+        .context("failed to read zellij version")?;
     let stdout = out.stdout_lossy();
     stdout
         .split_whitespace()
@@ -280,7 +282,9 @@ fn preflight_socket(name: &str) {
 /// session's server before handing the TTY to a no-timeout `zellij attach`. `zellij` is the
 /// program, which a test replaces.
 fn preflight_responsive(zellij: &str, name: &str) {
-    let result = Cmd::new(zellij).args(["list-sessions", "--no-formatting"]).timeout(ZELLIJ_TIMEOUT).run();
+    let result =
+        retry_busy_executable(Cmd::new(zellij).args(["list-sessions", "--no-formatting"]).timeout(ZELLIJ_TIMEOUT))
+            .run();
     if let Err(e) = result
         && e.is_timeout()
     {
@@ -667,11 +671,9 @@ mod tests {
 
     /// A stand-in for `zellij` that appends its arguments to `log` and runs `body`.
     fn stand_in(dir: &Path, log: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("zellij");
         let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n", log.display());
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::stand_in::write(&path, &script);
         path
     }
 

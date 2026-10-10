@@ -1,6 +1,8 @@
 use anyhow::{bail, Result};
 use vcs_runner::Cmd;
 
+use crate::spawn_retry::retry_busy_executable;
+
 const ZELLIJ_HINT: &str = "brew install zellij";
 
 /// Pre-flight check that all binaries the chosen layout will spawn are on PATH.
@@ -71,7 +73,8 @@ pub(crate) fn extract_commands(layout: &str) -> Vec<String> {
 }
 
 fn check_version(name: &str, path: &std::path::Path) -> Option<String> {
-    let output = Cmd::new(path.to_string_lossy().as_ref()).arg("--version").run().ok()?;
+    // A briefly busy executable is retried before it reads as having no version to warn about.
+    let output = retry_busy_executable(Cmd::new(path.to_string_lossy().as_ref()).arg("--version")).run().ok()?;
     let version_str = output.stdout_lossy();
     let version_str = version_str.trim();
 
@@ -193,10 +196,8 @@ pane command="opencode""#;
 
     /// A stand-in binary in `dir` that prints `version` for `--version`.
     fn reports(dir: &std::path::Path, name: &str, version: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::stand_in::write(&path, &format!("#!/bin/sh\necho '{version}'\n"));
         path
     }
 
