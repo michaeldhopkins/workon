@@ -130,17 +130,14 @@ jobs:
             echo "::warning::Mutants skipped: $selected selected, over the limit of $MAX_SELECTED. Nothing was mutation-tested for this change."
             exit 0
           fi
+          # scripts/mutants-run.sh decides the verdict from mutants.out/missed.txt, so exit 3 passes only when nothing was missed, and stops cargo-mutants at a time budget.
           # Exit codes: 2 a mutant was MISSED (the finding); 3 a mutant TIMED
           # OUT (usually an injected infinite loop, a real result, so counted as
           # caught and passed); 4 the unmutated baseline failed; 5 and 6 the diff
           # does not match the tree or is malformed, which are bugs in "Compute
           # diff", not in workon.
           rc=0
-          cargo mutants --no-shuffle -vV --jobs 2 --in-diff mutants.diff || rc=$?
-          if [ "$rc" -eq 3 ]; then
-            echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
-            rc=0
-          fi
+          scripts/mutants-run.sh --no-shuffle -vV --jobs 2 --in-diff mutants.diff || rc=$?
           exit "$rc"
 
       - name: Summarise
@@ -221,11 +218,12 @@ jobs:
     timeout-minutes: 25
     env:
       SLICES: 24
-      # Wall-clock limit for cargo-mutants itself, under the job's timeout, so
+      # Wall-clock limit (MUTANTS_BUDGET, seconds; MUTANTS_WALL is the same time in words) for cargo-mutants itself, under the job's timeout, so
       # a stuck run still reaches Summarise and the artifact upload. Slices take
       # 3-4 minutes on a runner; slice 8 was cancelled at the job timeout on
       # 2026-10-05 with no log or artifact to say which mutant hung.
       MUTANTS_WALL: 15m
+      MUTANTS_BUDGET: 900
     steps:
       - uses: actions/checkout@v7
 
@@ -265,18 +263,13 @@ jobs:
           trap 'echo "$SECONDS" > mutants-seconds.txt' EXIT
           rc=0
           # stdin closed: a mutant that reaches a prompt must fail, not wait.
-          # SIGINT lets cargo-mutants stop cleanly and write what it has.
-          timeout --signal=INT --kill-after=60s "$MUTANTS_WALL" \
-            cargo mutants --no-shuffle -vV --jobs 2 --shard "$k/$SLICES" < /dev/null || rc=$?
-          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+          # scripts/mutants-run.sh stops cargo-mutants at MUTANTS_BUDGET and exits 124.
+          scripts/mutants-run.sh --no-shuffle -vV --jobs 2 --shard "$k/$SLICES" < /dev/null || rc=$?
+          if [ "$rc" -eq 124 ]; then
             echo "stopped" > mutants-stopped.txt
             echo "::error::cargo-mutants still running after $MUTANTS_WALL; the newest logs in mutants.out/log are the mutants that hung"
             ls -t mutants.out/log 2>/dev/null | head -5 || true
             exit 1
-          fi
-          if [ "$rc" -eq 3 ]; then
-            echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
-            rc=0
           fi
           exit "$rc"
 

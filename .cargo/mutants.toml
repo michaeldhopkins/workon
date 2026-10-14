@@ -32,3 +32,7 @@ exclude_re = [
     # The default body is `Vec::new()`, so `vec![]` is the same value.
     '^src/vcs/mod\.rs:.*replace Vcs::stranded_work -> Vec<String> with vec!\[\]$',
 ]
+
+# A hung mutant (a loop counter turned the wrong way) is stopped after this multiple of the
+# baseline test time; the default is 5. scripts/mutants-run.sh counts a timeout as caught.
+timeout_multiplier = 2.0
