@@ -11,6 +11,15 @@ fn script() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/mutants-run.sh")
 }
 
+/// The directory holding the stand-in `cargo`; the script runs with only it and the system tools.
+struct Stubs(PathBuf);
+
+impl Stubs {
+    fn path(&self) -> String {
+        format!("{}:/usr/bin:/bin", self.0.display())
+    }
+}
+
 struct Case {
     rc: i32,
     missed: Option<&'static str>,
@@ -52,13 +61,13 @@ fn run(case: &Case) -> Run {
     )
     .expect("write stub");
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let stubs = Stubs(bin);
     let mut cmd = Command::new("/bin/bash");
     cmd.arg(script())
         .current_dir(dir.path())
         .env_remove("MUTANTS_STATUS")
         .env_remove("MUTANTS_BUDGET_PASSES")
-        .env("PATH", path)
+        .env("PATH", stubs.path())
         .env("STUB_RC", case.rc.to_string())
         .env("STUB_MISSED", case.missed.unwrap_or(""))
         .env("STUB_SLEEP", case.sleep.to_string())
