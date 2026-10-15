@@ -76,6 +76,7 @@ The primary session (plain `workon`) is unaffected — it works directly in the 
 
 ```bash
 WS=$(workon create --name fix-bug)   # provision; prints the worktree path to stdout
+workon create --name x --base 'default@-'  # repos with no remote or trunk bookmark
 workon list                          # workspaces at or under the cwd
 workon attach fix-bug                # open it in a session (survives on quit)
 workon destroy fix-bug               # tear down, saving rescued work
