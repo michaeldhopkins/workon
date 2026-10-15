@@ -70,6 +70,9 @@ pub enum Command {
         /// Skip copying gitignored files into the workspace
         #[arg(long)]
         skip_copy_ignored: bool,
+        /// Branch from this jj revision instead of the detected trunk, e.g. `default@-`
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
         /// Print `{ ws_id, path, dbs, failed_steps }` as JSON on stdout
         #[arg(long)]
         json: bool,

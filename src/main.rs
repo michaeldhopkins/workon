@@ -29,9 +29,12 @@ fn exit_code(ready: bool) -> ExitCode {
 
 fn run_subcommand(command: cli::Command) -> Result<ExitCode> {
     match command {
-        cli::Command::Create { name, config, skip_copy_ignored, json } => {
+        cli::Command::Create { name, config, skip_copy_ignored, base, json } => {
             let project = resolve::resolve()?;
-            let vcs = vcs::detect(&project.dir)?;
+            let mut vcs = vcs::detect(&project.dir)?;
+            if let Some(rev) = base.as_deref() {
+                vcs = Box::new(vcs::PinnedBase::new(vcs, &project.dir, rev)?);
+            }
             let args = workspace::CreateArgs {
                 skip_copy_ignored,
                 name: cli::given_name(name.as_deref()),

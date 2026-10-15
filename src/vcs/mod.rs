@@ -1,5 +1,7 @@
 mod git;
 pub(crate) mod jj;
+mod trunk;
+pub use self::trunk::PinnedBase;
 
 use std::path::Path;
 
@@ -11,6 +13,11 @@ pub use self::jj::JjBackend;
 
 pub trait Vcs: Send + Sync {
     fn detect_trunk(&self, project_dir: &Path) -> Result<String>;
+
+    /// Resolve `workon create --base REV` to the one commit it names.
+    fn resolve_base(&self, _project_dir: &Path, _rev: &str) -> Result<String> {
+        bail!("--base needs jj installed")
+    }
 
     /// Create the workspace branched from `trunk` and return the **immutable
     /// commit id** it was branched from. Teardown diffs against this pinned base

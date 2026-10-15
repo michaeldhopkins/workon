@@ -60,5 +60,6 @@ owed = []
 "src/trust.rs" = "reads and writes the trust manifest and the configs it hashes"
 "src/vcs/git.rs" = "runs git"
 "src/vcs/jj.rs" = "runs jj and git"
+"src/vcs/trunk.rs" = "runs jj; its one pure function, unresolved_trunk, has the property the_unresolved_trunk_error_matches_what_the_repo_holds"
 "src/vcs/mod.rs" = "detects the repository's VCS and edits .git/info/exclude"
 "src/workspace.rs" = "creates, attaches and destroys worktrees: files, VCS, provisioners and zellij"

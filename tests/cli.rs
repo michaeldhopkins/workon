@@ -81,6 +81,7 @@ fn create_help_lists_its_flags() {
         .success()
         .stdout(predicate::str::contains("--name"))
         .stdout(predicate::str::contains("--skip-copy-ignored"))
+        .stdout(predicate::str::contains("--base"))
         .stdout(predicate::str::contains("--json"));
 }
 
@@ -423,4 +424,19 @@ fn path_without_a_reference_finds_the_enclosing_workspace() {
         assert_eq!(String::from_utf8_lossy(&out).trim(), ws.to_str().unwrap(), "from {}", dir.display());
     }
     world.workon(&proj).arg("path").assert().failure().stderr(predicate::str::contains("not inside a workspace"));
+}
+
+/// `create --base` is parsed and handed to the backend before any workspace is made: with no
+/// jj on PATH the git backend refuses it and nothing is created.
+#[test]
+fn create_base_is_refused_before_anything_is_made_without_jj() {
+    let world = World::new();
+    let proj = world.project(&[]);
+    world
+        .workon(&proj)
+        .args(["create", "--base", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--base needs jj installed"));
+    assert!(!world.worktrees().exists() || std::fs::read_dir(world.worktrees()).unwrap().next().is_none());
 }

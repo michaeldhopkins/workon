@@ -6,7 +6,7 @@ use vcs_runner::{
     jj_revset_history, parse_diff_summary, run_git, run_git_utf8, run_jj, run_jj_utf8, run_jj_utf8_ignore_wc, RunError,
 };
 
-use super::{detect_git_remote, path_str, Vcs};
+use super::{detect_git_remote, path_str, trunk, Vcs};
 
 pub struct JjBackend;
 
@@ -162,7 +162,7 @@ fn remote_scoped(name: &str) -> String {
 /// Resolve a single trunk revset to its first real bookmark, or `None` when the
 /// revset is empty / errors. Kept separate so `detect_trunk` reads as a plain
 /// priority list of candidates.
-fn jj_trunk_bookmark(project_dir: &Path, revset: &str) -> Option<String> {
+pub(super) fn jj_trunk_bookmark(project_dir: &Path, revset: &str) -> Option<String> {
     let output =
         run_jj_utf8(project_dir, &["log", "-r", revset, "--no-graph", "-T", "bookmarks", "--limit", "1"]).ok()?;
     let bookmark = first_real_bookmark(&output);
@@ -209,7 +209,11 @@ impl Vcs for JjBackend {
             }
         }
 
-        Ok("main".into())
+        Ok(trunk::local_trunk_bookmark(project_dir).unwrap_or_else(|| "main".into()))
+    }
+
+    fn resolve_base(&self, project_dir: &Path, rev: &str) -> Result<String> {
+        trunk::resolve_single(project_dir, rev)
     }
 
     fn create_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, trunk: &str) -> Result<String> {
@@ -218,14 +222,9 @@ impl Vcs for JjBackend {
         // Pin the base before creating the workspace. Resolving here also gives a
         // far better error than jj's bare "Revision doesn't exist" when the repo
         // has no commits yet — the only way `trunk` fails to resolve.
-        let base = self.resolve_commit(project_dir, trunk).with_context(|| {
-            format!(
-                "trunk revision `{trunk}` doesn't resolve to a commit — the repo \
-                 likely has no commits yet. Create one, e.g.\n    \
-                 jj describe -m \"Initial commit\" && jj bookmark create {trunk} -r @ && jj new\n\
-                 then re-run."
-            )
-        })?;
+        let base = self
+            .resolve_commit(project_dir, trunk)
+            .with_context(|| trunk::unresolved_trunk(trunk, trunk::repo_has_commits(project_dir)))?;
 
         // Branch from the pinned commit, not the `trunk` name — so the workspace's
         // actual branch point is provably the same commit teardown diffs against,
