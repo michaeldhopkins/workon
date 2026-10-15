@@ -332,6 +332,75 @@ fn create_reports_a_test_database_it_could_not_create() {
     assert!(stderr.contains("is the Postgres server running?"), "the reason is shown: {stderr}");
 }
 
+/// Issue #4: git-sourced gems live in a per-checkout bundler path the gitignored-file clone
+/// does not cover, so a workspace with a Gemfile gets `bundle check || bundle install` before
+/// the schema load. A passing check means the gems are already there: no install runs.
+#[test]
+fn create_checks_gems_before_loading_the_schema() {
+    let world = World::new();
+    let proj = world.project(&[RAILS, ("Gemfile", "source \"https://rubygems.org\"\n")]);
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ws = Path::new(report["path"].as_str().unwrap());
+    let calls = world.stubs.calls("bundle");
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].args, ["check"], "the gems are checked first: {calls:?}");
+    assert_eq!(&calls[0].cwd, ws, "in the new workspace: {calls:?}");
+    assert_eq!(calls[1].args, ["exec", "rails", "db:schema:load"], "the schema load follows: {calls:?}");
+}
+
+/// A failing check (the git-sourced gem is not yet checked out) runs the install,
+/// then the schema load.
+#[test]
+fn create_installs_gems_when_the_check_fails() {
+    let world = World::new();
+    let proj = world.project(&[RAILS, ("Gemfile", "source \"https://rubygems.org\"\n")]);
+    world.stubs.set("bundle", "if [ \"$1\" = check ]; then exit 1; fi\nexit 0");
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let calls = world.stubs.calls("bundle");
+    let args: Vec<Vec<&str>> = calls.iter().map(|c| c.args.iter().map(String::as_str).collect()).collect();
+    assert_eq!(args, [vec!["check"], vec!["install"], vec!["exec", "rails", "db:schema:load"]], "{calls:?}");
+}
+
+/// A failed install is a failed step, and the schema load it would have left half-run
+/// does not run.
+#[test]
+fn create_reports_a_failed_bundle_install() {
+    let failing = [(
+        "bundle",
+        "if [ \"$1\" = check ]; then exit 1; fi\n\
+         if [ \"$1\" = install ]; then echo 'bundler: not yet checked out' >&2; exit 1; fi\nexit 0",
+    )];
+    let (world, stdout, stderr) =
+        create_not_ready(&[RAILS, ("Gemfile", "source \"https://rubygems.org\"\n")], &failing, &["--json"]);
+
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["bundle install"]), "{report}");
+    assert!(stderr.contains("bundler: not yet checked out"), "the step's own error is shown: {stderr}");
+    let calls = world.stubs.calls("bundle");
+    assert!(calls.iter().all(|c| c.args.first().is_some_and(|a| a != "exec")), "no schema load: {calls:?}");
+}
+
+/// Without a Gemfile there is nothing to check or install: the schema load is the only
+/// bundle call.
+#[test]
+fn create_without_a_gemfile_skips_the_gem_check() {
+    let world = World::new();
+    let proj = world.project(&[RAILS]);
+
+    world.workon(&proj).args(["create", "--json"]).assert().success();
+
+    let calls = world.stubs.calls("bundle");
+    let args: Vec<Vec<&str>> = calls.iter().map(|c| c.args.iter().map(String::as_str).collect()).collect();
+    assert_eq!(args, [vec!["exec", "rails", "db:schema:load"]], "{calls:?}");
+}
+
 /// Every provisioner with a setup step carries its failure through to `failed_steps`.
 #[test]
 fn each_provisioner_reports_its_failed_steps() {

@@ -163,7 +163,7 @@ table are load-bearing — they came out of the research and are the "fluency."
 
 | Ecosystem | Detect | Mode | Isolation hook | Prepare | Teardown |
 |---|---|---|---|---|---|
-| **Rails** | `config/database.yml` (+ `bin/rails`) | workon-managed | `DATABASE_URL` + `RAILS_ENV=test` | `createdb`, then `RAILS_ENV=test bin/rails db:schema:load` | `dropdb <name>` |
+| **Rails** | `config/database.yml` (+ `bin/rails`) | workon-managed | `DATABASE_URL` + `RAILS_ENV=test` | `createdb`, `bundle check \|\| bundle install` if a Gemfile (git-sourced gems live in a per-checkout bundler path), then `RAILS_ENV=test bin/rails db:schema:load` | `dropdb <name>` |
 | **Django** | `manage.py` | framework-managed | `DATABASE_URL` **iff** settings use `dj_database_url`; else none | none (runner builds `test_<NAME>`) | none |
 | **Alembic** | `alembic.ini`/`[tool.alembic]` + `versions/` | workon-managed *if* Postgres | `DATABASE_URL` **iff** `env.py` reads it | `createdb`, `alembic upgrade head` | `dropdb <name>` |
 | **Phoenix/Ecto** | `mix.exs` dep on `:ecto_sql` | workon-managed | `MIX_TEST_PARTITION` (built-in) | `MIX_ENV=test mix ecto.create && ecto.migrate` | `dropdb <app>_test<part>` |

@@ -48,20 +48,47 @@ impl Provisioner for Rails {
         let resource = engine.resource(&db);
         let url = engine.url(&db);
 
-        eprintln!("Loading schema...");
-        let mut cmd = Cmd::new("bundle")
-            .args(["exec", "rails", "db:schema:load"])
-            .env("RAILS_ENV", "test")
-            .env("DATABASE_URL", &url)
-            .in_dir(ctx.ws_dir);
-        for (k, v) in ctx.mise_vars {
-            cmd = cmd.env(k, v);
+        // Gems before any bundler/Rails step (issue #4), then the schema load, which
+        // the install going wrong must not leave half-run.
+        let mut failed_steps: Vec<String> = bundle_install(ctx).into_iter().collect();
+        if failed_steps.is_empty() {
+            eprintln!("Loading schema...");
+            let mut cmd = Cmd::new("bundle")
+                .args(["exec", "rails", "db:schema:load"])
+                .env("RAILS_ENV", "test")
+                .env("DATABASE_URL", &url)
+                .in_dir(ctx.ws_dir);
+            for (k, v) in ctx.mise_vars {
+                cmd = cmd.env(k, v);
+            }
+            failed_steps.extend(run_step(cmd, "rails db:schema:load"));
         }
-        let failed_steps = run_step(cmd, "rails db:schema:load").into_iter().collect();
 
         // No env_file: .env.test.local, which dotenv-rails loads under RAILS_ENV=test.
         Ok(Setup::database_url(vec![resource], url, failed_steps))
     }
+}
+
+/// `bundle check || bundle install` in the workspace when it has a Gemfile. Git-sourced
+/// gems are checked out into a per-checkout bundler path the gitignored-file clone does
+/// not cover (issue #4), so `db:schema:load` would fail with "not yet checked out" until
+/// this runs. `None` means the gems are ready (or there is no Gemfile); a failed install
+/// is reported like every other step, naming its command.
+fn bundle_install(ctx: &ProvisionCtx<'_>) -> Option<String> {
+    if !ctx.ws_dir.join("Gemfile").is_file() {
+        return None;
+    }
+    let bundle = |args: &[&str]| {
+        let mut cmd = Cmd::new("bundle").args(args).in_dir(ctx.ws_dir);
+        for (k, v) in ctx.mise_vars {
+            cmd = cmd.env(k, v);
+        }
+        cmd
+    };
+    if bundle(&["check"]).run().is_ok() {
+        return None;
+    }
+    run_step(bundle(&["install"]), "bundle install")
 }
 
 /// The first `adapter:` value in `database.yml` (usually under `default:`),
