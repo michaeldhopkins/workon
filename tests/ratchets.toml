@@ -1,0 +1,11 @@
+# Declarative quality ratchet manifest.
+lint_roots = ["src", "tests", "fuzz/fuzz_targets"]
+suppressions = 2
+check_baseline_lints = true
+
+[rust_pinned]
+"src/workspace.rs" = 1059
+
+[pinned_thresholds]
+"cognitive-complexity-threshold" = 30
+"too-many-arguments-threshold" = 8
