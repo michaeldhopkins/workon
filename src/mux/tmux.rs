@@ -10,6 +10,13 @@ use super::{last_lines, panes, run, Open};
 
 pub struct Tmux;
 
+/// A session by its exact name. A bare name matches by prefix (`demo` finds
+/// `demo2`), and a `.` in it reads as a pane separator. `=name:` is the session
+/// alone, whatever the name holds.
+pub(crate) fn target(name: &str) -> String {
+    format!("={name}:")
+}
+
 impl Tmux {
     fn cmd(&self) -> Cmd {
         Cmd::new("tmux").timeout(std::time::Duration::from_secs(10))
@@ -18,7 +25,7 @@ impl Tmux {
 
 impl super::Multiplexer for Tmux {
     fn exists(&self, name: &str) -> Result<bool> {
-        match self.cmd().args(["has-session", "-t", name]).run() {
+        match self.cmd().args(["has-session", "-t", target(name).as_str()]).run() {
             Ok(_) => Ok(true),
             Err(RunError::NonZeroExit { .. }) => Ok(false),
             Err(err) => Err(err.into()),
@@ -48,16 +55,16 @@ impl super::Multiplexer for Tmux {
             run(self.cmd().args(args)).with_context(|| format!("failed to create tmux session '{}'", open.name))?;
         }
         if focused != 0 {
-            let target = format!("{}:0.{focused}", open.name);
+            let target = format!("{}0.{focused}", target(open.name));
             run(self.cmd().args(["select-pane", "-t", &target]))?;
         }
         Ok(())
     }
 
     fn send_once(&self, name: &str, text: &str) -> Result<()> {
-        run(self.cmd().args(["send-keys", "-t", name, "-l", "--", text]))
+        run(self.cmd().args(["send-keys", "-t", target(name).as_str(), "-l", "--", text]))
             .with_context(|| format!("failed to type into tmux session '{name}'"))?;
-        run(self.cmd().args(["send-keys", "-t", name, "Enter"]))
+        run(self.cmd().args(["send-keys", "-t", target(name).as_str(), "Enter"]))
             .with_context(|| format!("failed to send Enter to tmux session '{name}'"))?;
         Ok(())
     }
@@ -69,14 +76,14 @@ impl super::Multiplexer for Tmux {
     }
 
     fn kill(&self, name: &str) -> Result<()> {
-        run(self.cmd().args(["kill-session", "-t", name]))
+        run(self.cmd().args(["kill-session", "-t", target(name).as_str()]))
             .with_context(|| format!("failed to kill tmux session '{name}'"))?;
         Ok(())
     }
 
     fn attach(&self, name: &str, dir: &Path) -> Result<()> {
         let status = std::process::Command::new("tmux")
-            .args(["attach-session", "-t", name])
+            .args(["attach-session", "-t", target(name).as_str()])
             .current_dir(dir)
             .status()
             .context("failed to attach to tmux session")?;
@@ -97,7 +104,7 @@ pub(crate) fn pane_args(
     let mut args = if first {
         vec!["new-session".to_string(), "-d".to_string(), "-s".to_string(), name.to_string()]
     } else {
-        vec!["split-window".to_string(), "-d".to_string(), "-t".to_string(), name.to_string()]
+        vec!["split-window".to_string(), "-d".to_string(), "-t".to_string(), target(name)]
     };
     args.push("-c".to_string());
     args.push(dir.display().to_string());
@@ -119,7 +126,7 @@ pub(crate) fn capture_args(name: &str, lines: usize) -> Vec<String> {
     vec![
         "capture-pane".to_string(),
         "-t".to_string(),
-        name.to_string(),
+        target(name),
         "-p".to_string(),
         "-S".to_string(),
         format!("-{lines}"),
@@ -156,7 +163,7 @@ mod tests {
                 "split-window",
                 "-d",
                 "-t",
-                "demo",
+                "=demo:",
                 "-c",
                 "/work",
                 "-e",
@@ -173,6 +180,6 @@ mod tests {
 
     #[test]
     fn capture_starts_at_the_requested_history() {
-        assert_eq!(capture_args("demo", 200), vec!["capture-pane", "-t", "demo", "-p", "-S", "-200"]);
+        assert_eq!(capture_args("demo", 200), vec!["capture-pane", "-t", "=demo:", "-p", "-S", "-200"]);
     }
 }

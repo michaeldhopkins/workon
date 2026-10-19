@@ -96,8 +96,8 @@ fn tmux_run_creates_a_detached_session_and_types_the_command() {
 
     let typed = calls_starting(&world, "tmux", "send-keys");
     assert_eq!(typed.len(), 2, "{typed:?}");
-    assert_eq!(typed[0].args, ["send-keys", "-t", "demo", "-l", "--", "printf ready"]);
-    assert_eq!(typed[1].args, ["send-keys", "-t", "demo", "Enter"]);
+    assert_eq!(typed[0].args, ["send-keys", "-t", "=demo:", "-l", "--", "printf ready"]);
+    assert_eq!(typed[1].args, ["send-keys", "-t", "=demo:", "Enter"]);
 }
 
 #[test]
@@ -200,7 +200,7 @@ impl Drop for Stop {
         match self.mux {
             "tmux" => {
                 cmd.env("TMUX_TMPDIR", &self.socket);
-                cmd.args(["kill-session", "-t", &self.name]);
+                cmd.args(["kill-session", "-t", &format!("={}:", self.name)]);
             }
             "zellij" => {
                 cmd.env("ZELLIJ_SOCKET_DIR", &self.socket);
@@ -275,4 +275,37 @@ fn tmux_run_send_and_history() {
 fn zmx_run_send_and_history() {
     let Some(bin) = require_installed("zmx") else { return };
     drive("zmx", &bin);
+}
+
+/// tmux matches a bare target by prefix and reads `.` as a pane separator, so
+/// `demo` would find `demo2` and `my.app` would never be found at all.
+#[test]
+fn tmux_matches_session_names_exactly() {
+    let Some(bin) = require_installed("tmux") else { return };
+    let world = World::new();
+    let proj = project(&world);
+    bless_empty(&world);
+    let longer = format!("{}-longer", session_name(&world));
+    let dotted = format!("{}.dotted", session_name(&world));
+    let socket = world.socket_dir("tmux");
+    let _longer = Stop { bin: bin.clone(), mux: "tmux", name: longer.clone(), socket: socket.clone() };
+    let _dotted = Stop { bin: bin.clone(), mux: "tmux", name: dotted.clone(), socket };
+    world.stubs.set("tmux", &format!("exec '{}' \"$@\"", bin.display()));
+    let shell = [("SHELL", "/bin/sh")];
+
+    for name in [&longer, &dotted] {
+        let mut run = world.tui_with(&proj, &["--mux", "tmux", "run", "--name", name, "--config", "empty"], &shell);
+        assert!(run.wait_for_exit(), "{}", run.screen());
+    }
+    let prefix = longer.trim_end_matches("-longer").to_string();
+    world
+        .workon(&proj)
+        .args(["--mux", "tmux", "history", "--name", &prefix])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!("session '{prefix}' is not running")));
+
+    let mut send = world.tui_with(&proj, &["--mux", "tmux", "send", "--name", &dotted, "printf 'dot-%s\\n' ok"], &shell);
+    assert!(send.wait_for_exit(), "{}", send.screen());
+    wait_and_read(&world, &proj, "tmux", &dotted, "dot-ok");
 }
