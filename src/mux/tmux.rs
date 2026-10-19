@@ -14,7 +14,14 @@ pub struct Tmux;
 /// `demo2`), and a `.` in it reads as a pane separator. `=name:` is the session
 /// alone, whatever the name holds.
 pub(crate) fn target(name: &str) -> String {
-    format!("={name}:")
+    format!("={}:", session_name(name))
+}
+
+/// The name tmux stores: it turns `.` and `:` into `_` (older tmux always did, and
+/// they are its pane and window separators). Asking for the stored name keeps
+/// `exists` honest on every version.
+pub(crate) fn session_name(name: &str) -> String {
+    name.replace(['.', ':'], "_")
 }
 
 impl Tmux {
@@ -95,7 +102,7 @@ pub(crate) fn pane_args(
     first: bool,
 ) -> Vec<String> {
     let mut args = if first {
-        vec!["new-session".to_string(), "-d".to_string(), "-s".to_string(), name.to_string()]
+        vec!["new-session".to_string(), "-d".to_string(), "-s".to_string(), session_name(name)]
     } else {
         vec!["split-window".to_string(), "-d".to_string(), "-t".to_string(), target(name)]
     };
@@ -169,6 +176,12 @@ mod tests {
                 "abc"
             ]
         );
+    }
+
+    #[test]
+    fn a_dot_or_colon_in_a_name_reads_as_tmux_stores_it() {
+        assert_eq!(session_name("my.app:2"), "my_app_2");
+        assert_eq!(target("my.app"), "=my_app:");
     }
 
     #[test]

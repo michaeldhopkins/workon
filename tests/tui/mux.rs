@@ -200,7 +200,7 @@ impl Drop for Stop {
         match self.mux {
             "tmux" => {
                 cmd.env("TMUX_TMPDIR", &self.socket);
-                cmd.args(["kill-session", "-t", &format!("={}:", self.name)]);
+                cmd.args(["kill-session", "-t", &format!("={}:", self.name.replace(['.', ':'], "_"))]);
             }
             "zellij" => {
                 cmd.env("ZELLIJ_SOCKET_DIR", &self.socket);
