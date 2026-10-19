@@ -76,3 +76,18 @@ workon replaces the project's URL, driver suffix and all. Options: keep a
 `+driver` suffix from a URL the project already configures, or read which of
 psycopg/psycopg2 the venv has. Undecided; `run_step` at least prints the failure
 now.
+
+## Multiplexers beyond zellij, tmux, and zmx
+
+workon drives zellij (the default), tmux, and zmx. `--mux` or `WORKON_MUX` selects one. Headless `run`, `send`, `history`, and `wait` work on all three. The spellings `create --background` and `logs` were not added.
+
+Still to do:
+
+- GNU screen, herdr, WezTerm, kitty, Rex, and shpool. Each one needs the same end-to-end test before workon claims it.
+- tmux split direction, pane percentages, and `remain-on-exit`.
+- One layout model in place of the two line scanners above, so every multiplexer sees the same panes.
+- A `mux` key in a workon config, beside the flag and `WORKON_MUX`.
+- zmx labels, and `zmx wait` instead of polling history. herdr's agent wait, once herdr is a backend.
+- Persist the multiplexer, `created_at`, and the agent session id, and reuse that id when `attach` opens the workspace.
+- Live multiplexer state on `workon list`.
+- The gitignored workspace context file the agent reads.
