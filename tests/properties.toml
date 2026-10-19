@@ -45,6 +45,10 @@ owed = []
 "src/provision/prisma.rs" = ["the_datasource_provider_and_url_var_read_back"]
 "src/provision/rails.rs" = ["adapter_is_the_first_adapter_line_with_a_value"]
 "src/spawn_retry.rs" = ["only_etxtbusy_reads_as_a_busy_executable"]
+"src/stale.rs" = [
+  "a_path_is_dropped_exactly_when_it_sits_inside_a_stale_output_dir",
+  "drift_fires_exactly_when_the_lockfiles_differ_or_the_workspace_lacks_one",
+]
 "src/registered.rs" = [
   "path_selects_the_registered_name_not_the_directory",
   "a_prefixed_directory_does_not_match_its_stripped_suffix",

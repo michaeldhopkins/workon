@@ -20,6 +20,7 @@ pub mod resolve;
 mod save_prompt;
 pub mod session;
 mod spawn_retry;
+mod stale;
 pub mod trust;
 pub mod vcs;
 pub mod workspace;

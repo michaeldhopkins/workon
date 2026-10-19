@@ -235,6 +235,114 @@ fn create_reports_the_gitignored_files_it_copies() {
     }
 }
 
+/// workon#6: `workon create` used to clone build output (`public/packs-test`) that no longer matched the commit the workspace checked out. The
+/// clone now skips every Rails asset-output dir, while the sibling content a
+/// workspace does want (`public/uploads`, `node_modules`) still arrives.
+#[test]
+fn create_skips_stale_build_output_and_keeps_its_siblings() {
+    let world = World::new();
+    let proj = world.project(&[
+        (".gitignore", "node_modules/\npublic/packs-test/\npublic/uploads/\n"),
+        ("public/robots.txt", "tracked\n"),
+    ]);
+    for (rel, body) in [
+        ("node_modules/leftpad/index.js", "module.exports = {}\n"),
+        ("public/packs-test/js/manifest.js", "{}\n"),
+        ("public/uploads/avatar.png", "\nPNG\n"),
+    ] {
+        let path = proj.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the parent dirs");
+        std::fs::write(path, body).expect("the file");
+    }
+
+    let output = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let ws = PathBuf::from(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("create --json prints JSON")["path"]
+            .as_str()
+            .expect("a path"),
+    );
+
+    assert!(ws.join("node_modules/leftpad/index.js").is_file(), "dependencies are cloned: {stderr}");
+    assert!(ws.join("public/uploads/avatar.png").is_file(), "sibling content is cloned: {stderr}");
+    assert!(!ws.join("public/packs-test").exists(), "stale build output must not be cloned");
+    // Only the two kept files are counted, and only the dependency dir is
+    // cloned whole: `public` already exists in the workspace (it is tracked),
+    // so the upload is copied individually.
+    assert!(stderr.contains("Cloning 2 gitignored files (skip with --skip-copy-ignored)..."), "{stderr}");
+    assert!(stderr.contains("Cloned 2 gitignored files (1 dirs cloned, 1 copied individually)"), "{stderr}");
+}
+
+/// workon#6: node_modules installed from the project's current lockfile are
+/// cloned into a workspace whose own commit still has the previous lockfile.
+/// That drift — a dependency tree that can no longer match the workspace's
+/// build — now gets one warning line naming the tree, the lockfile and the
+/// reinstall.
+#[test]
+fn create_warns_when_the_cloned_deps_came_from_a_different_lockfile() {
+    let world = World::new();
+    let proj = world.project(&[
+        (".gitignore", "node_modules/\n"),
+        ("package-lock.json", "{\"lockfileVersion\":3,\"state\":\"committed\"}\n"),
+    ]);
+    // The project moved on after the last commit: a new lockfile, and a
+    // node_modules installed from it.
+    std::fs::write(proj.join("package-lock.json"), "{\"lockfileVersion\":3,\"state\":\"working copy\"}\n").unwrap();
+    std::fs::create_dir_all(proj.join("node_modules/leftpad")).unwrap();
+    std::fs::write(proj.join("node_modules/leftpad/index.js"), "module.exports = {}\n").unwrap();
+
+    let output = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "Warning: node_modules was cloned from a package-lock.json that differs from this workspace's; run 'npm install' in the workspace."
+        ),
+        "{stderr}"
+    );
+}
+
+/// No drift — the tree was installed from the very lockfile the workspace
+/// checks out — means no warning line.
+#[test]
+fn create_does_not_warn_when_the_cloned_deps_match_the_workspace_lockfile() {
+    let world = World::new();
+    let proj = world.project(&[
+        (".gitignore", "node_modules/\n"),
+        ("package-lock.json", "{\"lockfileVersion\":3,\"state\":\"committed\"}\n"),
+    ]);
+    std::fs::create_dir_all(proj.join("node_modules/leftpad")).unwrap();
+    std::fs::write(proj.join("node_modules/leftpad/index.js"), "module.exports = {}\n").unwrap();
+
+    let output = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("node_modules was cloned from"), "no drift, no warning: {stderr}");
+}
+
+/// workon#6: a tree installed from a lockfile the project never committed is
+/// drift too — the workspace's commit has none to match it against — and the
+/// warning says so.
+#[test]
+fn create_warns_when_the_workspace_has_no_lockfile() {
+    let world = World::new();
+    let proj = world.project(&[(".gitignore", "node_modules/\n")]);
+    std::fs::write(proj.join("package-lock.json"), "{\"lockfileVersion\":3}\n").unwrap();
+    std::fs::create_dir_all(proj.join("node_modules/leftpad")).unwrap();
+    std::fs::write(proj.join("node_modules/leftpad/index.js"), "module.exports = {}\n").unwrap();
+
+    let output = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "Warning: node_modules was cloned from the project's package-lock.json, which this workspace does not have; run 'npm install' in the workspace."
+        ),
+        "{stderr}"
+    );
+}
+
 /// A project with a mise config, created by a user whose mise shims directory
 /// exists but is not on PATH and who has no `mise activate`, gets the warning that
 /// non-interactive shells will miss the pinned tool versions. The shims directory
