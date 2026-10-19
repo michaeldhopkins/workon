@@ -42,6 +42,13 @@ owed = []
 "src/provision/prisma.rs" = ["the_datasource_provider_and_url_var_read_back"]
 "src/provision/rails.rs" = ["adapter_is_the_first_adapter_line_with_a_value"]
 "src/spawn_retry.rs" = ["only_etxtbusy_reads_as_a_busy_executable"]
+"src/registered.rs" = [
+  "path_selects_the_registered_name_not_the_directory",
+  "a_prefixed_directory_does_not_match_its_stripped_suffix",
+  "a_list_line_round_trips_including_an_empty_root",
+  "a_nickname_selects_the_registered_name",
+  "only_the_workspace_named_default_is_left_unreported",
+]
 "src/zellij_reply.rs" = ["a_listing_finds_exactly_the_sessions_named_first_on_a_line"]
 
 [effectful]

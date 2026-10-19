@@ -13,6 +13,7 @@ pub mod layout;
 pub mod mise_env;
 pub mod not_ready;
 pub mod provision;
+pub mod registered;
 pub mod resolve;
 mod save_prompt;
 pub mod session;

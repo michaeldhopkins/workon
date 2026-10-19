@@ -5,7 +5,8 @@
 mod support;
 mod tui;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use predicates::prelude::*;
 use support::World;
@@ -508,4 +509,200 @@ fn create_base_is_refused_before_anything_is_made_without_jj() {
         .failure()
         .stderr(predicate::str::contains("--base needs jj installed"));
     assert!(!world.worktrees().exists() || std::fs::read_dir(world.worktrees()).unwrap().next().is_none());
+}
+
+/// A jj repo whose workspaces are registered by jj, not by the `<project>-<name>`
+/// directory convention. `None` when jj is not installed (the main CI job has no jj).
+struct JjRepo {
+    world: World,
+    proj: PathBuf,
+}
+
+fn jj_bin() -> Option<PathBuf> {
+    let out = Command::new("/bin/sh").arg("-c").arg("command -v jj").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+fn jj(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new(jj_bin().expect("jj")).args(args).current_dir(dir).output().expect("jj runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "jj {args:?} in {} failed\n{stdout}{stderr}", dir.display());
+    stdout
+}
+
+fn jj_names(proj: &Path) -> Vec<String> {
+    jj(proj, &["--ignore-working-copy", "--color=never", "workspace", "list", "-T", "name ++ \"\\n\""])
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Give a jj workspace the git worktree pointer workon already writes, so
+/// `project_dir_of` resolves and destroy reaches the name check.
+fn link_git_worktree(world: &World, proj: &Path, ws: &Path, git_name: &str) {
+    let git_dir = world.git(proj, &["rev-parse", "--absolute-git-dir"]);
+    let git_dir = git_dir.trim();
+    let wt = format!("{git_dir}/worktrees/{git_name}");
+    std::fs::create_dir_all(&wt).expect("git worktree dir");
+    let head = world.git(proj, &["rev-parse", "HEAD"]);
+    std::fs::write(format!("{wt}/gitdir"), format!("{}/.git\n", ws.display())).expect("gitdir pointer");
+    std::fs::write(format!("{wt}/commondir"), "../..\n").expect("commondir pointer");
+    std::fs::write(format!("{wt}/HEAD"), head).expect("worktree HEAD");
+    std::fs::write(ws.join(".git"), format!("gitdir: {wt}\n")).expect("workspace git file");
+}
+
+impl JjRepo {
+    fn new() -> Option<Self> {
+        let bin = jj_bin()?;
+        let world = World::new();
+        world.stubs.set("jj", &format!("exec '{}' \"$@\"", bin.display()));
+        let proj = world.path().join("proj");
+        std::fs::create_dir_all(&proj).expect("project dir");
+        world.git(&proj, &["init", "-q", "-b", "main"]);
+        world.git(&proj, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        jj(&proj, &["git", "init", "--colocate"]);
+        Some(Self { world, proj })
+    }
+
+    /// `jj workspace add` at `dir`, registered as `name`, with a git pointer back to the project.
+    fn add(&self, dir: &Path, name: &str) {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent).expect("workspace parent");
+        }
+        let path = dir.to_str().expect("workspace path is utf-8");
+        jj(&self.proj, &["workspace", "add", path, "--name", name, "-r", "@"]);
+        link_git_worktree(&self.world, &self.proj, dir, name);
+    }
+}
+
+/// Issue #5, case 1. A workspace `list` shows whose directory is not
+/// `<project>-<name>`: `path` and `destroy` of the name jj registered must
+/// resolve it, and destroy by its path must not demand that directory spelling.
+#[test]
+fn listed_workspace_with_an_unprefixed_directory_can_be_pathed_and_destroyed() {
+    let Some(repo) = JjRepo::new() else { return };
+    let dir = repo.world.worktrees().join("customdir");
+    repo.add(&dir, "odd");
+
+    let listed = repo.world.workon(&repo.proj).arg("list").assert().success().get_output().stdout.clone();
+    let listed = String::from_utf8_lossy(&listed);
+    assert!(listed.contains("odd"), "list must show jj's registered name, not the directory's: {listed}");
+
+    let path = repo.world.workon(&repo.proj).args(["path", "odd"]).assert().success().get_output().stdout.clone();
+    assert_eq!(String::from_utf8_lossy(&path).trim(), dir.to_str().unwrap());
+
+    let destroyed = repo
+        .world
+        .workon(&repo.proj)
+        .args(["destroy", "--no-save", dir.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let destroyed = String::from_utf8_lossy(&destroyed);
+    assert!(destroyed.contains("Forgot jj workspace odd"), "{destroyed}");
+    assert!(!jj_names(&repo.proj).iter().any(|n| n == "odd"), "jj still has odd: {:?}", jj_names(&repo.proj));
+}
+
+/// Issue #5, case 2. The directory and the jj registration are both
+/// `<project>-<name>`. Destroying that directory must forget the registered
+/// name, not the short name left after stripping the project prefix.
+#[test]
+fn destroy_forgets_the_jj_workspace_whose_root_is_the_directory() {
+    let Some(repo) = JjRepo::new() else { return };
+    let dir = repo.world.worktrees().join("proj-feature");
+    repo.add(&dir, "proj-feature");
+
+    let listed = repo.world.workon(&repo.proj).arg("list").assert().success().get_output().stdout.clone();
+    let listed = String::from_utf8_lossy(&listed);
+    assert!(listed.contains("proj-feature"), "list must show the registered name: {listed}");
+
+    let destroyed = repo
+        .world
+        .workon(&repo.proj)
+        .args(["destroy", "--no-save", dir.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let destroyed = String::from_utf8_lossy(&destroyed);
+    assert!(destroyed.contains("Forgot jj workspace proj-feature"), "{destroyed}");
+    assert!(
+        !destroyed.contains("Forgot jj workspace feature"),
+        "forgot the stripped name instead of the registered one: {destroyed}"
+    );
+    assert!(
+        !jj_names(&repo.proj).iter().any(|n| n == "proj-feature"),
+        "jj still has proj-feature: {:?}",
+        jj_names(&repo.proj)
+    );
+}
+
+/// Issue #5, case 3. Registrations jj has and workon does not manage — a root
+/// outside `~/.worktrees`, and one whose directory is already gone — are
+/// reported. `path` still resolves the one that has a root.
+#[test]
+fn list_reports_jj_registrations_workon_does_not_manage() {
+    let Some(repo) = JjRepo::new() else { return };
+    let outside = repo.world.path().join("outside").join("extra");
+    repo.add(&outside, "extra");
+    let ghost = repo.world.worktrees().join("ghostdir");
+    repo.add(&ghost, "ghost");
+    std::fs::remove_dir_all(&ghost).unwrap();
+
+    let listed = repo.world.workon(&repo.proj).arg("list").assert().success().get_output().clone();
+    let stderr = String::from_utf8_lossy(&listed.stderr);
+    assert!(stderr.contains("jj workspace extra is registered and workon does not manage it"), "{stderr}");
+    assert!(stderr.contains("jj workspace ghost is registered and workon does not manage it"), "{stderr}");
+
+    let path = repo.world.workon(&repo.proj).args(["path", "extra"]).assert().success().get_output().stdout.clone();
+    assert_eq!(String::from_utf8_lossy(&path).trim(), outside.to_str().unwrap());
+    assert!(jj_names(&repo.proj).iter().any(|n| n == "extra"), "reporting extra must not forget it");
+}
+
+/// Every jj repo registers a workspace named `default`, so that line would show
+/// on every list. When `default` is the only registration workon does not
+/// manage, neither text nor JSON mode prints it. Any other name still does.
+#[test]
+fn list_does_not_report_the_default_jj_workspace() {
+    let Some(repo) = JjRepo::new() else { return };
+    assert_eq!(jj_names(&repo.proj), ["default".to_string()], "the repo should register only default");
+
+    for args in [&["list"][..], &["list", "--json"]] {
+        let listed = repo.world.workon(&repo.proj).args(args).assert().success().get_output().clone();
+        let stdout = String::from_utf8_lossy(&listed.stdout);
+        let stderr = String::from_utf8_lossy(&listed.stderr);
+        assert!(
+            !stdout.contains("is registered and workon does not manage it"),
+            "{args:?} printed it on stdout: {stdout}"
+        );
+        assert!(
+            !stderr.contains("is registered and workon does not manage it"),
+            "{args:?} printed it on stderr: {stderr}"
+        );
+    }
+
+    let outside = repo.world.path().join("outside").join("extra");
+    repo.add(&outside, "extra");
+    for args in [&["list"][..], &["list", "--json"]] {
+        let listed = repo.world.workon(&repo.proj).args(args).assert().success().get_output().clone();
+        let stderr = String::from_utf8_lossy(&listed.stderr);
+        assert!(
+            stderr.contains("jj workspace extra is registered and workon does not manage it"),
+            "{args:?} dropped the non-default registration: {stderr}"
+        );
+        assert!(
+            !stderr.contains("jj workspace default is registered and workon does not manage it"),
+            "{args:?} still reported default: {stderr}"
+        );
+    }
 }

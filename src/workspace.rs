@@ -122,6 +122,10 @@ fn read_meta(ws_dir: &Path) -> WorkspaceMeta {
     })
 }
 
+pub(crate) fn recorded_name(ws_dir: &Path) -> Option<String> {
+    read_meta(ws_dir).name
+}
+
 /// Ephemeral workspace flow (`workon -w`): provision, attach, and tear down on
 /// quit, composed from the three phases the headless subcommands also use. When a
 /// setup step failed it asks first; declined, it removes the workspace and returns
@@ -432,11 +436,10 @@ fn teardown(ws: &Workspace, session_id: Option<&str>, save: SaveMode, vcs: &dyn 
 /// the worktree and reading provenance from `.workon.json`.
 fn load_workspace(reference: Option<&str>) -> Result<Workspace> {
     let ws_dir = resolve_ws_dir(reference)?;
-    let project_dir = discover::project_dir_of(&ws_dir)?;
+    let project_dir = crate::registered::project_of(&ws_dir)?;
     let project_name =
         project_dir.file_name().map(|n| n.to_string_lossy().into_owned()).context("project directory has no name")?;
-    let ws_id = discover::ws_id_of(&ws_dir, &project_name)
-        .with_context(|| format!("{} is not named <project>-<ws_id> for project {project_name}", ws_dir.display()))?;
+    let ws_id = crate::registered::identity(&project_dir, &project_name, &ws_dir)?;
     let meta = read_meta(&ws_dir);
 
     // Back-compat: a workspace written before the resources list carried a
@@ -491,31 +494,13 @@ fn find_enclosing_workspace() -> Result<PathBuf> {
 /// ws_id exactly, or the `--name` nickname up to slugification — so the token
 /// can be given either as stored (`"fix bug"`) or as it appears in the ws_id
 /// (`"fix-bug"`).
-fn token_matches(token: &str, ws_id: &str, name: Option<&str>) -> bool {
+pub(crate) fn token_matches(token: &str, ws_id: &str, name: Option<&str>) -> bool {
     ws_id == token || name.is_some_and(|n| slugify(n) == slugify(token))
 }
 
-/// Find the single worktree whose ws_id or `--name` nickname matches `token`.
+/// The worktree `token` names: its jj registration, or a git-only ws_id / nickname.
 fn find_by_token(token: &str) -> Result<PathBuf> {
-    let mut hits: Vec<PathBuf> = Vec::new();
-    for ws_dir in discover::list_worktree_dirs()? {
-        let ws_id = discover::project_dir_of(&ws_dir)
-            .ok()
-            .and_then(|pd| pd.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .and_then(|pn| discover::ws_id_of(&ws_dir, &pn));
-        let name = read_meta(&ws_dir).name;
-        if token_matches(token, ws_id.as_deref().unwrap_or_default(), name.as_deref()) {
-            hits.push(ws_dir);
-        }
-    }
-    match hits.len() {
-        0 => bail!("no workspace matches '{token}' (see: workon list)"),
-        1 => Ok(hits.remove(0)),
-        _ => {
-            let names: Vec<String> = hits.iter().map(|p| path_str(p)).collect();
-            bail!("'{token}' is ambiguous; matches:\n  {}", names.join("\n  "))
-        }
-    }
+    crate::registered::root_for_token(token)
 }
 
 pub struct CreateArgs<'a> {
@@ -572,9 +557,9 @@ pub fn cmd_attach(reference: Option<&str>, config_override: Option<&str>) -> Res
 /// enter it (`cd "$(workon path REF)"`). No session, no changes — a child
 /// process can't change the parent shell's cwd, so this is the print half of
 /// that idiom.
-/// Shell-completion candidates for a workspace reference: every worktree's
-/// ws_id and, where set, its `--name` nickname (slugified), each helped by its
-/// project name. Feeds the `add = ArgValueCandidates::new(...)` on `reference`.
+/// Shell-completion candidates for a workspace reference: the jj registered name
+/// (or the `<project>-<ws_id>` spelling when the project is git-only) and, where
+/// set, the `--name` nickname (slugified). Feeds `ArgValueCandidates` on `reference`.
 pub fn ref_candidates() -> Vec<CompletionCandidate> {
     match discover::worktrees_dir() {
         Ok(root) => ref_candidates_from(&root),
@@ -583,16 +568,16 @@ pub fn ref_candidates() -> Vec<CompletionCandidate> {
 }
 
 fn ref_candidates_from(worktrees: &Path) -> Vec<CompletionCandidate> {
+    // Completion is best-effort: a jj failure still offers the git-only ids.
+    let names = crate::registered::census(worktrees, Path::new("/")).map(|c| c.names).unwrap_or_default();
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for ws_dir in discover::list_dirs_in(worktrees) {
-        let project_name = discover::project_dir_of(&ws_dir)
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        let project = crate::registered::project_of(&ws_dir).ok();
+        let project_name = project.as_ref().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
         let help = || project_name.clone().map(Into::into);
-
-        if let Some(pn) = project_name.as_deref()
-            && let Some(id) = discover::ws_id_of(&ws_dir, pn)
+        if let Some(project) = project.as_ref()
+            && let Some(id) = crate::registered::listed_name(&names, &ws_dir, project, project_name.as_deref())
             && seen.insert(id.clone())
         {
             out.push(CompletionCandidate::new(id).help(help()));
@@ -650,9 +635,15 @@ struct WorkspaceRow {
 pub fn cmd_list(json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let cwd_c = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    let census = crate::registered::census(&discover::worktrees_dir()?, &cwd_c)?;
 
-    let rows: Vec<WorkspaceRow> =
-        discover::list_worktree_dirs()?.iter().filter_map(|ws_dir| describe_workspace(ws_dir, &cwd_c)).collect();
+    let rows: Vec<WorkspaceRow> = discover::list_worktree_dirs()?
+        .iter()
+        .filter_map(|ws_dir| describe_workspace(ws_dir, &cwd_c, &census.names))
+        .collect();
+    // Before every return, including JSON and the empty table: the registrations
+    // jj has that this list does not manage.
+    crate::registered::report_unmanaged(&census.unmanaged);
 
     if json {
         let arr: Vec<serde_json::Value> = rows
@@ -699,38 +690,40 @@ fn list_row(ws_id: &str, name: &str, age: &str, project: &str, status: &str) -> 
 /// Build a `list` row for one worktree. Returns `None` for a resolvable
 /// workspace whose project isn't under cwd (not ours to show here); stale
 /// worktrees are always returned.
-fn describe_workspace(ws_dir: &Path, cwd_c: &Path) -> Option<WorkspaceRow> {
+fn describe_workspace(
+    ws_dir: &Path,
+    cwd_c: &Path,
+    names: &std::collections::BTreeMap<PathBuf, String>,
+) -> Option<WorkspaceRow> {
     let age_seconds = workspace_age_seconds(ws_dir);
     let name = read_meta(ws_dir).name;
     let dir_basename = || ws_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
 
-    match discover::project_dir_of(ws_dir) {
-        Ok(project_dir) => {
-            let project_dir_c = std::fs::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
-            if !project_dir_c.starts_with(cwd_c) {
-                return None;
-            }
-            let project_name = project_dir.file_name().map(|n| n.to_string_lossy().into_owned());
-            let ws_id =
-                project_name.as_deref().and_then(|pn| discover::ws_id_of(ws_dir, pn)).unwrap_or_else(dir_basename);
-            Some(WorkspaceRow {
-                ws_id,
-                name,
-                age_seconds,
-                project: project_name,
-                ws_dir: ws_dir.to_path_buf(),
-                status: active_status(&project_dir),
-            })
-        }
-        Err(_) => Some(WorkspaceRow {
+    let Ok(project_dir) = crate::registered::project_of(ws_dir) else {
+        return Some(WorkspaceRow {
             ws_id: dir_basename(),
             name,
             age_seconds,
             project: None,
             ws_dir: ws_dir.to_path_buf(),
             status: "stale",
-        }),
+        });
+    };
+    let project_dir_c = std::fs::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
+    if !project_dir_c.starts_with(cwd_c) {
+        return None;
     }
+    let project_name = project_dir.file_name().map(|n| n.to_string_lossy().into_owned());
+    let ws_id = crate::registered::listed_name(names, ws_dir, &project_dir, project_name.as_deref())
+        .unwrap_or_else(dir_basename);
+    Some(WorkspaceRow {
+        ws_id,
+        name,
+        age_seconds,
+        project: project_name,
+        ws_dir: ws_dir.to_path_buf(),
+        status: active_status(&project_dir),
+    })
 }
 
 /// Status for a resolvable (non-stale) workspace: `"divergent"` when the shared
@@ -1566,8 +1559,9 @@ mod tests {
         let worktrees = tmp.path().join("worktrees");
         let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &[]).unwrap();
 
-        let inside = describe_workspace(&ws.ws_dir, &std::fs::canonicalize(&repo).unwrap());
-        let outside = describe_workspace(&ws.ws_dir, &std::fs::canonicalize(&elsewhere).unwrap());
+        let names = std::collections::BTreeMap::new();
+        let inside = describe_workspace(&ws.ws_dir, &std::fs::canonicalize(&repo).unwrap(), &names);
+        let outside = describe_workspace(&ws.ws_dir, &std::fs::canonicalize(&elsewhere).unwrap(), &names);
 
         assert_eq!(inside.map(|r| r.ws_id), Some(ws.ws_id));
         assert!(outside.is_none(), "a project outside cwd was listed");
