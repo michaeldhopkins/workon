@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use vcs_runner::run_jj;
 
-use crate::discover;
+use crate::{discover, forget_hint};
 
 /// `jj` reads `\0` and `\n` as escapes. A real NUL in this string would split the
 /// argument before jj's template parser saw it.
@@ -229,8 +229,9 @@ fn name_from(regs: Vec<Registered>, ws_dir: &Path) -> Result<Option<String>> {
         .iter()
         .filter(|reg| reg.root.as_deref().is_some_and(|root| same_path(&canonical(root), &wanted)))
         .collect();
-    if hits.iter().any(|reg| !reg.exact) {
-        bail!("refusing to delete {}: workspace root does not round-trip", wanted.display());
+    let inexact: Vec<&str> = hits.iter().filter(|reg| !reg.exact).map(|reg| reg.name.as_str()).collect();
+    if !inexact.is_empty() {
+        bail!(forget_hint::inexact_root(&wanted, &inexact));
     }
     let known: Vec<Known> =
         hits.iter().map(|reg| Known { name: reg.name.clone(), root: wanted.clone(), nickname: None }).collect();
@@ -238,9 +239,8 @@ fn name_from(regs: Vec<Registered>, ws_dir: &Path) -> Result<Option<String>> {
         Found::One(hit) => Ok(Some(hit.name.clone())),
         Found::None => Ok(None),
         Found::Many(hits) => {
-            let mut names: Vec<_> = hits.iter().map(|hit| hit.name.as_str()).collect();
-            names.sort_unstable();
-            bail!("{} is registered as more than one jj workspace: {}", wanted.display(), names.join(", "))
+            let names: Vec<_> = hits.iter().map(|hit| hit.name.as_str()).collect();
+            bail!(forget_hint::several_names(&wanted, &names))
         }
     }
 }
@@ -480,7 +480,14 @@ mod tests {
         assert_eq!(name_from(vec![exact], &dir).unwrap().as_deref(), Some("kept"));
         let inexact = Registered { name: "bad".into(), root: Some(dir.clone()), exact: false };
         let err = name_from(vec![inexact], &dir).unwrap_err().to_string();
-        assert_eq!(err, format!("refusing to delete {}: workspace root does not round-trip", dir.display()));
+        assert_eq!(
+            err,
+            format!(
+                "can't safely delete {path}: jj reports this workspace's path differently from how it appears on disk, \
+                 usually because the folder name isn't valid UTF-8. To remove it yourself:\n  jj workspace forget bad\n  then delete {path}",
+                path = dir.display()
+            )
+        );
     }
 
     #[test]
@@ -491,7 +498,11 @@ mod tests {
             Registered { name: "alpha".into(), root: Some(dir.clone()), exact: true },
         ];
         let err = name_from(regs, &dir).unwrap_err().to_string();
-        assert_eq!(err, "/worktrees/same is registered as more than one jj workspace: alpha, beta");
+        assert_eq!(
+            err,
+            "/worktrees/same is registered as more than one jj workspace (alpha, beta). \
+             Forget the one you don't want, then run destroy again:\n  jj workspace forget alpha\n  jj workspace forget beta"
+        );
     }
 
     fn matched_name<'a>(found: Found<'a>) -> std::result::Result<&'a str, proptest::test_runner::TestCaseError> {
@@ -606,10 +617,10 @@ mod tests {
             let mut names = [a.as_str(), b.as_str()];
             names.sort_unstable();
             let want = format!(
-                "{} is registered as more than one jj workspace: {}, {}",
+                "{} is registered as more than one jj workspace ({a}, {b}). Forget the one you don't want, then run destroy again:\n  jj workspace forget {a}\n  jj workspace forget {b}",
                 root.display(),
-                names[0],
-                names[1],
+                a = names[0],
+                b = names[1],
             );
             proptest::prop_assert_eq!(err, want);
         }

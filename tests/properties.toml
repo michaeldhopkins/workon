@@ -23,6 +23,7 @@ owed = []
   "parse_major_minor_needs_a_numeric_minor",
 ]
 "src/discover.rs" = ["is_strictly_inside_is_a_proper_component_prefix"]
+"src/forget_hint.rs" = ["one_sorted_forget_line_per_name", "a_quoted_word_unquotes_to_the_original"]
 "src/not_ready.rs" = ["only_n_or_no_keeps_the_session_closed"]
 "src/layout.rs" = [
   "a_valid_config_name_stays_inside_the_configs_dir",
