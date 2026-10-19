@@ -216,6 +216,23 @@ impl Drop for Stop {
     }
 }
 
+/// Waits for `marker` in the session, then returns what `history` printed.
+/// The typed command is echoed by the shell, so each command builds its marker
+/// with `%s` and the marker only exists in the command's output.
+fn wait_and_read(world: &World, proj: &Path, mux: &'static str, name: &str, marker: &str) -> String {
+    let shell = [("SHELL", "/bin/sh")];
+    let mut wait =
+        world.tui_with(proj, &["--mux", mux, "wait", "--for", marker, "--timeout", "8", "--name", name], &shell);
+    let waited = wait.wait_for_exit();
+    let wait_screen = wait.screen();
+    let mut history = world.tui_with(proj, &["--mux", mux, "history", "--lines", "20", "--name", name], &shell);
+    assert!(history.wait_for_exit(), "{}", history.screen());
+    let seen = history.screen();
+    assert!(waited, "wait for {marker} failed. history:\n{seen}\n---\n{wait_screen}");
+    assert!(seen.contains(marker), "history:\n{seen}");
+    seen
+}
+
 fn drive(mux: &'static str, bin: &Path) {
     let world = World::new();
     let proj = project(&world);
@@ -230,24 +247,16 @@ fn drive(mux: &'static str, bin: &Path) {
     let shell = [("SHELL", "/bin/sh")];
     let mut run = world.tui_with(
         &proj,
-        &["--mux", mux, "run", "--name", &name, "--config", "empty", "--command", "printf 'workon-marker\\n'"],
+        &["--mux", mux, "run", "--name", &name, "--config", "empty", "--command", "printf 'from-run-%s\\n' one"],
         &shell,
     );
     assert!(run.wait_for_exit(), "{}", run.screen());
+    wait_and_read(&world, &proj, mux, &name, "from-run-one");
 
-    let mut wait = world.tui_with(
-        &proj,
-        &["--mux", mux, "wait", "--for", "workon-marker", "--timeout", "8", "--name", &name],
-        &shell,
-    );
-    let waited = wait.wait_for_exit();
-    let wait_screen = wait.screen();
-
-    let mut history = world.tui_with(&proj, &["--mux", mux, "history", "--lines", "20", "--name", &name], &shell);
-    assert!(history.wait_for_exit(), "{}", history.screen());
-    let seen = history.screen();
-    assert!(waited, "wait failed. history:\n{seen}\n---\n{wait_screen}");
-    assert!(seen.contains("workon-marker"), "history:\n{seen}");
+    let mut send =
+        world.tui_with(&proj, &["--mux", mux, "send", "--name", &name, "printf 'from-send-%s\\n' two"], &shell);
+    assert!(send.wait_for_exit(), "{}", send.screen());
+    wait_and_read(&world, &proj, mux, &name, "from-send-two");
 }
 
 #[test]
