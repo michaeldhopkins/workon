@@ -183,10 +183,14 @@ pub(crate) fn first_fields(stdout: &str) -> Vec<String> {
     stdout.lines().filter_map(|line| line.split_whitespace().next().map(str::to_string)).collect()
 }
 
+/// The last `lines` of `text`. Whitespace-only rows under the cursor are the
+/// pane's unused height (`capture-pane` prints every row), not output.
 pub(crate) fn last_lines(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
-    let start = all.len().saturating_sub(lines);
-    all[start..].join("\n")
+    let end = all.iter().rposition(|line| !line.trim().is_empty()).map_or(0, |index| index + 1);
+    let kept = &all[..end];
+    let start = kept.len().saturating_sub(lines);
+    kept[start..].join("\n")
 }
 
 #[cfg(test)]
@@ -209,6 +213,16 @@ mod tests {
         assert_eq!(last_lines("a\nb\nc", 2), "b\nc");
         assert_eq!(last_lines("a\nb", 5), "a\nb");
         assert_eq!(last_lines("a\nb", 0), "");
+    }
+
+    #[test]
+    fn last_lines_drops_blank_rows_below_the_cursor() {
+        // tmux pads each unused row out to the pane width.
+        let pane = "printf 'workon-marker'\nworkon-marker\n$ \n        \n        \n";
+        assert_eq!(last_lines(pane, 20), "printf 'workon-marker'\nworkon-marker\n$ ");
+        assert_eq!(last_lines(pane, 1), "$ ");
+        assert_eq!(last_lines("a\n\nb\n\n", 20), "a\n\nb");
+        assert_eq!(last_lines("   \n\n", 5), "");
     }
 
     #[test]
