@@ -80,7 +80,26 @@ pub(crate) fn identity(project_dir: &Path, project_name: &str, ws_dir: &Path) ->
     } else {
         discover::ws_id_of(ws_dir, project_name)
     };
-    found.with_context(|| format!("{} is not named <project>-<ws_id> for project {project_name}", ws_dir.display()))
+    if let Some(name) = found {
+        return Ok(name);
+    }
+    // No registration left: only a direct child of ~/.worktrees keeps its own name.
+    if project_dir.join(".jj").is_dir()
+        && discover::is_worktree_dir(ws_dir)
+        && let Some(name) = ws_dir.file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty())
+    {
+        return Ok(name.to_string());
+    }
+    bail!("{} is not named <project>-<ws_id> for project {project_name}", ws_dir.display())
+}
+
+/// Jj's name at `ws_dir`, or `None` for an unregistered direct child of `~/.worktrees`.
+pub(crate) fn name_to_forget(project_dir: &Path, ws_dir: &Path) -> Result<Option<String>> {
+    let name = name_at_root(project_dir, ws_dir)?;
+    if name.is_some() || discover::is_worktree_dir(ws_dir) {
+        return Ok(name);
+    }
+    identity(project_dir, project_dir.file_name().and_then(|n| n.to_str()).unwrap_or(""), ws_dir).map(Some)
 }
 
 /// The single workspace `token` names: a jj registration, or a git-only worktree's
@@ -203,9 +222,7 @@ fn name_at_root(project_dir: &Path, ws_dir: &Path) -> Result<Option<String>> {
     name_from(list_registered(project_dir)?, ws_dir)
 }
 
-/// The registered name whose root is exactly `ws_dir`. An inexact root that
-/// canonicalizes here is a refusal: deleting would trust a path the parser
-/// could not prove.
+/// The one exact registration at `ws_dir`. Inexact or several names are a refusal.
 fn name_from(regs: Vec<Registered>, ws_dir: &Path) -> Result<Option<String>> {
     let wanted = canonical(ws_dir);
     let hits: Vec<&Registered> = regs
@@ -215,13 +232,17 @@ fn name_from(regs: Vec<Registered>, ws_dir: &Path) -> Result<Option<String>> {
     if hits.iter().any(|reg| !reg.exact) {
         bail!("refusing to delete {}: workspace root does not round-trip", wanted.display());
     }
-    // Two names for one directory are resolved in a later check. Neither is deleted.
     let known: Vec<Known> =
         hits.iter().map(|reg| Known { name: reg.name.clone(), root: wanted.clone(), nickname: None }).collect();
-    Ok(match find(&known, &Asked::Path(&wanted)) {
-        Found::One(hit) => Some(hit.name.clone()),
-        Found::None | Found::Many(_) => None,
-    })
+    match find(&known, &Asked::Path(&wanted)) {
+        Found::One(hit) => Ok(Some(hit.name.clone())),
+        Found::None => Ok(None),
+        Found::Many(hits) => {
+            let mut names: Vec<_> = hits.iter().map(|hit| hit.name.as_str()).collect();
+            names.sort_unstable();
+            bail!("{} is registered as more than one jj workspace: {}", wanted.display(), names.join(", "))
+        }
+    }
 }
 
 fn collect_known() -> Result<Vec<Known>> {
@@ -462,6 +483,17 @@ mod tests {
         assert_eq!(err, format!("refusing to delete {}: workspace root does not round-trip", dir.display()));
     }
 
+    #[test]
+    fn two_registrations_of_one_directory_are_refused() {
+        let dir = PathBuf::from("/worktrees/same");
+        let regs = vec![
+            Registered { name: "beta".into(), root: Some(dir.clone()), exact: true },
+            Registered { name: "alpha".into(), root: Some(dir.clone()), exact: true },
+        ];
+        let err = name_from(regs, &dir).unwrap_err().to_string();
+        assert_eq!(err, "/worktrees/same is registered as more than one jj workspace: alpha, beta");
+    }
+
     fn matched_name<'a>(found: Found<'a>) -> std::result::Result<&'a str, proptest::test_runner::TestCaseError> {
         match found {
             Found::One(hit) => Ok(hit.name.as_str()),
@@ -559,6 +591,27 @@ mod tests {
                 nickname: Some(nick.clone()),
             }];
             proptest::prop_assert_eq!(matched_name(find(&known, &Asked::Token(&nick)))?, registered.as_str());
+        }
+
+        /// Two registrations of one directory are a refusal, with the names in order.
+        #[test]
+        fn two_names_for_one_root_are_refused(a in "[a-z]{1,6}", b in "[a-z]{1,6}", dir in "[a-z]{1,8}") {
+            proptest::prop_assume!(a != b);
+            let root = PathBuf::from("/worktrees").join(&dir);
+            let regs = vec![
+                Registered { name: a.clone(), root: Some(root.clone()), exact: true },
+                Registered { name: b.clone(), root: Some(root.clone()), exact: true },
+            ];
+            let err = name_from(regs, &root).unwrap_err().to_string();
+            let mut names = [a.as_str(), b.as_str()];
+            names.sort_unstable();
+            let want = format!(
+                "{} is registered as more than one jj workspace: {}, {}",
+                root.display(),
+                names[0],
+                names[1],
+            );
+            proptest::prop_assert_eq!(err, want);
         }
 
         /// A name jj would quote is still the name, once the field is JSON.

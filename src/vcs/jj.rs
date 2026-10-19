@@ -326,14 +326,14 @@ impl Vcs for JjBackend {
         Ok(())
     }
 
-    fn forget_workspace(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Result<()> {
-        run_jj(project_dir, &["workspace", "forget", ws_id])?;
-        // Clean up the git worktree reference we created alongside the jj workspace.
+    fn forget_workspace(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
+        let Some(name) = crate::registered::name_to_forget(project_dir, ws_dir)? else { return Ok(()) };
+        run_jj(project_dir, &["workspace", "forget", &name])?;
         if let Some(git_dir) = absolute_git_dir(project_dir) {
-            let wt_dir = format!("{git_dir}/worktrees/{ws_id}");
+            let wt_dir = format!("{git_dir}/worktrees/{name}");
             let _ = std::fs::remove_dir_all(wt_dir);
         }
-        eprintln!("Forgot jj workspace {ws_id}");
+        eprintln!("Forgot jj workspace {name}");
         Ok(())
     }
 

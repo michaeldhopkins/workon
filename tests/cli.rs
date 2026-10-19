@@ -762,6 +762,87 @@ fn destroy_of_an_outside_registration_leaves_the_directory_and_registration() {
     assert!(destroyed.lines().all(|line| !line.starts_with("Forgot jj workspace")), "{destroyed}");
 }
 
+/// The registration was forgotten and the directory was not. A later destroy of
+/// that directory, inside `~/.worktrees`, removes the directory.
+#[test]
+fn destroy_finishes_a_forgotten_workspace_by_its_directory() {
+    let Some(repo) = JjRepo::new() else { return };
+    let dir = repo.world.worktrees().join("proj-feature");
+    let sibling = repo.world.worktrees().join("proj-other");
+    repo.add(&dir, "proj-feature");
+    repo.add(&sibling, "proj-other");
+    jj(&repo.proj, &["workspace", "forget", "proj-feature"]);
+    assert!(dir.exists(), "the fixture removed the directory");
+    assert!(!jj_names(&repo.proj).iter().any(|n| n == "proj-feature"));
+
+    let destroyed = repo
+        .world
+        .workon(&repo.proj)
+        .args(["destroy", "--no-save", dir.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let destroyed = String::from_utf8_lossy(&destroyed);
+    assert!(destroyed.lines().all(|line| !line.starts_with("Forgot jj workspace")), "{destroyed}");
+    assert_removed_soon(&dir);
+    assert!(sibling.exists(), "destroyed the sibling");
+    let names = jj_names(&repo.proj);
+    assert!(names.iter().any(|n| n == "proj-other"), "jj lost the sibling: {names:?}");
+    assert!(!names.iter().any(|n| n == "proj-feature"), "jj still has proj-feature: {names:?}");
+}
+
+/// A path inside a workspace is not the workspace. Destroy leaves that subdirectory.
+#[test]
+fn destroy_of_a_subdirectory_inside_a_workspace_leaves_it() {
+    let Some(repo) = JjRepo::new() else { return };
+    let dir = repo.world.worktrees().join("proj-feature");
+    repo.add(&dir, "proj-feature");
+    let nested = dir.join("src");
+    std::fs::create_dir(&nested).unwrap();
+
+    let destroyed = repo
+        .world
+        .workon(&repo.proj)
+        .args(["destroy", "--no-save", nested.to_str().unwrap()])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let destroyed = String::from_utf8_lossy(&destroyed);
+    assert!(destroyed.contains("is not named"), "{destroyed}");
+    assert!(nested.exists(), "deleted a subdirectory of the workspace: {destroyed}");
+    assert!(dir.exists(), "deleted the workspace: {destroyed}");
+    assert!(jj_names(&repo.proj).iter().any(|n| n == "proj-feature"), "registration was removed: {destroyed}");
+    assert!(destroyed.lines().all(|line| !line.starts_with("Forgot jj workspace")), "{destroyed}");
+}
+
+/// A forgotten registration outside `~/.worktrees` is not a directory destroy may remove.
+#[test]
+fn destroy_of_a_forgotten_outside_directory_leaves_it() {
+    let Some(repo) = JjRepo::new() else { return };
+    std::fs::create_dir_all(repo.world.worktrees()).unwrap();
+    let dir = repo.world.path().join("outside").join("extra");
+    repo.add(&dir, "extra");
+    jj(&repo.proj, &["workspace", "forget", "extra"]);
+    assert!(dir.exists(), "the fixture removed the directory");
+
+    let destroyed = repo
+        .world
+        .workon(&repo.proj)
+        .args(["destroy", "--no-save", dir.to_str().unwrap()])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let destroyed = String::from_utf8_lossy(&destroyed);
+    assert!(dir.exists(), "deleted the outside directory: {destroyed}");
+    assert!(destroyed.lines().all(|line| !line.starts_with("Forgot jj workspace")), "{destroyed}");
+}
+
 /// Issue #5, case 2. The directory and the jj registration are both
 /// `<project>-<name>`. Destroying that directory must forget the registered
 /// name, not the short name left after stripping the project prefix.

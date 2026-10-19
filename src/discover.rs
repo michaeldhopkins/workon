@@ -84,6 +84,18 @@ pub fn assert_under_worktrees(ws_dir: &Path) -> Result<()> {
     assert_under(&worktrees_dir()?, ws_dir)
 }
 
+/// A workon workspace is a direct child of `~/.worktrees`. A directory inside
+/// one is not a workspace, and destroy must not remove it.
+pub(crate) fn is_worktree_dir(ws_dir: &Path) -> bool {
+    worktrees_dir().ok().is_some_and(|root| is_direct_child(&root, ws_dir))
+}
+
+fn is_direct_child(worktrees: &Path, ws_dir: &Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(worktrees) else { return false };
+    let Ok(target) = std::fs::canonicalize(ws_dir) else { return false };
+    target.parent() == Some(root.as_path())
+}
+
 /// [`assert_under_worktrees`] against any root, so tests need not touch `$HOME`.
 fn assert_under(worktrees: &Path, ws_dir: &Path) -> Result<()> {
     let root = std::fs::canonicalize(worktrees).with_context(|| format!("{} does not exist", worktrees.display()))?;
@@ -145,6 +157,17 @@ mod tests {
             std::fs::create_dir_all(d).unwrap();
         }
         (tmp, root, ws, outside)
+    }
+
+    #[test]
+    fn is_direct_child_is_only_an_immediate_subdirectory() {
+        let (_tmp, root, ws, outside) = worktrees_fixture();
+        assert!(is_direct_child(&root, &ws), "a workspace directory");
+        let nested = ws.join("src");
+        std::fs::create_dir(&nested).unwrap();
+        assert!(!is_direct_child(&root, &nested), "a directory inside a workspace");
+        assert!(!is_direct_child(&root, &outside), "a directory beside the root");
+        assert!(!is_direct_child(&root, &root), "the worktrees root itself");
     }
 
     #[test]
