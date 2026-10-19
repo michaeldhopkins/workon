@@ -142,7 +142,7 @@ impl Config {
 /// The panic hook is silenced for the parse so the caught panic prints nothing.
 /// The hook is process-wide, so the swap is serialized, and a panic on another
 /// thread inside that window loses its message (not its effect).
-fn parse_kdl(src: &str) -> Result<KdlDocument> {
+pub(crate) fn parse_kdl(src: &str) -> Result<KdlDocument> {
     static HOOK_SWAP: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serialized = HOOK_SWAP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let hook = std::panic::take_hook();

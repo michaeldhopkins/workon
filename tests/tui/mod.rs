@@ -2,6 +2,8 @@
 //! or reads an answer from it. `tests/tui.toml` lists them; zellij is a stub that records
 //! how it was called (`support::Stubs`).
 
+mod mux;
+
 use crate::support::World;
 
 /// zellij's stub, answering as the default does and also doing `on_launch` (a shell

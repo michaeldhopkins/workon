@@ -123,6 +123,9 @@ pub struct Call {
 
 pub struct World {
     root: tempfile::TempDir,
+    /// Short on purpose. zellij refuses a socket path longer than 103 bytes, and
+    /// macOS's default temp directory already uses most of that.
+    sockets: tempfile::TempDir,
     pub stubs: Stubs,
 }
 
@@ -130,6 +133,15 @@ impl World {
     pub fn new() -> Self {
         let root = tempfile::tempdir().expect("a world");
         std::fs::create_dir_all(root.path().join("home")).expect("a home");
+        // An existing config skips zellij's first-run wizard, which would otherwise
+        // take focus and hide the pane `dump-screen` reads.
+        let zellij_cfg = root.path().join("home/.config/zellij");
+        std::fs::create_dir_all(&zellij_cfg).expect("a zellij config dir");
+        std::fs::write(zellij_cfg.join("config.kdl"), "default_shell \"/bin/sh\"\n").expect("a zellij config");
+        let sockets = tempfile::Builder::new().prefix("wz").tempdir_in("/tmp").expect("short sockets");
+        for name in ["zellij", "tmux", "zmx"] {
+            std::fs::create_dir_all(sockets.path().join(name)).expect("a socket dir");
+        }
         // workon commits rescued work, so the identity it commits under lives in the fake HOME.
         std::fs::write(
             root.path().join("home/.gitconfig"),
@@ -137,7 +149,12 @@ impl World {
              [commit]\n\tgpgsign = false\n",
         )
         .expect("a gitconfig");
-        Self { root, stubs: Stubs::new() }
+        Self { root, sockets, stubs: Stubs::new() }
+    }
+
+    /// Private multiplexer sockets for this world (`zellij`, `tmux`, or `zmx`).
+    pub fn socket_dir(&self, name: &str) -> PathBuf {
+        self.sockets.path().join(name)
     }
 
     /// The canonical root: macOS's temp dir is a symlink (`/var` -> `/private/var`), and
@@ -160,7 +177,9 @@ impl World {
             ("TERM".into(), "xterm-256color".into()),
             ("HOME".into(), self.home().display().to_string()),
             ("XDG_CONFIG_HOME".into(), self.home().join(".config").display().to_string()),
-            ("ZELLIJ_SOCKET_DIR".into(), self.path().join("zellij-sockets").display().to_string()),
+            ("ZELLIJ_SOCKET_DIR".into(), self.socket_dir("zellij").display().to_string()),
+            ("TMUX_TMPDIR".into(), self.socket_dir("tmux").display().to_string()),
+            ("ZMX_DIR".into(), self.socket_dir("zmx").display().to_string()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("PATH".into(), self.stubs.path()),
         ]
@@ -178,6 +197,11 @@ impl World {
     /// The built binary on a pseudo-terminal in `cwd`.
     pub fn tui(&self, cwd: &Path, args: &[&str]) -> pty::Tui {
         pty::Tui::spawn(self, args, cwd)
+    }
+
+    /// [`Self::tui`] plus environment the multiplexer should inherit (`SHELL`).
+    pub fn tui_with(&self, cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> pty::Tui {
+        pty::Tui::spawn_with(self, args, cwd, extra)
     }
 
     /// The real git, run by the test (not by workon), with the world's HOME.

@@ -9,8 +9,13 @@ const ZELLIJ_HINT: &str = "brew install zellij";
 /// `zellij` is always required; everything else is derived from `command="..."`
 /// occurrences in the layout content.
 pub fn check_all(layout: &str) -> Result<()> {
+    check_mux("zellij", ZELLIJ_HINT, layout)
+}
+
+/// `program` is the multiplexer. Layout commands are required on top of it.
+pub(crate) fn check_mux(program: &str, hint: &str, layout: &str) -> Result<()> {
     let mut problems = Vec::new();
-    check_dep("zellij", ZELLIJ_HINT, &mut problems);
+    check_dep(program, hint, &mut problems);
 
     for cmd in extract_commands(layout) {
         let hint = install_hint(&cmd);
@@ -185,6 +190,12 @@ pane command="opencode""#;
                 "  workon_fake_dep_def456 — not found. Install: brew install it".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn check_mux_names_a_missing_multiplexer() {
+        let err = check_mux("workon_fake_dep_abc123", "brew install tmux", "").unwrap_err().to_string();
+        assert!(err.contains("workon_fake_dep_abc123 — not found. Install: brew install tmux"), "{err}");
     }
 
     #[test]

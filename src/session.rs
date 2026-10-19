@@ -233,6 +233,12 @@ pub fn launch(
     working_dir: &Path,
     extra_env: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
+    // -w calls launch directly, so a non-zellij multiplexer is dispatched here
+    // as well as from the no-subcommand path in main.
+    if crate::mux::current() != crate::mux::MuxKind::Zellij {
+        return crate::mux::open_in_terminal(name, layout, working_dir, false, extra_env);
+    }
+
     // A stale socket left by a crashed server can wedge the new server's
     // startup. If our socket exists with no live server, remove it.
     preflight_socket(name);

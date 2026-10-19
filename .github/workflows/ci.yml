@@ -37,6 +37,9 @@ jobs:
       - name: cargo check
         run: cargo check --locked
 
+      - name: Install multiplexers
+        run: sh scripts/install-multiplexers.sh
+
       - name: cargo test
         run: cargo test --locked
 
@@ -166,5 +169,7 @@ jobs:
       - name: set up the Phoenix fixture's deps (so the cycle test runs)
         working-directory: tests/fixtures/phoenix
         run: mix local.hex --force && mix deps.get && mix compile
+      - name: Install multiplexers
+        run: sh scripts/install-multiplexers.sh
       - name: cargo test (DB-gated cycles run here)
         run: cargo test --locked

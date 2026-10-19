@@ -10,7 +10,7 @@
 # workon takes its git backend.
 programs = [
     "bundle", "createdb", "dotnet", "dropdb", "git", "id", "jj", "mise", "mix", "mysqladmin",
-    "npx", "php", "pgrep", "pkill", "ps", "rm", "zellij",
+    "npx", "php", "pgrep", "pkill", "ps", "rm", "tmux", "zellij", "zmx",
 ]
 
 # The commands the default layout (layouts/workon.kdl) runs in its panes. workon never runs
@@ -78,6 +78,18 @@ test = "tests/tui/mod.rs::not_ready_pause_enter_opens_the_session_anyway"
 [[pty]]
 what = "not-ready pause: n removes the workspace without launching, exit 3"
 test = "tests/tui/mod.rs::not_ready_pause_n_removes_the_workspace_without_launching"
+
+[[pty]]
+what = "zellij run, send, and history drive a real zellij in the background"
+test = "tests/tui/mux.rs::zellij_run_send_and_history"
+
+[[pty]]
+what = "tmux run, send, and history drive a real tmux in the background"
+test = "tests/tui/mux.rs::tmux_run_send_and_history"
+
+[[pty]]
+what = "zmx run, send, and history drive a real zmx in the background"
+test = "tests/tui/mux.rs::zmx_run_send_and_history"
 
 # How an answer to a prompt is read, with its unit test.
 [[key]]

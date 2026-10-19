@@ -72,6 +72,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/jj" --version
 
+      - name: Install multiplexers
+        run: sh scripts/install-multiplexers.sh
+
       # A PR diffs against its base; a push against the commit it replaced
       # (all-zeros for a new branch, so fall back to the first parent).
       - name: Compute diff
@@ -246,6 +249,9 @@ jobs:
           install -m755 "$tmp/jj" "$HOME/.local/bin/jj"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/jj" --version
+
+      - name: Install multiplexers
+        run: sh scripts/install-multiplexers.sh
 
       - name: Mutants
         run: |

@@ -12,6 +12,7 @@ mod forget_hint;
 pub mod home;
 pub mod layout;
 pub mod mise_env;
+pub mod mux;
 pub mod not_ready;
 pub mod provision;
 pub mod registered;

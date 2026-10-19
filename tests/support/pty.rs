@@ -25,6 +25,10 @@ pub struct Tui {
 
 impl Tui {
     pub fn spawn(world: &super::World, args: &[&str], cwd: &Path) -> Self {
+        Self::spawn_with(world, args, cwd, &[])
+    }
+
+    pub fn spawn_with(world: &super::World, args: &[&str], cwd: &Path, extra: &[(&str, &str)]) -> Self {
         let pair = native_pty_system()
             .openpty(PtySize { rows: ROWS, cols: COLS, pixel_width: 0, pixel_height: 0 })
             .expect("a pty");
@@ -32,6 +36,9 @@ impl Tui {
         cmd.env_clear();
         for (key, value) in world.env() {
             cmd.env(key, value);
+        }
+        for (key, value) in extra {
+            cmd.env(*key, *value);
         }
         // Already in world.env(); repeated here so the rules test can see it at the spawn.
         cmd.env("PATH", world.stubs.path());
