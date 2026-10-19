@@ -46,6 +46,7 @@ owed = []
   "path_selects_the_registered_name_not_the_directory",
   "a_prefixed_directory_does_not_match_its_stripped_suffix",
   "a_list_line_round_trips_including_an_empty_root",
+  "a_root_with_space_or_newline_round_trips",
   "a_nickname_selects_the_registered_name",
   "only_the_workspace_named_default_is_left_unreported",
 ]

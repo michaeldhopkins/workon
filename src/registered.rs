@@ -8,17 +8,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use vcs_runner::run_jj_utf8_ignore_wc;
+use vcs_runner::run_jj;
 
 use crate::discover;
 
 /// `jj` reads `\0` and `\n` as escapes. A real NUL in this string would split the
 /// argument before jj's template parser saw it.
-const LIST_TEMPLATE: &str = "name ++ \"\\0\" ++ if(root, root, \"\") ++ \"\\n\"";
+///
+/// Each record is the workspace name, a NUL, then `stringify(root).escape_json()`
+/// (or `null`), and a final NUL. The root is JSON, so a trailing space or an
+/// embedded newline stays in the string, and the record does not end in
+/// whitespace that a trimmed stdout would drop.
+const LIST_TEMPLATE: &str = "name ++ \"\\0\" ++ if(root, stringify(root).escape_json(), \"null\") ++ \"\\0\"";
 
 struct Registered {
     name: String,
     root: Option<PathBuf>,
+    /// The root field re-encodes to the bytes jj emitted. A root that does not
+    /// is never a directory we delete.
+    exact: bool,
 }
 
 struct Known {
@@ -132,16 +140,10 @@ pub(crate) fn listed_name(
     project_name.and_then(|project| discover::ws_id_of(ws_dir, project))
 }
 
-fn name_at_root(project_dir: &Path, ws_dir: &Path) -> Result<Option<String>> {
-    let wanted = canonical(ws_dir);
-    let known: Vec<Known> = list_registered(project_dir)?.into_iter().filter_map(known_at).collect();
-    Ok(match find(&known, &Asked::Path(&wanted)) {
-        Found::One(hit) => Some(hit.name.clone()),
-        Found::None | Found::Many(_) => None,
-    })
-}
-
 fn known_at(reg: Registered) -> Option<Known> {
+    if !reg.exact {
+        return None;
+    }
     Some(Known { name: reg.name, root: canonical(&reg.root?), nickname: None })
 }
 
@@ -149,23 +151,68 @@ fn list_registered(project: &Path) -> Result<Vec<Registered>> {
     if !project.join(".jj").is_dir() {
         return Ok(Vec::new());
     }
-    let output = run_jj_utf8_ignore_wc(project, &["--color=never", "workspace", "list", "-T", LIST_TEMPLATE])
+    // Not `run_jj_utf8`: that trims the whole stdout, which drops a trailing
+    // space on the last field. The bytes jj printed are the record.
+    let output = run_jj(project, &["--ignore-working-copy", "--color=never", "workspace", "list", "-T", LIST_TEMPLATE])
         .with_context(|| format!("jj workspace list in {}", project.display()))?;
-    Ok(parse_list(&output))
+    let stdout = String::from_utf8(output.stdout)
+        .with_context(|| format!("jj workspace list in {} was not utf-8", project.display()))?;
+    Ok(parse_list(&stdout))
 }
 
 fn parse_list(output: &str) -> Vec<Registered> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let (name, root) = line.split_once('\0')?;
-            if name.is_empty() {
-                return None;
-            }
-            let root = (!root.is_empty()).then(|| PathBuf::from(root));
-            Some(Registered { name: name.to_string(), root })
-        })
-        .collect()
+    let mut fields = output.split('\0');
+    let mut out = Vec::new();
+    while let (Some(name), Some(root_raw)) = (fields.next(), fields.next()) {
+        if name.is_empty() {
+            continue;
+        }
+        let Some((root, exact)) = parse_root_field(root_raw) else { continue };
+        out.push(Registered { name: name.to_string(), root, exact });
+    }
+    out
+}
+
+/// `raw` is one JSON root field, untrimmed. `None` when it is not JSON.
+/// `exact` is false when re-encoding the value is not `raw` (jj escaped it
+/// differently than we would), so the path is not safe to delete.
+fn parse_root_field(raw: &str) -> Option<(Option<PathBuf>, bool)> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    match value {
+        serde_json::Value::Null => Some((None, raw == "null")),
+        serde_json::Value::String(text) => {
+            let encoded = serde_json::to_string(&text).ok()?;
+            let exact = encoded == raw && Path::new(&text).to_str() == Some(text.as_str());
+            let root = (!text.is_empty()).then(|| PathBuf::from(text));
+            Some((root, exact))
+        }
+        _ => None,
+    }
+}
+
+fn name_at_root(project_dir: &Path, ws_dir: &Path) -> Result<Option<String>> {
+    name_from(list_registered(project_dir)?, ws_dir)
+}
+
+/// The registered name whose root is exactly `ws_dir`. An inexact root that
+/// canonicalizes here is a refusal: deleting would trust a path the parser
+/// could not prove.
+fn name_from(regs: Vec<Registered>, ws_dir: &Path) -> Result<Option<String>> {
+    let wanted = canonical(ws_dir);
+    let hits: Vec<&Registered> = regs
+        .iter()
+        .filter(|reg| reg.root.as_deref().is_some_and(|root| same_path(&canonical(root), &wanted)))
+        .collect();
+    if hits.iter().any(|reg| !reg.exact) {
+        bail!("refusing to delete {}: workspace root does not round-trip", wanted.display());
+    }
+    // Two names for one directory are resolved in a later check. Neither is deleted.
+    let known: Vec<Known> =
+        hits.iter().map(|reg| Known { name: reg.name.clone(), root: wanted.clone(), nickname: None }).collect();
+    Ok(match find(&known, &Asked::Path(&wanted)) {
+        Found::One(hit) => Some(hit.name.clone()),
+        Found::None | Found::Many(_) => None,
+    })
 }
 
 fn collect_known() -> Result<Vec<Known>> {
@@ -183,14 +230,12 @@ fn collect_known() -> Result<Vec<Known>> {
 
 fn add_jj_project(project: &Path, known: &mut Vec<Known>) -> Result<()> {
     for reg in list_registered(project)? {
-        let Some(root) = reg.root.as_deref().filter(|path| path.exists()) else {
-            continue;
-        };
-        let root = canonical(root);
-        if known.iter().any(|k| same_path(&k.root, &root)) {
+        let Some(mut hit) = known_at(reg) else { continue };
+        if !hit.root.exists() || known.iter().any(|k| same_path(&k.root, &hit.root)) {
             continue;
         }
-        known.push(Known { name: reg.name, root: root.clone(), nickname: crate::workspace::recorded_name(&root) });
+        hit.nickname = crate::workspace::recorded_name(&hit.root);
+        known.push(hit);
     }
     Ok(())
 }
@@ -248,6 +293,9 @@ fn classify(
 ) -> Result<()> {
     let in_scope = canonical(project).starts_with(cwd);
     for reg in list_registered(project)? {
+        if !reg.exact {
+            continue;
+        }
         if let Some(root) = managed_root(reg.root.as_deref(), worktrees) {
             names.insert(root, reg.name);
         } else if in_scope {
@@ -330,6 +378,55 @@ mod tests {
         assert!(!LIST_TEMPLATE.contains('\0'), "{LIST_TEMPLATE:?}");
     }
 
+    #[test]
+    fn a_root_keeps_a_trailing_space_and_an_embedded_newline() {
+        let spaced = "/work/trail ";
+        let newline = "/work/foo\nbar";
+        let text = format!(
+            "kept\0{}\0broken\0{}\0",
+            serde_json::to_string(spaced).unwrap(),
+            serde_json::to_string(newline).unwrap(),
+        );
+        // `run_jj_utf8` trims the whole buffer. A NUL after the last field keeps
+        // that trim from eating a trailing space; the space is inside the JSON.
+        assert_eq!(text.trim(), text);
+        let parsed = parse_list(text.trim());
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].root.as_deref().and_then(|p| p.to_str()), Some(spaced));
+        assert_eq!(parsed[1].root.as_deref().and_then(|p| p.to_str()), Some(newline));
+    }
+
+    #[test]
+    fn a_split_record_does_not_yield_a_partial_root() {
+        // A raw newline inside the root field, as `lines()` would see it.
+        let text = "plain\0\"/tmp/foo\nbar\"\0";
+        let parsed = parse_list(text);
+        let roots: Vec<&str> = parsed.iter().filter_map(|reg| reg.root.as_deref().and_then(|p| p.to_str())).collect();
+        assert!(!roots.contains(&"/tmp/foo"), "partial root: {roots:?}");
+        assert!(!roots.contains(&"\"/tmp/foo"), "partial root: {roots:?}");
+    }
+
+    #[test]
+    fn a_root_that_does_not_round_trip_is_not_exact() {
+        let text = "plain\0\"\\u002fwork\\u002ffoo\"\0";
+        let parsed = parse_list(text);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].root.as_deref().and_then(|p| p.to_str()), Some("/work/foo"));
+        assert!(!parsed[0].exact);
+    }
+
+    #[test]
+    fn an_exact_root_resolves_and_an_inexact_one_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap().join("ws");
+        std::fs::create_dir(&dir).unwrap();
+        let exact = Registered { name: "kept".into(), root: Some(dir.clone()), exact: true };
+        assert_eq!(name_from(vec![exact], &dir).unwrap().as_deref(), Some("kept"));
+        let inexact = Registered { name: "bad".into(), root: Some(dir.clone()), exact: false };
+        let err = name_from(vec![inexact], &dir).unwrap_err().to_string();
+        assert_eq!(err, format!("refusing to delete {}: workspace root does not round-trip", dir.display()));
+    }
+
     fn matched_name<'a>(found: Found<'a>) -> std::result::Result<&'a str, proptest::test_runner::TestCaseError> {
         match found {
             Found::One(hit) => Ok(hit.name.as_str()),
@@ -376,17 +473,41 @@ mod tests {
             root in "[a-z]{0,12}",
         ) {
             let (text, expected) = if root.is_empty() {
-                (format!("{name}\0\n"), None)
+                (format!("{name}\0null\0"), None)
             } else {
-                (format!("{name}\0/{root}\n"), Some(PathBuf::from(format!("/{root}"))))
+                let path = format!("/{root}");
+                (format!("{name}\0{}\0", serde_json::to_string(&path).unwrap()), Some(PathBuf::from(path)))
             };
             let parsed = parse_list(&text);
             proptest::prop_assert_eq!(parsed.len(), 1);
+            proptest::prop_assert!(parsed[0].exact);
             proptest::prop_assert_eq!(&parsed[0].name, &name);
             proptest::prop_assert_eq!(&parsed[0].root, &expected);
-            let noisy = format!("not a record\n{text}");
+            // A field that is not JSON is skipped, and does not swallow the next record.
+            let noisy = format!("not a record\0not-json\0{text}");
             proptest::prop_assert_eq!(parse_list(&noisy).len(), 1);
             proptest::prop_assert_eq!(&parse_list(&noisy)[0].name, &name);
+        }
+
+        /// The bug: a trailing space or a newline in the root must come back as
+        /// that exact path, and the record must still be exact enough to delete.
+        #[test]
+        fn a_root_with_space_or_newline_round_trips(
+            name in "[a-z][a-z0-9-]{0,8}",
+            body in "[a-z]{0,8}",
+            spaces in 0usize..3,
+            newline in proptest::bool::ANY,
+        ) {
+            let mut root = format!("/{body}{}", " ".repeat(spaces));
+            if newline {
+                root.push('\n');
+                root.push_str("more");
+            }
+            let text = format!("{name}\0{}\0", serde_json::to_string(&root).unwrap());
+            let parsed = parse_list(&text);
+            proptest::prop_assert_eq!(parsed.len(), 1);
+            proptest::prop_assert!(parsed[0].exact);
+            proptest::prop_assert_eq!(parsed[0].root.as_deref().and_then(|p| p.to_str()), Some(root.as_str()));
         }
 
         #[test]
