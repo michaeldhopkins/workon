@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use vcs_runner::{Cmd, RunError};
 
 use super::{last_lines, panes, run, Open};
@@ -52,7 +52,7 @@ impl super::Multiplexer for Tmux {
         let focused = panes::focused_index(&leaves);
         for (index, leaf) in leaves.iter().enumerate() {
             let args = pane_args(open.name, open.dir, open.extra_env, leaf, index == 0);
-            run(self.cmd().args(args)).with_context(|| format!("failed to create tmux session '{}'", open.name))?;
+            run(self.cmd().args(args))?;
         }
         if focused != 0 {
             let target = format!("{}0.{focused}", target(open.name));
@@ -62,34 +62,27 @@ impl super::Multiplexer for Tmux {
     }
 
     fn send_once(&self, name: &str, text: &str) -> Result<()> {
-        run(self.cmd().args(["send-keys", "-t", target(name).as_str(), "-l", "--", text]))
-            .with_context(|| format!("failed to type into tmux session '{name}'"))?;
-        run(self.cmd().args(["send-keys", "-t", target(name).as_str(), "Enter"]))
-            .with_context(|| format!("failed to send Enter to tmux session '{name}'"))?;
+        run(self.cmd().args(["send-keys", "-t", target(name).as_str(), "-l", "--", text]))?;
+        run(self.cmd().args(["send-keys", "-t", target(name).as_str(), "Enter"]))?;
         Ok(())
     }
 
     fn history(&self, name: &str, lines: usize) -> Result<String> {
         let args = capture_args(name, lines);
-        let out = run(self.cmd().args(args)).with_context(|| format!("failed to read tmux session '{name}'"))?;
+        let out = run(self.cmd().args(args))?;
         Ok(last_lines(&out.stdout_lossy(), lines))
     }
 
     fn kill(&self, name: &str) -> Result<()> {
-        run(self.cmd().args(["kill-session", "-t", target(name).as_str()]))
-            .with_context(|| format!("failed to kill tmux session '{name}'"))?;
+        run(self.cmd().args(["kill-session", "-t", target(name).as_str()]))?;
         Ok(())
     }
 
     fn attach(&self, name: &str, dir: &Path) -> Result<()> {
-        let status = std::process::Command::new("tmux")
+        std::process::Command::new("tmux")
             .args(["attach-session", "-t", target(name).as_str()])
             .current_dir(dir)
-            .status()
-            .context("failed to attach to tmux session")?;
-        if !status.success() {
-            bail!("tmux exited {status} while attached to session '{name}'");
-        }
+            .status()?;
         Ok(())
     }
 }

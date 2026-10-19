@@ -4,7 +4,7 @@
 //! nested panes, so nothing inside one runs. A pane whose children include
 //! panes is a container. Anything else that is a pane is a shell.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use kdl::KdlNode;
 
 use crate::layout;
@@ -28,7 +28,7 @@ impl Leaf {
 /// `layout` is the KDL workon already parsed and wrote back out. A document
 /// that does not parse is an error. The panic guard lives in [`layout::parse_kdl`].
 pub fn leaves(layout_src: &str) -> Result<Vec<Leaf>> {
-    let doc = layout::parse_kdl(layout_src).context("layout is not valid KDL")?;
+    let doc = layout::parse_kdl(layout_src)?;
     let mut out = Vec::new();
     walk(doc.nodes(), &mut out);
     Ok(out)

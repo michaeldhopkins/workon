@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use vcs_runner::Cmd;
 
 use super::{last_lines, run, Open};
@@ -21,8 +21,7 @@ impl Zellij {
     /// older zellij). JSON that lists no terminal yet is an error when `required`,
     /// so sending can wait for the shell; reading can still fall back.
     fn terminal_pane(&self, name: &str, required: bool) -> Result<String> {
-        let out = run(self.cmd().args(["--session", name, "action", "list-panes", "--json"]))
-            .with_context(|| format!("failed to list panes of zellij session '{name}'"))?;
+        let out = run(self.cmd().args(["--session", name, "action", "list-panes", "--json"]))?;
         match pane_target(&out.stdout_lossy()) {
             PaneTarget::Id(id) => Ok(id),
             PaneTarget::Fallback => Ok("terminal_0".to_string()),
@@ -36,9 +35,15 @@ impl super::Multiplexer for Zellij {
     fn exists(&self, name: &str) -> Result<bool> {
         let result =
             self.cmd().args(["list-sessions", "--no-formatting"]).run().map(|out| out.stdout_lossy().into_owned());
+        // A hung zellij is reported as the timeout it is.
+        if let Err(err) = &result
+            && err.is_timeout()
+        {
+            return result.map(|_| false).map_err(Into::into);
+        }
         match read_listing(name, result)? {
             Listing::Found(found) => Ok(found),
-            Listing::Hung => bail!("zellij did not answer list-sessions"),
+            Listing::Hung => Ok(false),
         }
     }
 
@@ -47,7 +52,6 @@ impl super::Multiplexer for Zellij {
         match result {
             Ok(out) => Ok(super::first_fields(&out.stdout_lossy())),
             Err(err) if err.stderr().is_some_and(|text| text.contains("No active zellij sessions")) => Ok(Vec::new()),
-            Err(err) if err.is_timeout() => bail!("zellij did not answer list-sessions"),
             Err(err) => Err(err.into()),
         }
     }
@@ -59,7 +63,7 @@ impl super::Multiplexer for Zellij {
         let args = create_args(open.name, open.layout_path, open.dir);
         let mut cmd = self.cmd();
         cmd = cmd.args(args).envs(open.extra_env.iter().map(|(k, v)| (k.clone(), v.clone())));
-        run(cmd).with_context(|| format!("failed to create zellij session '{}'", open.name))?;
+        run(cmd)?;
         Ok(())
     }
 
@@ -67,35 +71,24 @@ impl super::Multiplexer for Zellij {
         let pane = self.terminal_pane(name, true)?;
         // `write-chars` goes to that pane. `paste` follows focus, and a floating
         // plugin (the first-run wizard) would swallow it.
-        run(self.cmd().args(["--session", name, "action", "write-chars", "--pane-id", &pane, "--", text]))
-            .with_context(|| format!("failed to type into zellij session '{name}'"))?;
-        run(self.cmd().args(["--session", name, "action", "send-keys", "--pane-id", &pane, "Enter"]))
-            .with_context(|| format!("failed to send Enter to zellij session '{name}'"))?;
+        run(self.cmd().args(["--session", name, "action", "write-chars", "--pane-id", &pane, "--", text]))?;
+        run(self.cmd().args(["--session", name, "action", "send-keys", "--pane-id", &pane, "Enter"]))?;
         Ok(())
     }
 
     fn history(&self, name: &str, lines: usize) -> Result<String> {
         let pane = self.terminal_pane(name, false)?;
-        let out = run(self.cmd().args(["--session", name, "action", "dump-screen", "--pane-id", &pane, "--full"]))
-            .with_context(|| format!("failed to read zellij session '{name}'"))?;
+        let out = run(self.cmd().args(["--session", name, "action", "dump-screen", "--pane-id", &pane, "--full"]))?;
         Ok(last_lines(&out.stdout_lossy(), lines))
     }
 
     fn kill(&self, name: &str) -> Result<()> {
-        run(self.cmd().args(["delete-session", name, "--force"]))
-            .with_context(|| format!("failed to delete zellij session '{name}'"))?;
+        run(self.cmd().args(["delete-session", name, "--force"]))?;
         Ok(())
     }
 
     fn attach(&self, name: &str, dir: &Path) -> Result<()> {
-        let status = std::process::Command::new("zellij")
-            .args(["attach", name])
-            .current_dir(dir)
-            .status()
-            .context("failed to attach to zellij session")?;
-        if !status.success() {
-            bail!("zellij exited {status} while attached to session '{name}'");
-        }
+        std::process::Command::new("zellij").args(["attach", name]).current_dir(dir).status()?;
         Ok(())
     }
 }

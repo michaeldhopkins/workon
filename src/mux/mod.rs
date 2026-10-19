@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use vcs_runner::{Cmd, RunOutput};
 
 pub use kind::{parse_mux, MuxKind};
@@ -87,7 +87,7 @@ pub fn open_in_terminal(
     force_new: bool,
     extra_env: &HashMap<String, String>,
 ) -> Result<()> {
-    let layout = std::fs::read_to_string(layout_path).with_context(|| format!("reading {}", layout_path.display()))?;
+    let layout = std::fs::read_to_string(layout_path)?;
     let mux = backend();
     if force_new && mux.exists(name)? {
         mux.kill(name)?;
@@ -106,7 +106,7 @@ pub fn run_background(
     extra_env: &HashMap<String, String>,
     command: Option<&str>,
 ) -> Result<()> {
-    let layout = std::fs::read_to_string(layout_path).with_context(|| format!("reading {}", layout_path.display()))?;
+    let layout = std::fs::read_to_string(layout_path)?;
     let mux = backend();
     if !mux.exists(name)? {
         mux.ensure(&Open { name, dir, layout_path, layout: &layout, extra_env })?;

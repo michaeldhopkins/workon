@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use vcs_runner::Cmd;
 
 use super::{last_lines, panes, run, Open};
@@ -27,7 +27,7 @@ impl super::Multiplexer for Zmx {
     }
 
     fn list(&self) -> Result<Vec<String>> {
-        let out = run(self.cmd().args(["list", "--short"])).context("failed to list zmx sessions")?;
+        let out = run(self.cmd().args(["list", "--short"]))?;
         Ok(super::first_fields(&out.stdout_lossy()))
     }
 
@@ -40,38 +40,28 @@ impl super::Multiplexer for Zmx {
         let args = run_args(open.name, &leaf);
         let mut cmd = self.cmd();
         cmd = cmd.args(args).envs(open.extra_env.iter().map(|(k, v)| (k.clone(), v.clone())));
-        run(cmd).with_context(|| format!("failed to create zmx session '{}'", open.name))?;
+        run(cmd)?;
         Ok(())
     }
 
     fn send_once(&self, name: &str, text: &str) -> Result<()> {
         let args = send_args(name, text);
-        run(self.cmd().args(args)).with_context(|| format!("failed to type into zmx session '{name}'"))?;
+        run(self.cmd().args(args))?;
         Ok(())
     }
 
     fn history(&self, name: &str, lines: usize) -> Result<String> {
-        let out =
-            run(self.cmd().args(["history", name])).with_context(|| format!("failed to read zmx session '{name}'"))?;
+        let out = run(self.cmd().args(["history", name]))?;
         Ok(last_lines(&out.stdout_lossy(), lines))
     }
 
     fn kill(&self, name: &str) -> Result<()> {
-        run(self.cmd().args(["kill", name, "--force"]))
-            .with_context(|| format!("failed to kill zmx session '{name}'"))?;
+        run(self.cmd().args(["kill", name, "--force"]))?;
         Ok(())
     }
 
     fn attach(&self, name: &str, dir: &Path) -> Result<()> {
-        let status = std::process::Command::new("zmx")
-            .args(["attach", name])
-            .env_remove("ZMX_SESSION")
-            .current_dir(dir)
-            .status()
-            .context("failed to attach to zmx session")?;
-        if !status.success() {
-            bail!("zmx exited {status} while attached to session '{name}'");
-        }
+        std::process::Command::new("zmx").args(["attach", name]).env_remove("ZMX_SESSION").current_dir(dir).status()?;
         Ok(())
     }
 }

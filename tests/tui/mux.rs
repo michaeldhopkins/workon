@@ -305,7 +305,8 @@ fn tmux_matches_session_names_exactly() {
         .failure()
         .stderr(predicate::str::contains(format!("session '{prefix}' is not running")));
 
-    let mut send = world.tui_with(&proj, &["--mux", "tmux", "send", "--name", &dotted, "printf 'dot-%s\\n' ok"], &shell);
+    let mut send =
+        world.tui_with(&proj, &["--mux", "tmux", "send", "--name", &dotted, "printf 'dot-%s\\n' ok"], &shell);
     assert!(send.wait_for_exit(), "{}", send.screen());
     wait_and_read(&world, &proj, "tmux", &dotted, "dot-ok");
 }
