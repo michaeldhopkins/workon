@@ -15,16 +15,17 @@ use crate::discover;
 /// `jj` reads `\0` and `\n` as escapes. A real NUL in this string would split the
 /// argument before jj's template parser saw it.
 ///
-/// Each record is the workspace name, a NUL, then `stringify(root).escape_json()`
-/// (or `null`), and a final NUL. The root is JSON, so a trailing space or an
-/// embedded newline stays in the string, and the record does not end in
-/// whitespace that a trimmed stdout would drop.
-const LIST_TEMPLATE: &str = "name ++ \"\\0\" ++ if(root, stringify(root).escape_json(), \"null\") ++ \"\\0\"";
+/// Each record is `name.escape_json()`, a NUL, then `stringify(root).escape_json()`
+/// (or `null`), and a final NUL. A `RefSymbol` whose display form is quoted
+/// (`my workspace`, `feat@v2`) comes back as the name jj registered. The root
+/// is JSON, so a trailing space or an embedded newline stays in the string.
+const LIST_TEMPLATE: &str =
+    "name.escape_json() ++ \"\\0\" ++ if(root, stringify(root).escape_json(), \"null\") ++ \"\\0\"";
 
 struct Registered {
     name: String,
     root: Option<PathBuf>,
-    /// The root field re-encodes to the bytes jj emitted. A root that does not
+    /// Both fields re-encode to the bytes jj emitted. A field that does not
     /// is never a directory we delete.
     exact: bool,
 }
@@ -163,14 +164,22 @@ fn list_registered(project: &Path) -> Result<Vec<Registered>> {
 fn parse_list(output: &str) -> Vec<Registered> {
     let mut fields = output.split('\0');
     let mut out = Vec::new();
-    while let (Some(name), Some(root_raw)) = (fields.next(), fields.next()) {
+    while let (Some(name_raw), Some(root_raw)) = (fields.next(), fields.next()) {
+        let Some((name, name_exact)) = parse_string_field(name_raw) else { continue };
         if name.is_empty() {
             continue;
         }
-        let Some((root, exact)) = parse_root_field(root_raw) else { continue };
-        out.push(Registered { name: name.to_string(), root, exact });
+        let Some((root, root_exact)) = parse_root_field(root_raw) else { continue };
+        out.push(Registered { name, root, exact: name_exact && root_exact });
     }
     out
+}
+
+/// One JSON string field, untrimmed. `exact` when re-encoding equals `raw`.
+fn parse_string_field(raw: &str) -> Option<(String, bool)> {
+    let serde_json::Value::String(text) = serde_json::from_str(raw).ok()? else { return None };
+    let encoded = serde_json::to_string(&text).ok()?;
+    Some((text, encoded == raw))
 }
 
 /// `raw` is one JSON root field, untrimmed. `None` when it is not JSON.
@@ -374,6 +383,7 @@ mod tests {
 
     #[test]
     fn list_template_contains_the_two_character_nul_escape() {
+        assert!(LIST_TEMPLATE.contains("name.escape_json()"), "{LIST_TEMPLATE:?}");
         assert!(LIST_TEMPLATE.contains("\\0"), "{LIST_TEMPLATE:?}");
         assert!(!LIST_TEMPLATE.contains('\0'), "{LIST_TEMPLATE:?}");
     }
@@ -383,8 +393,10 @@ mod tests {
         let spaced = "/work/trail ";
         let newline = "/work/foo\nbar";
         let text = format!(
-            "kept\0{}\0broken\0{}\0",
+            "{}\0{}\0{}\0{}\0",
+            serde_json::to_string("kept").unwrap(),
             serde_json::to_string(spaced).unwrap(),
+            serde_json::to_string("broken").unwrap(),
             serde_json::to_string(newline).unwrap(),
         );
         // `run_jj_utf8` trims the whole buffer. A NUL after the last field keeps
@@ -407,9 +419,30 @@ mod tests {
     }
 
     #[test]
+    fn a_name_with_a_space_or_at_comes_back_unquoted() {
+        for name in ["my workspace", "feat@v2"] {
+            let text = format!(
+                "{}\0{}\0",
+                serde_json::to_string(name).unwrap(),
+                serde_json::to_string("/work/place").unwrap(),
+            );
+            let parsed = parse_list(&text);
+            assert_eq!(parsed.len(), 1, "{name}");
+            assert_eq!(parsed[0].name, name, "{name}");
+            assert!(parsed[0].exact, "{name}");
+        }
+        // `\u0040` decodes to `@` and re-encodes as `@`, so the name is not exact.
+        let escaped = format!("\"feat\\u0040v2\"\0{}\0", serde_json::to_string("/work/place").unwrap());
+        let parsed = parse_list(&escaped);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "feat@v2");
+        assert!(!parsed[0].exact);
+    }
+
+    #[test]
     fn a_root_that_does_not_round_trip_is_not_exact() {
-        let text = "plain\0\"\\u002fwork\\u002ffoo\"\0";
-        let parsed = parse_list(text);
+        let text = format!("{}\0\"\\u002fwork\\u002ffoo\"\0", serde_json::to_string("plain").unwrap());
+        let parsed = parse_list(&text);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].root.as_deref().and_then(|p| p.to_str()), Some("/work/foo"));
         assert!(!parsed[0].exact);
@@ -472,11 +505,12 @@ mod tests {
             name in "[a-z][a-z0-9-]{0,12}",
             root in "[a-z]{0,12}",
         ) {
+            let name_json = serde_json::to_string(&name).unwrap();
             let (text, expected) = if root.is_empty() {
-                (format!("{name}\0null\0"), None)
+                (format!("{name_json}\0null\0"), None)
             } else {
                 let path = format!("/{root}");
-                (format!("{name}\0{}\0", serde_json::to_string(&path).unwrap()), Some(PathBuf::from(path)))
+                (format!("{name_json}\0{}\0", serde_json::to_string(&path).unwrap()), Some(PathBuf::from(path)))
             };
             let parsed = parse_list(&text);
             proptest::prop_assert_eq!(parsed.len(), 1);
@@ -503,7 +537,11 @@ mod tests {
                 root.push('\n');
                 root.push_str("more");
             }
-            let text = format!("{name}\0{}\0", serde_json::to_string(&root).unwrap());
+            let text = format!(
+                "{}\0{}\0",
+                serde_json::to_string(&name).unwrap(),
+                serde_json::to_string(&root).unwrap()
+            );
             let parsed = parse_list(&text);
             proptest::prop_assert_eq!(parsed.len(), 1);
             proptest::prop_assert!(parsed[0].exact);
@@ -519,6 +557,22 @@ mod tests {
                 nickname: Some(nick.clone()),
             }];
             proptest::prop_assert_eq!(matched_name(find(&known, &Asked::Token(&nick)))?, registered.as_str());
+        }
+
+        /// A name jj would quote is still the name, once the field is JSON.
+        #[test]
+        fn a_json_name_round_trips(name in "[a-z @\"\\\\]{1,12}", root in "[a-z]{1,8}") {
+            let path = format!("/{root}");
+            let text = format!(
+                "{}\0{}\0",
+                serde_json::to_string(&name).unwrap(),
+                serde_json::to_string(&path).unwrap(),
+            );
+            let parsed = parse_list(&text);
+            proptest::prop_assert_eq!(parsed.len(), 1);
+            proptest::prop_assert!(parsed[0].exact);
+            proptest::prop_assert_eq!(&parsed[0].name, &name);
+            proptest::prop_assert_eq!(parsed[0].root.as_deref().and_then(|p| p.to_str()), Some(path.as_str()));
         }
 
         /// `default` is the one name every repo already has. It is never reported,

@@ -326,16 +326,15 @@ impl Vcs for JjBackend {
         Ok(())
     }
 
-    fn forget_workspace(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) {
-        let _ = run_jj(project_dir, &["workspace", "forget", ws_id]);
-
+    fn forget_workspace(&self, ws_id: &str, project_dir: &Path, _ws_dir: &Path) -> Result<()> {
+        run_jj(project_dir, &["workspace", "forget", ws_id])?;
         // Clean up the git worktree reference we created alongside the jj workspace.
         if let Some(git_dir) = absolute_git_dir(project_dir) {
             let wt_dir = format!("{git_dir}/worktrees/{ws_id}");
             let _ = std::fs::remove_dir_all(wt_dir);
         }
-
         eprintln!("Forgot jj workspace {ws_id}");
+        Ok(())
     }
 
     fn ignore_generated_file(&self, project_dir: &Path, ws_dir: &Path, relpath: &str) {
@@ -629,7 +628,7 @@ mod tests {
         let git_entry = repo.join(".git/worktrees/ws-gone");
         std::fs::create_dir_all(&git_entry).unwrap();
 
-        JjBackend.forget_workspace("ws-gone", &repo, &ws);
+        JjBackend.forget_workspace("ws-gone", &repo, &ws).unwrap();
 
         assert!(!workspace_names(&repo).contains("ws-gone"), "{}", workspace_names(&repo));
         assert!(!git_entry.exists());

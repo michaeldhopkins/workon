@@ -36,7 +36,7 @@ pub trait Vcs: Send + Sync {
 
     /// Bookmark/branch the unsaved in-stack work under `workon/<ws_id>`.
     fn save_work(&self, ws_id: &str, base: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
-    fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path);
+    fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()>;
 
     /// One-line `<commit-id>  <desc>` rows for non-empty commits that **this
     /// workspace** stranded off its stack and that are still unsaved (no
@@ -146,7 +146,9 @@ mod tests {
         fn save_work(&self, _: &str, _: &str, _: &Path, _: &Path) -> Result<()> {
             Ok(())
         }
-        fn forget_workspace(&self, _: &str, _: &Path, _: &Path) {}
+        fn forget_workspace(&self, _: &str, _: &Path, _: &Path) -> Result<()> {
+            Ok(())
+        }
         fn ignore_generated_file(&self, _: &Path, _: &Path, _: &str) {}
     }
 

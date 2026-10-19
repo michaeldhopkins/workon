@@ -104,8 +104,8 @@ impl Vcs for PinnedBase {
     fn save_work(&self, ws_id: &str, base: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
         self.inner.save_work(ws_id, base, project_dir, ws_dir)
     }
-    fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) {
-        self.inner.forget_workspace(ws_id, project_dir, ws_dir);
+    fn forget_workspace(&self, ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
+        self.inner.forget_workspace(ws_id, project_dir, ws_dir)
     }
     fn stranded_work(&self, ws_id: &str, base: &str, project_dir: &Path, ws_dir: &Path) -> Vec<String> {
         self.inner.stranded_work(ws_id, base, project_dir, ws_dir)

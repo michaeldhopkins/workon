@@ -411,7 +411,7 @@ fn teardown(ws: &Workspace, session_id: Option<&str>, save: SaveMode, vcs: &dyn 
         }
     }
 
-    vcs.forget_workspace(&ws.ws_id, &ws.project_dir, &ws.ws_dir);
+    vcs.forget_workspace(&ws.ws_id, &ws.project_dir, &ws.ws_dir)?;
 
     let mut dropped = Vec::new();
     for resource in &ws.resources {

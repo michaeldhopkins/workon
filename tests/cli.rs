@@ -612,6 +612,69 @@ fn listed_workspace_with_an_unprefixed_directory_can_be_pathed_and_destroyed() {
     assert!(!jj_names(&repo.proj).iter().any(|n| n == "odd"), "jj still has odd: {:?}", jj_names(&repo.proj));
 }
 
+/// A jj workspace name with a space is a `RefSymbol`. `list` quotes it, and
+/// `forget` has to be given the name without those quotes.
+#[test]
+fn destroy_forgets_a_workspace_whose_name_has_a_space() {
+    let Some(repo) = JjRepo::new() else { return };
+    let dir = repo.world.worktrees().join("spaced");
+    repo.add(&dir, "my workspace");
+
+    let path =
+        repo.world.workon(&repo.proj).args(["path", "my workspace"]).assert().success().get_output().stdout.clone();
+    assert_eq!(String::from_utf8_lossy(&path).trim(), dir.to_str().unwrap());
+
+    let destroyed = repo
+        .world
+        .workon(&repo.proj)
+        .args(["destroy", "--no-save", dir.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let destroyed = String::from_utf8_lossy(&destroyed);
+    assert!(destroyed.lines().any(|line| line == "Forgot jj workspace my workspace"), "{destroyed}");
+    let listed = jj(
+        &repo.proj,
+        &["--ignore-working-copy", "--color=never", "workspace", "list", "-T", "name.escape_json() ++ \"\\n\""],
+    );
+    assert!(!listed.lines().any(|line| line == "\"my workspace\""), "jj still has the workspace:\n{listed}");
+}
+
+/// `jj workspace forget` failed. The directory and the registration stay, and
+/// workon does not say it forgot the workspace.
+#[test]
+fn destroy_leaves_the_directory_when_jj_forget_fails() {
+    let Some(repo) = JjRepo::new() else { return };
+    let dir = repo.world.worktrees().join("proj-feature");
+    repo.add(&dir, "proj-feature");
+    let bin = jj_bin().expect("jj");
+    repo.world.stubs.set(
+        "jj",
+        &format!(
+            "if [ \"$1\" = workspace ] && [ \"$2\" = forget ]; then echo 'Error: forget failed' >&2; exit 1; fi\n\
+             exec '{}' \"$@\"",
+            bin.display()
+        ),
+    );
+
+    let destroyed = repo
+        .world
+        .workon(&repo.proj)
+        .args(["destroy", "--no-save", dir.to_str().unwrap()])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let destroyed = String::from_utf8_lossy(&destroyed);
+    assert!(destroyed.contains("forget failed"), "{destroyed}");
+    assert!(destroyed.lines().all(|line| !line.starts_with("Forgot jj workspace")), "{destroyed}");
+    assert!(dir.exists(), "deleted the directory after forget failed");
+    assert!(jj_names(&repo.proj).iter().any(|n| n == "proj-feature"), "registration was removed");
+}
+
 /// Issue #5, case 2. The directory and the jj registration are both
 /// `<project>-<name>`. Destroying that directory must forget the registered
 /// name, not the short name left after stripping the project prefix.

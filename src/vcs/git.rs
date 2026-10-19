@@ -139,9 +139,10 @@ impl Vcs for GitBackend {
         Ok(())
     }
 
-    fn forget_workspace(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) {
+    fn forget_workspace(&self, _ws_id: &str, project_dir: &Path, ws_dir: &Path) -> Result<()> {
         let _ = run_git(project_dir, &["worktree", "remove", "--force", &path_str(ws_dir)]);
         eprintln!("Removed git worktree");
+        Ok(())
     }
 
     fn ignore_generated_file(&self, project_dir: &Path, _ws_dir: &Path, relpath: &str) {
@@ -343,7 +344,7 @@ mod tests {
         backend.create_workspace(&repo, &ws_dir, "ws-test", "master").unwrap();
         assert!(ws_dir.join("README.md").exists());
 
-        backend.forget_workspace("ws-test", &repo, &ws_dir);
+        backend.forget_workspace("ws-test", &repo, &ws_dir).unwrap();
     }
 
     /// The git analog of the jj no-commits guard: when the trunk ref can't be
@@ -418,7 +419,7 @@ mod tests {
 
         assert!(ws_dir.join("README.md").exists());
 
-        backend.forget_workspace("ws-test", &repo, &ws_dir);
+        backend.forget_workspace("ws-test", &repo, &ws_dir).unwrap();
         assert!(!ws_dir.exists());
     }
 
@@ -495,7 +496,7 @@ mod tests {
         let branches = String::from_utf8_lossy(&output.stdout);
         assert!(branches.contains("workon/ws-abc123"), "branch should exist in main repo");
 
-        backend.forget_workspace("ws-abc123", &repo, &ws_dir);
+        backend.forget_workspace("ws-abc123", &repo, &ws_dir).unwrap();
     }
 
     fn git_c(dir: &Path, args: &[&str]) {
@@ -527,7 +528,7 @@ mod tests {
             "unnamed committed work should be detected, got {changed:?}"
         );
 
-        backend.forget_workspace("ws-x", &repo, &ws);
+        backend.forget_workspace("ws-x", &repo, &ws).unwrap();
     }
 
     /// Branch-aware: committed work that's been put on a branch is saved, so it
@@ -548,7 +549,7 @@ mod tests {
 
         assert!(backend.changed_files("ws-x", &base, &repo, &ws).is_empty(), "work on a branch is saved");
 
-        backend.forget_workspace("ws-x", &repo, &ws);
+        backend.forget_workspace("ws-x", &repo, &ws).unwrap();
     }
 
     /// save_work must handle a clean tree (work already committed) without
@@ -572,7 +573,7 @@ mod tests {
         let branch_sha = run_git_utf8(&repo, &["rev-parse", "workon/ws-y"]).unwrap();
         assert_eq!(branch_sha.trim(), head.trim(), "branch should point at the committed work");
 
-        backend.forget_workspace("ws-y", &repo, &ws);
+        backend.forget_workspace("ws-y", &repo, &ws).unwrap();
     }
 
     /// Commit work on a worktree's detached HEAD, then move HEAD off it — the
@@ -607,7 +608,7 @@ mod tests {
             "a branched commit is saved, not stranded"
         );
 
-        backend.forget_workspace("ws-r", &repo, &ws);
+        backend.forget_workspace("ws-r", &repo, &ws).unwrap();
     }
 
     /// No double-counting: a commit still on the current HEAD stack (HEAD ahead,
@@ -636,7 +637,7 @@ mod tests {
             "stranded_work must not also claim the current stack (would double-branch)"
         );
 
-        backend.forget_workspace("ws-c", &repo, &ws);
+        backend.forget_workspace("ws-c", &repo, &ws).unwrap();
     }
 
     #[test]
@@ -656,6 +657,6 @@ mod tests {
         let branches = run_git_utf8(&repo, &["branch", "--list", &format!("workon/ws-s-{id}")]).unwrap();
         assert!(branches.contains("workon/ws-s-"), "branch should exist, got {branches:?}");
 
-        backend.forget_workspace("ws-s", &repo, &ws);
+        backend.forget_workspace("ws-s", &repo, &ws).unwrap();
     }
 }
