@@ -536,6 +536,18 @@ fn jj(dir: &Path, args: &[&str]) -> String {
     stdout
 }
 
+/// `destroy` removes the directory with a background `rm -rf`.
+fn assert_removed_soon(dir: &Path) {
+    let start = std::time::Instant::now();
+    loop {
+        if !dir.exists() {
+            return;
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{} was never removed", dir.display());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn jj_names(proj: &Path) -> Vec<String> {
     jj(proj, &["--ignore-working-copy", "--color=never", "workspace", "list", "-T", "name ++ \"\\n\""])
         .lines()
@@ -757,7 +769,9 @@ fn destroy_of_an_outside_registration_leaves_the_directory_and_registration() {
 fn destroy_forgets_the_jj_workspace_whose_root_is_the_directory() {
     let Some(repo) = JjRepo::new() else { return };
     let dir = repo.world.worktrees().join("proj-feature");
+    let sibling = repo.world.worktrees().join("proj-other");
     repo.add(&dir, "proj-feature");
+    repo.add(&sibling, "proj-other");
 
     let listed = repo.world.workon(&repo.proj).arg("list").assert().success().get_output().stdout.clone();
     let listed = String::from_utf8_lossy(&listed);
@@ -773,16 +787,16 @@ fn destroy_forgets_the_jj_workspace_whose_root_is_the_directory() {
         .stderr
         .clone();
     let destroyed = String::from_utf8_lossy(&destroyed);
-    assert!(destroyed.contains("Forgot jj workspace proj-feature"), "{destroyed}");
+    assert!(destroyed.lines().any(|line| line == "Forgot jj workspace proj-feature"), "{destroyed}");
     assert!(
-        !destroyed.contains("Forgot jj workspace feature"),
+        destroyed.lines().all(|line| line != "Forgot jj workspace feature"),
         "forgot the stripped name instead of the registered one: {destroyed}"
     );
-    assert!(
-        !jj_names(&repo.proj).iter().any(|n| n == "proj-feature"),
-        "jj still has proj-feature: {:?}",
-        jj_names(&repo.proj)
-    );
+    assert_removed_soon(&dir);
+    assert!(sibling.exists(), "destroyed the sibling");
+    let names = jj_names(&repo.proj);
+    assert!(!names.iter().any(|n| n == "proj-feature"), "jj still has proj-feature: {names:?}");
+    assert!(names.iter().any(|n| n == "proj-other"), "jj lost the sibling: {names:?}");
 }
 
 /// Issue #5, case 3. Registrations jj has and workon does not manage — a root
