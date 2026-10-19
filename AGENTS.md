@@ -45,6 +45,12 @@ CI runs all of the above with `--locked`, so the lockfile must be in sync. Befor
 - `tests/properties.toml` classifies every file under `src` as pure (naming its `proptest!` properties) or effectful (with a reason); `tests/properties.rs` fails on an unclassified file, a named property that does not exist, or a pure file with none outside `owed`, which may only shrink. A bug fixed in a pure module comes with a property stating the invariant it broke.
 - `tests/tui_rules.rs` holds the terminal-UI rule (the `tui-testing` skill): every prompt and zellij hand-off is listed in `tests/tui.toml` with its pseudo-terminal test (`tests/tui/`), every test runs the built binary with a cleared environment and the stub directory (`tests/support`) as PATH, and every program `src/` runs has a stub. A new prompt or launch adds an entry; untested ones go in `owed`, which may only shrink.
 
+## jj workspace list
+
+`src/registered.rs` reads `jj workspace list -T` with `LIST_TEMPLATE`. Each record is `name.escape_json()`, a NUL, `stringify(root).escape_json()` or `null`, and a NUL. Real stdout is captured under `tests/fixtures/jj/<version>/` (`workspace-list.bin` and `cases.txt`). `jj_0_45_1` checks 0.45.1. `every_jj_workspace_list_fixture_has_a_test` fails when a directory there has no test. `scripts/capture-jj-workspace-list.sh` regenerates the fixtures from the jj on PATH.
+
+The captured range is jj 0.45.1. jj 0.46.0, released 2026-10-07, is not installed on this machine and was not installed for this capture. From 0.46, `jj workspace list` and `jj workspace root` show an unreachable workspace path. 0.45 omits that path, and the template then prints `null`.
+
 ## Fuzzing
 
 cargo-fuzz targets live in `fuzz/`, a standalone workspace built only by

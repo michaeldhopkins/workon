@@ -1,0 +1,5 @@
+default	/private/var/folders/_f/x2yrrj013hv2bjbccmrxnpbc0000gn/T/.tmpxAXe4o/repo
+plain	/private/var/folders/_f/x2yrrj013hv2bjbccmrxnpbc0000gn/T/.tmpxAXe4o/plain
+my workspace	/private/var/folders/_f/x2yrrj013hv2bjbccmrxnpbc0000gn/T/.tmpxAXe4o/spaced
+absroot	/private/var/folders/_f/x2yrrj013hv2bjbccmrxnpbc0000gn/T/.tmpxAXe4o/absroot
+ghost	

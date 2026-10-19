@@ -379,6 +379,8 @@ fn same_path(left: &Path, right: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     #[test]
@@ -588,5 +590,149 @@ mod tests {
             proptest::prop_assert!(!kept.contains(&"default"));
             proptest::prop_assert_eq!(kept.len(), names.len() - 1);
         }
+    }
+
+    fn jj_fixture_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jj")
+    }
+
+    /// Real `jj workspace list` stdout for one captured version. The bytes are
+    /// untrimmed. `cases.txt` is what that jj was asked to register: a name, a
+    /// tab, and the absolute root, or a tab and nothing when the directory was
+    /// already gone.
+    fn check_workspace_list(version: &str) {
+        let dir = jj_fixture_root().join(version);
+        let raw = std::fs::read(dir.join("workspace-list.bin")).unwrap_or_else(|err| {
+            panic!("jj {version}: missing tests/fixtures/jj/{version}/workspace-list.bin ({err})")
+        });
+        let text = String::from_utf8(raw).unwrap_or_else(|_| panic!("jj {version}: list output was not utf-8"));
+        let parsed = parse_list(&text);
+        let cases = std::fs::read_to_string(dir.join("cases.txt"))
+            .unwrap_or_else(|err| panic!("jj {version}: missing cases.txt ({err})"));
+        let mut expected = Vec::new();
+        for line in cases.lines() {
+            let (name, root) = line.split_once('\t').unwrap_or_else(|| panic!("jj {version}: {line:?}"));
+            expected.push((name.to_string(), (!root.is_empty()).then(|| root.to_string())));
+        }
+        let mut got: Vec<(String, Option<String>)> = parsed
+            .iter()
+            .map(|reg| {
+                assert!(reg.exact, "jj {version}: {} did not round-trip", reg.name);
+                (reg.name.clone(), reg.root.as_deref().and_then(|path| path.to_str()).map(str::to_string))
+            })
+            .collect();
+        got.sort();
+        expected.sort();
+        assert_eq!(got, expected, "jj {version}");
+        assert!(
+            expected
+                .iter()
+                .any(|(name, root)| name.contains(' ') && root.as_deref().is_some_and(|p| Path::new(p).is_absolute())),
+            "jj {version}: a name with a space and an absolute root"
+        );
+        assert!(expected.iter().any(|(name, root)| name == "ghost" && root.is_none()), "jj {version}: a missing root");
+        assert!(
+            expected
+                .iter()
+                .any(|(name, root)| name == "absroot" && root.as_deref().is_some_and(|p| Path::new(p).is_absolute())),
+            "jj {version}: an absolute root"
+        );
+        assert!(
+            expected
+                .iter()
+                .any(|(name, root)| name == "plain" && root.as_deref().is_some_and(|p| Path::new(p).is_absolute())),
+            "jj {version}: an ordinary name"
+        );
+    }
+
+    #[test]
+    fn jj_0_45_1() {
+        check_workspace_list("0.45.1");
+    }
+
+    /// Rewrites `tests/fixtures/jj/<version>/` from the jj on PATH.
+    /// `scripts/capture-jj-workspace-list.sh` runs this. It does not install jj.
+    #[test]
+    #[ignore = "rewrites tests/fixtures/jj/<version> from the jj on PATH"]
+    fn capture_jj_workspace_list() {
+        let version = jj_version();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent = std::fs::canonicalize(tmp.path()).expect("canonical temp");
+        let repo = parent.join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        let config = parent.join("jj-config.toml");
+        std::fs::write(
+            &config,
+            "[user]\nname = \"Test User\"\nemail = \"test@example.com\"\n[ui]\ncolor = \"never\"\npaginate = \"never\"\n",
+        )
+        .expect("jj config");
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test User"]);
+        std::fs::write(repo.join("README"), "hi\n").expect("readme");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        jj(&repo, &config, &["git", "init", "--colocate"]);
+
+        let plain = parent.join("plain");
+        let spaced = parent.join("spaced");
+        let absolute = parent.join("absroot");
+        let ghost = parent.join("ghost");
+        jj(&repo, &config, &["workspace", "add", plain.to_str().unwrap(), "--name", "plain", "-r", "@"]);
+        jj(&repo, &config, &["workspace", "add", spaced.to_str().unwrap(), "--name", "my workspace", "-r", "@"]);
+        jj(&repo, &config, &["workspace", "add", absolute.to_str().unwrap(), "--name", "absroot", "-r", "@"]);
+        jj(&repo, &config, &["workspace", "add", ghost.to_str().unwrap(), "--name", "ghost", "-r", "@"]);
+        std::fs::remove_dir_all(&ghost).expect("remove ghost workspace dir");
+
+        let output = Command::new("jj")
+            .args(["--ignore-working-copy", "--color=never", "workspace", "list", "-T", LIST_TEMPLATE])
+            .current_dir(&repo)
+            .env("JJ_CONFIG", &config)
+            .output()
+            .expect("jj workspace list");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let dir = jj_fixture_root().join(&version);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(dir.join("workspace-list.bin"), &output.stdout).expect("write list");
+        let cases = format!(
+            "default\t{}\nplain\t{}\nmy workspace\t{}\nabsroot\t{}\nghost\t\n",
+            repo.display(),
+            plain.display(),
+            spaced.display(),
+            absolute.display(),
+        );
+        std::fs::write(dir.join("cases.txt"), cases).expect("write cases");
+    }
+
+    fn jj_version() -> String {
+        let output = Command::new("jj").arg("--version").output().expect("jj --version");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let text = String::from_utf8(output.stdout).expect("version is utf-8");
+        let version = text.trim().strip_prefix("jj ").unwrap_or_else(|| panic!("jj --version: {text:?}"));
+        assert!(!version.is_empty(), "{text:?}");
+        version.to_string()
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git").args(args).current_dir(dir).output().expect("git");
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    fn jj(dir: &Path, config: &Path, args: &[&str]) {
+        let output = Command::new("jj").args(args).current_dir(dir).env("JJ_CONFIG", config).output().expect("jj");
+        assert!(output.status.success(), "jj {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    /// A fixture directory with no test is a version we parse and never check.
+    #[test]
+    fn every_jj_workspace_list_fixture_has_a_test() {
+        const TESTED: &[&str] = &["0.45.1"];
+        let mut captured: Vec<String> = std::fs::read_dir(jj_fixture_root())
+            .expect("tests/fixtures/jj")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        captured.sort();
+        assert_eq!(captured, TESTED, "add a jj_<version> test for each directory under tests/fixtures/jj");
     }
 }
