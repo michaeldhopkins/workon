@@ -116,6 +116,16 @@ pub enum Command {
         #[arg(add = ArgValueCandidates::new(workspace::ref_candidates))]
         reference: Option<String>,
     },
+    /// Run a command in the workspace
+    #[command(after_help = "Exits with the command's status.\nExample: workon exec feature-x -- bin/rails console")]
+    Exec {
+        /// Workspace id, --name nickname, or path; omit for the cwd's workspace
+        #[arg(add = ArgValueCandidates::new(workspace::ref_candidates))]
+        reference: Option<String>,
+        /// The command and its arguments, after `--`
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<OsString>,
+    },
     /// Start the session in the background
     Run {
         /// Name the session. Defaults to the directory name.

@@ -86,6 +86,7 @@ workon destroy fix-bug               # tear down, saving rescued work
 - `attach [REF]` opens an existing workspace and returns when the session quits — no teardown. `REF` is a ws_id, a `--name` nickname (given as stored or slugified), or a path; omit it to use the workspace the cwd is inside.
 - `destroy [REF]` bookmarks rescued work under `workon/<ws_id>` and removes the worktree. `--no-save` discards instead. `--json` prints `{ ws_id, saved, dropped }`. It refuses any path that isn't under `~/.worktrees`.
 - `list` shows workspaces whose project is at or under the cwd, plus any `stale` worktrees (a leaked `create` with no matching `destroy`), which are shown from anywhere. `--json` prints an array.
+- `exec [REF] -- COMMAND…` runs a command in a workspace, with the tool versions its session gets. Example: `workon exec fix-bug -- bin/rails console`.
 - `path [REF]` prints a workspace's directory. A process can't change its parent shell's directory, so to browse or hand-edit a workspace without a session, `cd` to the printed path:
 
   ```bash

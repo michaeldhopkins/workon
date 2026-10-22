@@ -472,7 +472,7 @@ fn load_workspace(reference: Option<&str>) -> Result<Workspace> {
 /// Turn a CLI reference into a concrete worktree path: cwd's enclosing
 /// workspace, an explicit path, or a ws_id/nickname looked up under
 /// `~/.worktrees`.
-fn resolve_ws_dir(reference: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn resolve_ws_dir(reference: Option<&str>) -> Result<PathBuf> {
     match discover::classify_ref(reference) {
         WsRef::Cwd => find_enclosing_workspace(),
         WsRef::Path(p) => Ok(p),
@@ -900,7 +900,7 @@ fn do_copy_files(project_dir: &Path, ws_dir: &Path, files: &[String], cancelled:
 /// session env recorded in `.workon.json`. Session env wins on conflict — it
 /// carries the workspace's test-DB isolation identity (Phoenix's
 /// `MIX_TEST_PARTITION`), which must not be shadowed by an inherited mise value.
-fn session_launch_env(ws_dir: &Path) -> HashMap<String, String> {
+pub(crate) fn session_launch_env(ws_dir: &Path) -> HashMap<String, String> {
     let mut vars = crate::mise_env::mise_env("mise", ws_dir);
     vars.extend(read_meta(ws_dir).session_env);
     vars

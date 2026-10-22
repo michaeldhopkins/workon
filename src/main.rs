@@ -53,6 +53,7 @@ fn run_subcommand(command: cli::Command) -> Result<ExitCode> {
         }
         cli::Command::List { json } => workspace::cmd_list(json).map(|()| ExitCode::SUCCESS),
         cli::Command::Path { reference } => workspace::cmd_path(reference.as_deref()).map(|()| ExitCode::SUCCESS),
+        cli::Command::Exec { reference, command } => workon::exec::cmd_exec(reference.as_deref(), &command),
         cli::Command::Run { name, config, command } => run_in_background(name, config, command),
         cli::Command::Send { name, text } => type_into(name, text),
         cli::Command::History { name, lines } => print_history(name, lines),

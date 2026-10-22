@@ -1047,3 +1047,111 @@ fn list_does_not_report_the_default_jj_workspace() {
         );
     }
 }
+
+/// A workspace whose `mise env` adds a variable and puts `tools` (holding `only-in-mise`) first on
+/// PATH; returns the world, its ws_id and directory.
+fn exec_world() -> (World, String, PathBuf) {
+    let world = World::new();
+    let proj = world.project(&[]);
+    let tools = world.path().join("tools");
+    std::fs::create_dir(&tools).expect("tools dir");
+    write_script(&tools.join("only-in-mise"), "echo found on the mise PATH");
+    let mise_env =
+        serde_json::json!({ "FROM_MISE": "yes", "PATH": format!("{}:{}", tools.display(), world.stubs.path()) });
+    world.stubs.set("mise", &format!("[ \"$1\" = env ] && printf '%s' '{mise_env}'; exit 0"));
+    let created = create_json(&world, &proj, "exec");
+    let ws_id = created["ws_id"].as_str().expect("ws_id").to_string();
+    let ws_dir = PathBuf::from(created["path"].as_str().expect("path"));
+    (world, ws_id, ws_dir)
+}
+
+fn write_script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+}
+
+/// `exec` runs the command in the workspace's directory with mise's environment, looks the
+/// program up on mise's PATH, and exits with the command's status (workon#7).
+#[test]
+fn exec_runs_the_command_in_the_workspace_with_its_env_and_status() {
+    let (world, ws_id, ws_dir) = exec_world();
+    let out = world
+        .workon(&world.path())
+        .args(["exec", &ws_id, "--", "sh", "-c", "pwd -P; echo \"$FROM_MISE\"; only-in-mise; exit 7"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!("{}\nyes\nfound on the mise PATH\n", std::fs::canonicalize(&ws_dir).unwrap().display());
+    assert_eq!(stdout, expected);
+}
+
+/// A relative program such as `bin/rails` is the workspace's, not the caller's directory's.
+#[test]
+fn exec_resolves_a_relative_program_in_the_workspace() {
+    let (world, ws_id, ws_dir) = exec_world();
+    std::fs::create_dir(ws_dir.join("bin")).unwrap();
+    write_script(&ws_dir.join("bin/hello"), "echo \"hello $1\"");
+    world
+        .workon(&world.path())
+        .args(["exec", &ws_id, "--", "bin/hello", "there"])
+        .assert()
+        .success()
+        .stdout("hello there\n");
+}
+
+/// With no reference, the workspace is the one the caller stands in, as for `path`.
+#[test]
+fn exec_without_a_reference_uses_the_enclosing_workspace() {
+    let (world, _, ws_dir) = exec_world();
+    let inside = ws_dir.join("sub");
+    std::fs::create_dir(&inside).unwrap();
+    let canonical = std::fs::canonicalize(&ws_dir).unwrap();
+    world
+        .workon(&inside)
+        .args(["exec", "--", "pwd", "-P"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", canonical.display()));
+}
+
+#[test]
+fn exec_of_a_missing_command_exits_127() {
+    let (world, ws_id, _) = exec_world();
+    world
+        .workon(&world.path())
+        .args(["exec", &ws_id, "--", "no-such-command"])
+        .assert()
+        .code(127)
+        .stderr(predicate::str::contains("workon exec: no-such-command: command not found"));
+}
+
+#[test]
+fn exec_of_a_file_that_cannot_run_exits_126() {
+    let (world, ws_id, ws_dir) = exec_world();
+    std::fs::write(ws_dir.join("notes.txt"), "not a program\n").unwrap();
+    world
+        .workon(&world.path())
+        .args(["exec", &ws_id, "--", "./notes.txt"])
+        .assert()
+        .code(126)
+        .stderr(predicate::str::contains("workon exec: ./notes.txt: permission denied"));
+}
+
+#[test]
+fn exec_needs_a_command_after_the_separator() {
+    workon(&["exec", "some-ws"]).code(2).stderr(predicate::str::contains("COMMAND"));
+}
+
+#[test]
+fn exec_of_a_workspace_path_that_is_gone_fails_cleanly() {
+    let world = World::new();
+    let gone = world.path().join("gone");
+    world
+        .workon(&world.path())
+        .args(["exec", gone.to_str().unwrap(), "--", "true"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("does not exist"));
+}

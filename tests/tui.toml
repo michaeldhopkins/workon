@@ -32,6 +32,10 @@ call = "src/session.rs: Cmd::new(zellij)"
 why = "always `zellij` outside unit tests (session_exists, delete_session), which pass a stand-in"
 
 [[runtime]]
+call = "src/exec.rs: Command::new(program)"
+why = "the command the user typed after `--`, chosen at run time and given the terminal as is"
+
+[[runtime]]
 call = "src/provision/alembic.rs: Cmd::new(venv_python(ctx.ws_dir))"
 why = "the project's own .venv/bin/python inside the worktree, which the project supplies"
 

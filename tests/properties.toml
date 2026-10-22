@@ -62,6 +62,7 @@ owed = []
 "src/zellij_reply.rs" = ["a_listing_finds_exactly_the_sessions_named_first_on_a_line"]
 
 [effectful]
+"src/exec.rs" = "replaces the process with the user's command in the workspace"
 "src/background.rs" = "deletes a directory on a background thread"
 "src/claude_trust.rs" = "reads and rewrites ~/.claude.json"
 "src/fuzz_api.rs" = "fuzzing shims compiled only under --cfg fuzzing; the fuzz targets are its properties"

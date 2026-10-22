@@ -8,6 +8,7 @@ pub mod claude_trust;
 pub mod cli;
 pub mod deps;
 pub mod discover;
+pub mod exec;
 mod forget_hint;
 pub mod home;
 pub mod layout;
