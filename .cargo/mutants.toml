@@ -31,6 +31,10 @@ exclude_re = [
     '^src/session\.rs:.*replace run -> Result<\(\)> with Ok\(\(\)\)',
     # The default body is `Vec::new()`, so `vec![]` is the same value.
     '^src/vcs/mod\.rs:.*replace Vcs::stranded_work -> Vec<String> with vec!\[\]$',
+    # exec's Windows `run` is under `cfg(not(unix))`: the mutants jobs build on
+    # Linux and macOS, where it is never compiled, so any mutant of it reads
+    # MISSED. Its Unix twin is mutated and caught by the exec CLI tests.
+    '^src/exec\.rs:5[4-9]:.*replace run -> std::io::Result<ExitCode>',
 ]
 
 # A hung mutant (a loop counter turned the wrong way) is stopped after this multiple of the

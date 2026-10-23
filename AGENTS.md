@@ -177,6 +177,9 @@ CI figure.
   toolchains' setup to every run; the helpers they call (adapter parsing,
   `test_db_name`, the URL and Npgsql encoders) are still mutated.
 - `Vcs::stranded_work -> vec![]`: the default body is `Vec::new()`.
+- `exec`'s Windows `run` (`cfg(not(unix))`): never compiled on the Linux and
+  macOS runners, so every mutant of it reads MISSED. The pattern names its line
+  range; move it if that function moves. The Unix `run` is mutated.
 - `session::run -> Ok(())`: it hands the terminal to a real zellij; its
   decisions (`session_exists`, `delete_session`) are tested with a stand-in.
 
