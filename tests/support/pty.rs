@@ -69,6 +69,19 @@ impl Tui {
         }
     }
 
+    /// The child has exited, but its last bytes may still be in the reader thread: `try_recv`
+    /// alone returned before they arrived and left the screen empty. Read until the reader
+    /// sees end of file, bounded so a leaked descendant holding the pty cannot hang the test.
+    fn drain_to_eof(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match self.output.recv_timeout(left) {
+                Ok(bytes) => self.parser.process(&bytes),
+                Err(_) => break,
+            }
+        }
+    }
+
     pub fn screen(&mut self) -> String {
         self.drain();
         self.parser.screen().contents()
@@ -102,7 +115,7 @@ impl Tui {
         let start = Instant::now();
         loop {
             if let Some(status) = self.child.try_wait().expect("a status") {
-                self.drain();
+                self.drain_to_eof();
                 return status.exit_code();
             }
             let screen = self.screen();
