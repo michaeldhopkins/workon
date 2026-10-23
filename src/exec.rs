@@ -3,7 +3,6 @@
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
-use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
 
 use anyhow::{bail, Result};
@@ -27,11 +26,12 @@ pub fn cmd_exec(reference: Option<&str>, command: &[OsString]) -> Result<ExitCod
     // With the env's PATH set on the Command, std looks the program up on that PATH, and a
     // relative program (`bin/rails`) resolves against the workspace, since exec changes
     // directory first.
-    let error = Command::new(program)
-        .args(args)
-        .current_dir(&ws_dir)
-        .envs(crate::workspace::session_launch_env(&ws_dir))
-        .exec();
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(&ws_dir).envs(crate::workspace::session_launch_env(&ws_dir));
+    let error = match run(&mut cmd) {
+        Ok(code) => return Ok(code),
+        Err(error) => error,
+    };
     let name = program.to_string_lossy();
     let (code, what) = match error.kind() {
         ErrorKind::NotFound => (NOT_FOUND, "command not found"),
@@ -40,4 +40,19 @@ pub fn cmd_exec(reference: Option<&str>, command: &[OsString]) -> Result<ExitCod
     };
     eprintln!("workon exec: {name}: {what} ({error})");
     Ok(ExitCode::from(code))
+}
+
+/// Unix replaces this process, so it returns only on failure.
+#[cfg(unix)]
+fn run(cmd: &mut Command) -> std::io::Result<ExitCode> {
+    use std::os::unix::process::CommandExt;
+    Err(cmd.exec())
+}
+
+/// Windows has no exec: run the command as a child and pass its exit status on.
+#[cfg(not(unix))]
+fn run(cmd: &mut Command) -> std::io::Result<ExitCode> {
+    let status = cmd.status()?;
+    let code = status.code().unwrap_or(1);
+    Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
