@@ -263,6 +263,9 @@ Two mutants were equivalent and went with a rewrite rather than an exclusion:
 `extract_commands`' `end + 1` → `end * 1` (it now uses `split_once`) and
 `partition_for`'s `>` → `>=` (it now uses `min`).
 
+**2026-10-29** (CI run 40866399790): one MISSED, `normalize_argv`'s `!literal` guard
+on the `--` branch (delete `!`), now tested: a `--mux` after `--` stays in place.
+
 ## Dependencies
 
 Dependencies move through the owner's `workon-deps` upkeep job, never Dependabot. It also adopts each new release of vcs-runner.

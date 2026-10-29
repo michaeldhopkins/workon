@@ -229,6 +229,13 @@ mod tests {
     }
 
     #[test]
+    fn mux_after_a_literal_separator_stays_an_argument() {
+        let argv = ["workon", "run", "--", "--mux", "tmux", "after"];
+        let expected: Vec<OsString> = argv.iter().map(OsString::from).collect();
+        assert_eq!(normalize_argv(argv), expected);
+    }
+
+    #[test]
     fn an_unknown_mux_names_the_three() {
         let err = Cli::try_parse_from(["workon", "--mux", "screen"]).unwrap_err();
         assert!(err.to_string().contains("unknown multiplexer 'screen'. workon supports zellij, tmux, and zmx."));
