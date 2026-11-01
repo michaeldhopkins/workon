@@ -30,7 +30,7 @@ const WORKON_JSON: &str = ".workon.json";
 
 /// Files workon generates inside a workspace; ignored when deciding whether the
 /// workspace has meaningful changes worth offering to save.
-const GENERATED_FILES: &[&str] = &[ENV_TEST_LOCAL, WORKON_JSON];
+const GENERATED_FILES: &[&str] = &[ENV_TEST_LOCAL, ".env.testing", WORKON_JSON];
 
 /// The one agent whose on-disk session storage workon knows how to relocate.
 /// Which args an agent takes is config data now, but *where it keeps
@@ -1130,9 +1130,12 @@ mod tests {
 
     #[test]
     fn workon_json_is_a_generated_file() {
-        // Teardown's changed-file filter must skip it, else the provenance file
+        // Teardown's changed-file filter must skip every file workon generates
+        // (.workon.json, .env.test.local, and Laravel's .env.testing), else it
         // would look like unsaved work worth prompting to save.
         assert!(GENERATED_FILES.contains(&WORKON_JSON));
+        assert!(GENERATED_FILES.contains(&ENV_TEST_LOCAL));
+        assert!(GENERATED_FILES.contains(&".env.testing"));
     }
 
     #[test]
@@ -1500,6 +1503,40 @@ mod tests {
         assert!(outcome.saved.is_empty());
         let branch = format!("workon/{}", ws.ws_id);
         assert!(!git_out(&repo, &["branch", "--list", &branch]).contains(&branch), "no branch created");
+    }
+
+    #[test]
+    fn teardown_ignores_generated_env_testing_changes() {
+        struct EnvTestingProvisioner;
+        impl Provisioner for EnvTestingProvisioner {
+            fn name(&self) -> &'static str {
+                "laravel-mock"
+            }
+            fn detect(&self, _ws_dir: &Path) -> bool {
+                true
+            }
+            fn setup(&self, _ctx: &provision::ProvisionCtx<'_>) -> Result<provision::Setup> {
+                Ok(provision::Setup {
+                    env: vec![("DB_URL".to_string(), "pgsql://localhost/proj_test".to_string())],
+                    env_file: Some(".env.testing".to_string()),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        std::fs::write(repo.join(".env.testing"), "APP_ENV=testing\n").unwrap();
+        git(&repo, &["add", ".env.testing"]);
+        git(&repo, &["commit", "-q", "-m", "track env.testing"]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+
+        let worktrees = tmp.path().join("worktrees");
+        let provs: Vec<Box<dyn Provisioner>> = vec![Box::new(EnvTestingProvisioner)];
+        let ws = provision_in(&worktrees, &repo, "proj", true, None, None, &crate::vcs::GitBackend, &provs).unwrap();
+
+        let outcome = teardown(&ws, None, SaveMode::Save, &crate::vcs::GitBackend).unwrap();
+        assert!(outcome.saved.is_empty(), "generated .env.testing must not be saved as user work: {:?}", outcome.saved);
     }
 
     #[test]
