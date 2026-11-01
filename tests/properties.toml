@@ -37,7 +37,10 @@ owed = []
   "include_value_reads_back_in_either_quote",
 ]
 "src/provision/laravel.rs" = ["the_db_connection_value_reads_back"]
-"src/provision/mod.rs" = ["mysql_url_carries_any_given_port"]
+"src/provision/mod.rs" = [
+  "mysql_url_carries_any_given_port",
+  "merge_env_keeps_other_lines_and_sets_given_keys",
+]
 "src/provision/phoenix.rs" = [
   "partition_is_the_sanitized_ws_id_cut_to_fit",
   "app_name_reads_the_app_atom_past_comments_and_lookalikes",

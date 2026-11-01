@@ -282,6 +282,38 @@ pub fn venv_python(ws_dir: &Path) -> PathBuf {
     }
 }
 
+/// Merge `vars` into the text of a dotenv file: existing lines (comments, blanks,
+/// other keys) stay in place, each key in `vars` replaces its existing line or is
+/// appended at the end, and the result ends with a newline.
+pub(crate) fn merge_env(existing: &str, vars: &[(String, String)]) -> String {
+    let mut placed = vec![false; vars.len()];
+    let mut out = String::new();
+    for line in existing.lines() {
+        let key = line.split_once('=').map(|(k, _)| k.trim());
+        if let Some(idx) = key.and_then(|k| vars.iter().position(|(vk, _)| vk == k)) {
+            let (k, v) = &vars[idx];
+            out.push_str(&format!("{k}={v}\n"));
+            placed[idx] = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for ((k, v), done) in vars.iter().zip(placed) {
+        if !done {
+            out.push_str(&format!("{k}={v}\n"));
+        }
+    }
+    out
+}
+
+/// Merge `vars` into the dotenv file at `path`, creating it when absent and
+/// keeping any other settings a copied gitignored file already held.
+pub(crate) fn write_env_file(path: &Path, vars: &[(String, String)]) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    std::fs::write(path, merge_env(&existing, vars))
+}
+
 /// The ordered provisioner registry. Order matters (future: venv repair before
 /// Python DB frameworks).
 pub fn provisioners() -> Vec<Box<dyn Provisioner>> {
@@ -395,6 +427,73 @@ mod tests {
             let env = [("MYSQL_TCP_PORT", port.as_str()), ("MYSQL_USER", "u")];
             proptest::prop_assert_eq!(DbEngine::Mysql.url_in("t", &env_of(&env)), format!("mysql://u@127.0.0.1:{port}/t"));
         }
+
+        /// Merging into a `.env` file keeps every non-matching line in order, sets each
+        /// given key to its new value (replacing an existing line in place or appending),
+        /// and ends with a newline.
+        #[test]
+        fn merge_env_keeps_other_lines_and_sets_given_keys(
+            before in proptest::collection::vec("(# [a-z]{1,12}|OTHER_[0-9]=[a-z0-9]{0,8})", 0..4),
+            old_db in proptest::option::of("[a-z0-9:/._-]{1,20}"),
+            after in proptest::collection::vec("(# [a-z]{1,12}|KEEP_[0-9]=[a-z0-9]{0,8})", 0..4),
+            trailing_nl in proptest::bool::ANY,
+            db_url in "postgresql://localhost/[a-z0-9_]{1,16}",
+            extra_val in "[a-z0-9]{1,10}",
+        ) {
+            let mut input_lines = before.clone();
+            if let Some(old) = &old_db {
+                input_lines.push(format!("DATABASE_URL={old}"));
+            }
+            input_lines.extend(after.clone());
+            let mut existing = input_lines.join("\n");
+            if trailing_nl && !existing.is_empty() {
+                existing.push('\n');
+            }
+
+            let vars = vec![
+                ("DATABASE_URL".to_string(), db_url.clone()),
+                ("DB_CONNECTION".to_string(), extra_val.clone()),
+            ];
+            let merged = merge_env(&existing, &vars);
+
+            proptest::prop_assert!(merged.ends_with('\n'), "must end with newline: {merged:?}");
+            let mut expected = before;
+            if old_db.is_some() {
+                expected.push(format!("DATABASE_URL={db_url}"));
+                expected.extend(after);
+            } else {
+                expected.extend(after);
+                expected.push(format!("DATABASE_URL={db_url}"));
+            }
+            expected.push(format!("DB_CONNECTION={extra_val}"));
+            let actual: Vec<String> = merged.lines().map(str::to_string).collect();
+            proptest::prop_assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn write_env_file_merges_existing_and_creates_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".env.test.local");
+        let vars = vec![("DATABASE_URL".to_string(), "postgresql://localhost/new_test".to_string())];
+
+        write_env_file(&path, &vars).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "DATABASE_URL=postgresql://localhost/new_test\n");
+
+        std::fs::write(
+            &path,
+            "# comment\n\nREDIS_URL=redis://localhost:6379\nDATABASE_URL=postgresql://localhost/old\n",
+        )
+        .unwrap();
+        let vars2 = vec![
+            ("DATABASE_URL".to_string(), "postgresql://localhost/replaced".to_string()),
+            ("APP_ENV".to_string(), "testing".to_string()),
+        ];
+        write_env_file(&path, &vars2).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# comment\n\nREDIS_URL=redis://localhost:6379\nDATABASE_URL=postgresql://localhost/replaced\nAPP_ENV=testing\n"
+        );
     }
 
     #[test]

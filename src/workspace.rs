@@ -248,8 +248,8 @@ fn provision_in(
                         // Each provisioner names the env file its framework loads
                         // (Rails/dotenv -> .env.test.local, Laravel -> .env.testing).
                         let file = s.env_file.as_deref().unwrap_or(ENV_TEST_LOCAL);
-                        let body = s.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
-                        if std::fs::write(ws_dir.join(file), body).is_ok() {
+                        let path = ws_dir.join(file);
+                        if provision::write_env_file(&path, &s.env).is_ok() {
                             vcs.ignore_generated_file(project_dir, &ws_dir, file);
                         }
                         env.extend(s.env);
@@ -1409,6 +1409,57 @@ mod tests {
         // env, not a file), so it is not written to the dotenv file.
         assert_eq!(meta.session_env.get("MOCK_SESSION_VAR").map(String::as_str), Some(ws.ws_id.as_str()));
         assert!(!envfile.contains("MOCK_SESSION_VAR"), "session_env must not leak into the dotenv file: {envfile}");
+    }
+
+    #[test]
+    fn provision_merges_env_into_copied_gitignored_env_file_and_teardown_ignores_it() {
+        struct TwoVarProvisioner;
+        impl Provisioner for TwoVarProvisioner {
+            fn name(&self) -> &'static str {
+                "two-var"
+            }
+            fn detect(&self, _ws_dir: &Path) -> bool {
+                true
+            }
+            fn setup(&self, _ctx: &provision::ProvisionCtx<'_>) -> Result<provision::Setup> {
+                Ok(provision::Setup {
+                    env: vec![
+                        ("DATABASE_URL".to_string(), "postgresql://localhost/mock".to_string()),
+                        ("EXTRA_TEST_VAR".to_string(), "1".to_string()),
+                    ],
+                    ..Default::default()
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        std::fs::write(repo.join(".gitignore"), ".env.test.local\n").unwrap();
+        git(&repo, &["add", ".gitignore"]);
+        git(&repo, &["commit", "-q", "-m", "ignore env.test.local"]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+        std::fs::write(
+            repo.join(ENV_TEST_LOCAL),
+            "# local test overrides\nREDIS_URL=redis://localhost:6379/1\nDATABASE_URL=postgresql://localhost/old_test\nSTRIPE_KEY=sk_test_fake",
+        )
+        .unwrap();
+
+        let worktrees = tmp.path().join("worktrees");
+        let provs: Vec<Box<dyn Provisioner>> = vec![Box::new(TwoVarProvisioner)];
+        let ws = provision_in(&worktrees, &repo, "proj", false, None, None, &crate::vcs::GitBackend, &provs).unwrap();
+
+        let envfile = std::fs::read_to_string(ws.ws_dir.join(ENV_TEST_LOCAL)).unwrap();
+        assert_eq!(
+            envfile,
+            "# local test overrides\nREDIS_URL=redis://localhost:6379/1\nDATABASE_URL=postgresql://localhost/mock\nSTRIPE_KEY=sk_test_fake\nEXTRA_TEST_VAR=1\n"
+        );
+
+        let outcome = teardown(&ws, None, SaveMode::Save, &crate::vcs::GitBackend).unwrap();
+        assert!(
+            outcome.saved.is_empty(),
+            "merged .env.test.local must still be treated as generated: {:?}",
+            outcome.saved
+        );
     }
 
     /// A provisioner whose migration ran and failed, as Rails' schema load did in issue #2.
