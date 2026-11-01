@@ -1314,6 +1314,58 @@ mod tests {
         assert!(!skipped.ws_dir.join(".env").exists(), "--skip-copy-ignored still copied .env");
     }
 
+    /// For a SQLite Rails app (`adapter: sqlite3`), gitignored database files
+    /// under `storage/` are copied into the workspace by `copy_gitignored_files`
+    /// while `Rails::setup` returns an empty `Setup` (no server DB, no
+    /// `.env.test.local`). Migrations or server writes inside the workspace
+    /// touch `<ws_dir>/storage/development.sqlite3`, leaving the primary
+    /// checkout's `storage/development.sqlite3` untouched.
+    #[test]
+    fn rails_sqlite_workspace_copies_db_files_and_isolates_workspace_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = cloned_repo(tmp.path());
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::create_dir_all(repo.join("storage")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "/storage/*.sqlite3\n").unwrap();
+        std::fs::write(repo.join("storage/.keep"), "").unwrap();
+        std::fs::write(
+            repo.join("config/database.yml"),
+            "default: &default\n  adapter: sqlite3\ndevelopment:\n  <<: *default\n  database: storage/development.sqlite3\ntest:\n  <<: *default\n  database: storage/test.sqlite3\n",
+        )
+        .unwrap();
+        git(&repo, &["add", ".gitignore", "storage/.keep", "config/database.yml"]);
+        git(&repo, &["commit", "-q", "-m", "sqlite rails"]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+
+        std::fs::write(repo.join("storage/development.sqlite3"), "primary-dev-rows").unwrap();
+        std::fs::write(repo.join("storage/test.sqlite3"), "primary-test-rows").unwrap();
+
+        let worktrees = tmp.path().join("worktrees");
+        let ws = provision_in(
+            &worktrees,
+            &repo,
+            "proj",
+            false,
+            None,
+            None,
+            &crate::vcs::GitBackend,
+            &provision::provisioners(),
+        )
+        .unwrap();
+
+        assert!(ws.resources.is_empty(), "sqlite3 creates no server DB resource");
+        assert!(!ws.ws_dir.join(ENV_TEST_LOCAL).exists(), "sqlite3 writes no .env.test.local");
+        assert_eq!(std::fs::read_to_string(ws.ws_dir.join("storage/development.sqlite3")).unwrap(), "primary-dev-rows");
+        assert_eq!(std::fs::read_to_string(ws.ws_dir.join("storage/test.sqlite3")).unwrap(), "primary-test-rows");
+
+        std::fs::write(ws.ws_dir.join("storage/development.sqlite3"), "workspace-migrated-rows").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("storage/development.sqlite3")).unwrap(),
+            "primary-dev-rows",
+            "workspace writes to storage/development.sqlite3 must not mutate the primary checkout"
+        );
+    }
+
     /// A provisioner that always fires and returns a canned resource + env, so
     /// the orchestration (collect resources, write env, persist, teardown) is
     /// testable without a real database or toolchain.

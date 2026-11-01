@@ -216,6 +216,85 @@ mod tests {
         assert_eq!(table, "widgets", "db:schema:load should have created the widgets table");
     }
 
+    /// Proves what a Postgres Rails workspace's commands actually resolve to:
+    /// `Setup::database_url` writes `DATABASE_URL` only to `.env.test.local`
+    /// (`session_env` is empty) and leaves `config/database.yml` untouched, so
+    /// `RAILS_ENV=development` (`rails server`, `rails db:migrate`) still
+    /// resolves `ActiveRecord::Base.connection_db_config.database` to the
+    /// primary `development:` database from `config/database.yml`, while
+    /// `RAILS_ENV=test` without `dotenv-rails` resolves to the primary `test:`
+    /// database unless `.env.test.local` is loaded into `ENV["DATABASE_URL"]`.
+    #[test]
+    fn rails_postgres_workspace_leaves_development_pointing_at_primary_db() {
+        use crate::provision::Resource;
+        use std::process::Command;
+
+        let url = "postgresql://localhost/railsfix_ws_dev_share_test".to_string();
+        let setup = Setup::database_url(
+            vec![Resource::PostgresDb { name: "railsfix_ws_dev_share_test".into() }],
+            url.clone(),
+            Vec::new(),
+        );
+        assert!(setup.session_env.is_empty(), "DATABASE_URL must not be injected into session_env");
+        assert_eq!(setup.env_file, None, "defaults to .env.test.local");
+
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails");
+        let bundle_ready = Command::new("bundle")
+            .arg("check")
+            .current_dir(fixture)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !bundle_ready {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("railsfix-ws-dev-share");
+        assert!(
+            Command::new("cp").args(["-R", fixture, ws_dir.to_str().unwrap()]).status().unwrap().success(),
+            "copy fixture",
+        );
+        let yml = "default: &default\n  adapter: postgresql\n  pool: 5\n\ndevelopment:\n  <<: *default\n  database: primary_app_development\n\ntest:\n  <<: *default\n  database: primary_app_test\n";
+        std::fs::write(ws_dir.join("config/database.yml"), yml).unwrap();
+        std::fs::write(ws_dir.join(".env.test.local"), format!("DATABASE_URL={url}\n")).unwrap();
+
+        let resolve_db = |rails_env: &str, db_url: Option<&str>| -> String {
+            let mut cmd = Command::new("bundle");
+            cmd.args([
+                "exec",
+                "rails",
+                "runner",
+                "puts ActiveRecord::Base.configurations.configs_for(env_name: Rails.env, name: 'primary').database",
+            ])
+            .env("RAILS_ENV", rails_env)
+            .env_remove("DATABASE_URL")
+            .current_dir(&ws_dir);
+            if let Some(u) = db_url {
+                cmd.env("DATABASE_URL", u);
+            }
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "rails runner failed: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        assert_eq!(
+            resolve_db("development", None),
+            "primary_app_development",
+            "rails server / db:migrate (RAILS_ENV=development) touches the primary development DB"
+        );
+        assert_eq!(
+            resolve_db("test", None),
+            "primary_app_test",
+            "without dotenv-rails loading .env.test.local, RAILS_ENV=test stays on database.yml's test DB"
+        );
+        assert_eq!(
+            resolve_db("test", Some(&url)),
+            "railsfix_ws_dev_share_test",
+            "when .env.test.local is loaded into DATABASE_URL under RAILS_ENV=test, Rails targets the isolated test DB"
+        );
+    }
+
     proptest::proptest! {
         /// Whatever surrounds it, the first `adapter:` line with a value names the adapter.
         #[test]
