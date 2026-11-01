@@ -58,6 +58,9 @@ impl Provisioner for Rails {
                 .env("RAILS_ENV", "test")
                 .env("DATABASE_URL", &url)
                 .in_dir(ctx.ws_dir);
+            if let Some(fmt) = schema_format(ctx.ws_dir) {
+                cmd = cmd.env("SCHEMA_FORMAT", fmt);
+            }
             for (k, v) in ctx.mise_vars {
                 cmd = cmd.env(k, v);
             }
@@ -91,6 +94,13 @@ fn bundle_install(ctx: &ProvisionCtx<'_>) -> Option<String> {
     run_step(bundle(&["install"]), "bundle install")
 }
 
+/// `sql` when the app keeps `db/structure.sql` without `db/schema.rb`, else `None`
+/// (Rails' own default is `ruby`, `db/schema.rb`). Rails 7+ removed `db:structure:load`
+/// in favour of `db:schema:load` reading `SCHEMA_FORMAT=sql`.
+pub(crate) fn schema_format(ws_dir: &Path) -> Option<&'static str> {
+    (ws_dir.join("db/structure.sql").is_file() && !ws_dir.join("db/schema.rb").is_file()).then_some("sql")
+}
+
 /// The first `adapter:` value in `database.yml` (usually under `default:`),
 /// e.g. `postgresql`, `mysql2`, `sqlite3`.
 pub(crate) fn adapter(database_yml: &str) -> Option<String> {
@@ -103,6 +113,24 @@ pub(crate) fn adapter(database_yml: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_format_is_sql_only_when_structure_sql_exists_without_schema_rb() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db");
+        std::fs::create_dir(&db).unwrap();
+
+        assert_eq!(schema_format(tmp.path()), None, "neither file -> default");
+
+        std::fs::write(db.join("structure.sql"), "-- sql\n").unwrap();
+        assert_eq!(schema_format(tmp.path()), Some("sql"), "only structure.sql -> sql");
+
+        std::fs::write(db.join("schema.rb"), "# rb\n").unwrap();
+        assert_eq!(schema_format(tmp.path()), None, "both files -> schema.rb wins");
+
+        std::fs::remove_file(db.join("structure.sql")).unwrap();
+        assert_eq!(schema_format(tmp.path()), None, "only schema.rb -> default");
+    }
 
     #[test]
     fn adapter_reads_first_adapter_line() {
@@ -214,6 +242,64 @@ mod tests {
         Resource::PostgresDb { name: name.clone() }.teardown(); // clean up before asserting
 
         assert_eq!(table, "widgets", "db:schema:load should have created the widgets table");
+    }
+
+    /// When a Rails app keeps `db/structure.sql` instead of `db/schema.rb`,
+    /// `Rails::setup` passes `SCHEMA_FORMAT=sql` to `db:schema:load` so Rails 7+
+    /// loads `db/structure.sql` instead of aborting on the missing `db/schema.rb`.
+    #[test]
+    fn rails_cycle_loads_structure_sql_when_schema_rb_is_absent() {
+        use crate::provision::Resource;
+        use std::collections::HashMap;
+        use std::process::Command;
+
+        let name = test_db_name("railsfix", "ws-struct");
+        Resource::PostgresDb { name: name.clone() }.teardown();
+        if DbEngine::Postgres.create(&name).is_err() {
+            return; // no reachable Postgres server
+        }
+        Resource::PostgresDb { name: name.clone() }.teardown();
+
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails");
+        let bundle_ready = Command::new("bundle")
+            .arg("check")
+            .current_dir(fixture)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !bundle_ready {
+            return; // fixture gems not installed
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("railsfix-ws-struct");
+        assert!(
+            Command::new("cp").args(["-R", fixture, ws_dir.to_str().unwrap()]).status().unwrap().success(),
+            "copy fixture",
+        );
+        std::fs::remove_file(ws_dir.join("db/schema.rb")).unwrap();
+        std::fs::write(
+            ws_dir.join("db/structure.sql"),
+            "CREATE TABLE public.widgets (id bigint PRIMARY KEY, name character varying);\n",
+        )
+        .unwrap();
+
+        let mise = HashMap::new();
+        let ctx = ProvisionCtx {
+            project_dir: &ws_dir,
+            project_name: "railsfix",
+            ws_id: "ws-struct",
+            ws_dir: &ws_dir,
+            mise_vars: &mise,
+        };
+        let setup = Rails.setup(&ctx).unwrap();
+        let out = Command::new("psql").args(["-tAc", "select to_regclass('public.widgets')", &name]).output().unwrap();
+        let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Resource::PostgresDb { name: name.clone() }.teardown();
+
+        assert!(setup.failed_steps.is_empty(), "structure.sql load should succeed: {:?}", setup.failed_steps);
+        assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
+        assert_eq!(table, "widgets", "db:schema:load with SCHEMA_FORMAT=sql should have created the widgets table");
     }
 
     /// Proves what a Postgres Rails workspace's commands actually resolve to:

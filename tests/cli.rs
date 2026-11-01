@@ -510,6 +510,26 @@ fn create_without_a_gemfile_skips_the_gem_check() {
     assert_eq!(args, [vec!["exec", "rails", "db:schema:load"]], "{calls:?}");
 }
 
+/// When `db/structure.sql` exists without `db/schema.rb`, `Rails::setup` sets
+/// `SCHEMA_FORMAT=sql` on `rails db:schema:load`; when `db/schema.rb` is present
+/// too, it leaves `SCHEMA_FORMAT` unset so Rails loads `db/schema.rb`.
+#[test]
+fn create_sets_schema_format_sql_for_structure_sql_without_schema_rb() {
+    let sql_only = World::new();
+    let proj_sql = sql_only.project(&[RAILS, ("db/structure.sql", "CREATE TABLE widgets (id bigint);\n")]);
+    sql_only.stubs.set("bundle", "[ \"$SCHEMA_FORMAT\" = sql ]");
+    sql_only.workon(&proj_sql).args(["create", "--json"]).assert().success();
+
+    let both = World::new();
+    let proj_both = both.project(&[
+        RAILS,
+        ("db/structure.sql", "CREATE TABLE widgets (id bigint);\n"),
+        ("db/schema.rb", "ActiveRecord::Schema[7.1].define(version: 1) {}\n"),
+    ]);
+    both.stubs.set("bundle", "[ -z \"$SCHEMA_FORMAT\" ]");
+    both.workon(&proj_both).args(["create", "--json"]).assert().success();
+}
+
 /// Every provisioner with a setup step carries its failure through to `failed_steps`.
 #[test]
 fn each_provisioner_reports_its_failed_steps() {
