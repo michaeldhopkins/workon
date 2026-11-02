@@ -40,8 +40,8 @@ impl JjBackend {
     /// a reconcile enables is a bad rebase onto a reconciled state, which
     /// `workspace add` cannot produce — and jj preserves both sides of a fork
     /// regardless. Concurrency is safe; workon only needs to *surface* a
-    /// divergence, which `workon list`'s status column does (see `active_status`
-    /// in `workspace.rs`, reading `divergent()` via `jj_divergent_change_ids`).
+    /// divergence, which `workon list`'s status column does (see `workspace_status`
+    /// in `divergence.rs`, scoped to that workspace's own stack).
     fn add_workspace(&self, project_dir: &Path, ws_dir: &Path, ws_id: &str, rev: &str) -> Result<()> {
         let add = || self.run_workspace_add(project_dir, ws_dir, ws_id, rev);
 
@@ -1073,8 +1073,8 @@ mod tests {
         let _ = run_jj(repo, &["status"]); // triggers the auto-reconcile
     }
 
-    /// workon reads divergence via `vcs_runner::jj_divergent_change_ids` (in
-    /// `active_status`, during `workon list`). Its load-bearing property is that
+    /// `jj_divergent_change_ids` is the repo-wide half of `workspace_status`.
+    /// Its load-bearing property is that
     /// the read is working-copy-agnostic: it must detect a reconciled op-log
     /// fork AND never snapshot the user's in-progress edits (which would move
     /// `@` under them). Pinning both against real jj means a dependency

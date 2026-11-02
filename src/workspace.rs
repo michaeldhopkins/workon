@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use clap_complete::engine::CompletionCandidate;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use vcs_runner::{binary_available, jj_divergent_change_ids, run_git_utf8, Cmd};
+use vcs_runner::{binary_available, run_git_utf8, Cmd};
 
 use crate::claude_trust;
 use crate::deps;
@@ -718,37 +718,10 @@ fn describe_workspace(
         return None;
     }
     let project_name = project_dir.file_name().map(|n| n.to_string_lossy().into_owned());
-    let ws_id = crate::registered::listed_name(names, ws_dir, &project_dir, project_name.as_deref())
-        .unwrap_or_else(dir_basename);
-    Some(WorkspaceRow {
-        ws_id,
-        name,
-        age_seconds,
-        project: project_name,
-        ws_dir: ws_dir.to_path_buf(),
-        status: active_status(&project_dir),
-    })
-}
-
-/// Status for a resolvable (non-stale) workspace: `"divergent"` when the shared
-/// jj repo has a divergent change — a concurrent workspace/agent forked the
-/// operation log and jj reconciled the two heads, leaving one change id on more
-/// than one visible commit — otherwise `"active"`. Surfacing this is workon's
-/// real job around concurrency: a fork is safe (jj keeps both sides), so rather
-/// than prevent it, we make it *visible* here instead of letting the user hit it
-/// later as a bad diff or merge. Reads the first-class `divergent()` signal via
-/// vcs-runner's `jj_divergent_change_ids`, which is working-copy-agnostic (0.15+)
-/// so `workon list` never snapshots the user's edits; scoped to jj projects, and
-/// a jj error reads as "active" (this gates no mutation — a future guard that
-/// *acts* on divergence must instead read fail-closed).
-fn active_status(project_dir: &Path) -> &'static str {
-    let divergent =
-        project_dir.join(".jj").is_dir() && jj_divergent_change_ids(project_dir).is_ok_and(|ids| !ids.is_empty());
-    if divergent {
-        "divergent"
-    } else {
-        "active"
-    }
+    let listed = crate::registered::listed_name(names, ws_dir, &project_dir, project_name.as_deref());
+    let status = crate::divergence::listed_status(&project_dir, listed.as_deref());
+    let ws_id = listed.unwrap_or_else(dir_basename);
+    Some(WorkspaceRow { ws_id, name, age_seconds, project: project_name, ws_dir: ws_dir.to_path_buf(), status })
 }
 
 fn workspace_age_seconds(ws_dir: &Path) -> u64 {
@@ -1193,39 +1166,212 @@ mod tests {
     fn active_status_is_active_for_non_jj_project() {
         // No `.jj` dir at all → no jj invocation, plain active.
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(active_status(tmp.path()), "active");
+        assert_eq!(crate::divergence::workspace_status(tmp.path(), "default"), "active");
     }
 
-    /// A resolvable workspace surfaces `divergent` once the shared jj repo's
-    /// operation log has forked, so `workon list` shows the corruption class
-    /// up front instead of it turning up later as a bad diff or merge.
+    /// A directory that is not itself a jj repo stays active when a parent repo
+    /// holds a divergent change. jj would otherwise walk up to that parent.
     #[test]
-    fn active_status_reports_divergent_after_op_log_fork() {
+    fn a_plain_directory_inside_a_divergent_repo_stays_active() {
         if !vcs_runner::jj_available() {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
+        let repo = jj_repo_with_trunk(tmp.path());
+        jj_ok(&repo, &["describe", "-m", "A"]);
+        jj_ok(&repo, &["new", "-m", "B"]);
+        let ops = vcs_runner::run_jj_utf8(
+            &repo,
+            &["op", "log", "--ignore-working-copy", "--no-graph", "-T", "id ++ \"\\n\""],
+        )
+        .unwrap();
+        let earlier = ops.lines().nth(2).expect("an older op to fork at").to_string();
+        jj_ok(&repo, &["--at-operation", &earlier, "describe", "-m", "FORKED"]);
+        let _ = vcs_runner::run_jj(&repo, &["status"]);
+        assert_eq!(
+            crate::divergence::workspace_status(&repo, "default"),
+            "divergent",
+            "the fixture's default workspace is divergent"
+        );
+        let nested = repo.join("notes");
+        std::fs::create_dir(&nested).unwrap();
+        assert_eq!(crate::divergence::workspace_status(&nested, "default"), "active");
+    }
+
+    /// Colocated jj repo whose `trunk()` is `main@origin`, so the stack revset
+    /// resolves the same way under a user alias and under jj's built-in one.
+    fn jj_repo_with_trunk(root: &Path) -> PathBuf {
+        let origin = root.join("origin.git");
+        let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["init", "-q", "--initial-branch=main"]);
         git(&repo, &["config", "user.email", "t@t.com"]);
         git(&repo, &["config", "user.name", "T"]);
         std::fs::write(repo.join("f.txt"), "a").unwrap();
         git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-m", "init"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        git(root, &["init", "-q", "--bare", "--initial-branch=main", origin.to_str().unwrap()]);
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&repo, &["push", "-q", "-u", "origin", "main"]);
         vcs_runner::run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
-        vcs_runner::run_jj(&repo, &["describe", "-m", "A"]).unwrap();
-        vcs_runner::run_jj(&repo, &["new", "-m", "B"]).unwrap();
+        vcs_runner::run_jj(&repo, &["bookmark", "track", "main@origin"]).unwrap();
+        repo
+    }
 
-        assert_eq!(active_status(&repo), "active", "a clean colocated repo is active");
+    /// Directory name and jj workspace name differ, as they do for a workon
+    /// worktree (`<project>-<ws_id>` on disk, `<ws_id>` in jj).
+    fn add_named_workspace(repo: &Path, root: &Path, name: &str) -> PathBuf {
+        let ws = root.join(format!("proj-{name}"));
+        vcs_runner::run_jj(repo, &["workspace", "add", &path_str(&ws), "--name", name, "-r", "main"]).unwrap();
+        ws
+    }
 
-        // Fork the op log at an older op and let jj reconcile — leaves a divergence.
-        let ops = vcs_runner::run_jj_utf8(&repo, &["op", "log", "--no-graph", "-T", "id ++ \"\\n\""]).unwrap();
+    fn jj_ok(dir: &Path, args: &[&str]) {
+        vcs_runner::run_jj(dir, args).unwrap_or_else(|e| panic!("jj {args:?} in {}: {e}", dir.display()));
+    }
+
+    /// Rewrite the working-copy change at the operation before the latest
+    /// describe, then let jj reconcile. The current commit and that rewrite
+    /// share a change id.
+    fn diverge_working_copy(dir: &Path) {
+        jj_ok(dir, &["describe", "-m", "mine"]);
+        let ops =
+            vcs_runner::run_jj_utf8(dir, &["op", "log", "--ignore-working-copy", "--no-graph", "-T", "id ++ \"\\n\""])
+                .unwrap();
+        let before = ops.lines().nth(1).expect("the op before describe").to_string();
+        jj_ok(dir, &["--at-operation", &before, "describe", "-m", "FORKED"]);
+        let _ = vcs_runner::run_jj(dir, &["status"]);
+    }
+
+    fn commit_at(repo: &Path, revset: &str) -> String {
+        vcs_runner::run_jj_utf8(
+            repo,
+            &["log", "--ignore-working-copy", "--no-graph", "-r", revset, "-T", "commit_id", "--limit", "1"],
+        )
+        .unwrap_or_else(|e| panic!("jj log {revset}: {e}"))
+    }
+
+    /// A divergent change on the default workspace does not mark a workspace
+    /// whose stack is only its own commit off trunk.
+    #[test]
+    fn a_stale_divergent_change_outside_the_stack_leaves_the_workspace_active() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = jj_repo_with_trunk(tmp.path());
+        let ws = add_named_workspace(&repo, tmp.path(), "ws-fresh");
+
+        assert_eq!(
+            crate::divergence::workspace_status(&repo, "ws-fresh"),
+            "active",
+            "a new workspace on a clean repo is active"
+        );
+
+        jj_ok(&repo, &["describe", "-m", "A"]);
+        jj_ok(&repo, &["new", "-m", "B"]);
+        let ops = vcs_runner::run_jj_utf8(
+            &repo,
+            &["op", "log", "--ignore-working-copy", "--no-graph", "-T", "id ++ \"\\n\""],
+        )
+        .unwrap();
         let earlier = ops.lines().nth(2).expect("an older op to fork at").to_string();
-        vcs_runner::run_jj(&repo, &["--at-operation", &earlier, "describe", "-m", "FORKED"]).unwrap();
+        jj_ok(&repo, &["--at-operation", &earlier, "describe", "-m", "FORKED"]);
         let _ = vcs_runner::run_jj(&repo, &["status"]);
 
-        assert_eq!(active_status(&repo), "divergent", "a forked op log surfaces as divergent");
+        assert!(
+            !vcs_runner::jj_divergent_change_ids(&repo).unwrap().is_empty(),
+            "the repo holds a divergent change, or the test did not set one up"
+        );
+        assert_eq!(
+            crate::divergence::workspace_status(&repo, "default"),
+            "divergent",
+            "the default workspace owns the divergent commit"
+        );
+        assert_eq!(
+            crate::divergence::workspace_status(&repo, "ws-fresh"),
+            "active",
+            "that change is not in the new workspace's stack"
+        );
+
+        // The read must not snapshot. A dirty file would move `@` if it did.
+        std::fs::write(ws.join("wip.txt"), "uncommitted").unwrap();
+        let before = commit_at(&repo, "\"ws-fresh\"@");
+        assert_eq!(crate::divergence::workspace_status(&repo, "ws-fresh"), "active");
+        assert_eq!(before, commit_at(&repo, "\"ws-fresh\"@"), "reading status snapshot the workspace");
+    }
+
+    /// The workspace's own commit is one copy of a divergent change. A second
+    /// workspace branched from trunk is not.
+    #[test]
+    fn a_divergent_working_copy_marks_that_workspace() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = jj_repo_with_trunk(tmp.path());
+        let ws = add_named_workspace(&repo, tmp.path(), "ws-own");
+        diverge_working_copy(&ws);
+        let other = add_named_workspace(&repo, tmp.path(), "ws-other");
+
+        assert_eq!(crate::divergence::workspace_status(&repo, "ws-own"), "divergent");
+        assert_eq!(crate::divergence::workspace_status(&repo, "ws-other"), "active");
+
+        // `list` must pass jj's name, not the directory's. The directory is
+        // `proj-ws-own`; the workspace is `ws-own`.
+        let names = std::collections::BTreeMap::from([(std::fs::canonicalize(&ws).unwrap(), "ws-own".to_string())]);
+        let row = describe_workspace(&ws, &std::fs::canonicalize(tmp.path()).unwrap(), &names).unwrap();
+        assert_eq!(row.ws_id, "ws-own");
+        assert_eq!(row.status, "divergent");
+        let _ = other;
+    }
+
+    /// A workspace jj does not list under a name for its directory still shows a repo divergence,
+    /// where scoping by the directory's name would have read it as active.
+    #[test]
+    fn an_unlisted_workspace_directory_reads_the_whole_repo() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = jj_repo_with_trunk(tmp.path());
+        let ws = add_named_workspace(&repo, tmp.path(), "ws-gone");
+        diverge_working_copy(&ws);
+        let canonical_root = std::fs::canonicalize(tmp.path()).unwrap();
+        let unlisted = std::collections::BTreeMap::new();
+        let row = describe_workspace(&ws, &canonical_root, &unlisted).unwrap();
+        assert_eq!(row.status, "divergent");
+    }
+
+    /// The working-copy commit is a child of one copy of a divergent change.
+    /// The child is not itself divergent; the ancestor in the stack is.
+    #[test]
+    fn a_divergent_ancestor_in_the_stack_marks_the_workspace() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = jj_repo_with_trunk(tmp.path());
+        let ws = add_named_workspace(&repo, tmp.path(), "ws-anc");
+        diverge_working_copy(&ws);
+        let side = vcs_runner::run_jj_utf8(
+            &ws,
+            &["log", "--ignore-working-copy", "--no-graph", "-r", "divergent()", "-T", "commit_id ++ \"\\n\""],
+        )
+        .unwrap();
+        let side = side.lines().next().expect("a divergent commit to move onto");
+        jj_ok(&ws, &["new", side, "-m", "child"]);
+
+        let on_wc = vcs_runner::run_jj_utf8(
+            &repo,
+            &["log", "--ignore-working-copy", "--no-graph", "-r", "divergent() & \"ws-anc\"@", "-T", "change_id"],
+        )
+        .unwrap();
+        assert!(on_wc.is_empty(), "the working copy itself is divergent, so this does not test an ancestor: {on_wc}");
+
+        assert_eq!(crate::divergence::workspace_status(&repo, "ws-anc"), "divergent");
+        let _other = add_named_workspace(&repo, tmp.path(), "ws-clean");
+        assert_eq!(crate::divergence::workspace_status(&repo, "ws-clean"), "active");
     }
 
     /// Build a real git repo `myproj` with one commit and a detached worktree

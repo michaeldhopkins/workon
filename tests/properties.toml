@@ -65,6 +65,7 @@ owed = []
 "src/zellij_reply.rs" = ["a_listing_finds_exactly_the_sessions_named_first_on_a_line"]
 
 [effectful]
+"src/divergence.rs" = "runs jj to read one workspace's stack; stack_touches_divergence and the stack revset have properties divergence_outside_the_stack_leaves_the_workspace_active, one_stack_change_id_among_divergent_ids_is_enough and a_workspace_name_round_trips_through_the_revset_string"
 "src/exec.rs" = "replaces the process with the user's command in the workspace"
 "src/background.rs" = "deletes a directory on a background thread"
 "src/claude_trust.rs" = "reads and rewrites ~/.claude.json"
