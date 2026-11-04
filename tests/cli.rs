@@ -242,12 +242,14 @@ fn create_reports_the_gitignored_files_it_copies() {
 fn create_skips_stale_build_output_and_keeps_its_siblings() {
     let world = World::new();
     let proj = world.project(&[
-        (".gitignore", "node_modules/\npublic/packs-test/\npublic/uploads/\n"),
+        (".gitignore", "node_modules/\npublic/packs-test/\npublic/uploads/\nlog/*\ntmp/cache/\n"),
         ("public/robots.txt", "tracked\n"),
     ]);
     for (rel, body) in [
         ("node_modules/leftpad/index.js", "module.exports = {}\n"),
         ("public/packs-test/js/manifest.js", "{}\n"),
+        ("log/test.log.0", "old log\n"),
+        ("tmp/cache/bootsnap/x.bin", "cache\n"),
         ("public/uploads/avatar.png", "\nPNG\n"),
     ] {
         let path = proj.join(rel);
@@ -267,6 +269,8 @@ fn create_skips_stale_build_output_and_keeps_its_siblings() {
     assert!(ws.join("node_modules/leftpad/index.js").is_file(), "dependencies are cloned: {stderr}");
     assert!(ws.join("public/uploads/avatar.png").is_file(), "sibling content is cloned: {stderr}");
     assert!(!ws.join("public/packs-test").exists(), "stale build output must not be cloned");
+    assert!(!ws.join("log/test.log.0").exists(), "log files must not be cloned");
+    assert!(!ws.join("tmp/cache").exists(), "tmp/cache must not be cloned");
     // Only the two kept files are counted, and only the dependency dir is
     // cloned whole: `public` already exists in the workspace (it is tracked),
     // so the upload is copied individually.
