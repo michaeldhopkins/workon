@@ -93,6 +93,11 @@ impl Stubs {
         std::fs::remove_file(self.dir.path().join(name)).expect("a stub to remove");
     }
 
+    /// PATH of the stubs and `extra` alone, without the host's `/usr/bin:/bin`.
+    pub fn path_with(&self, extra: &Path) -> String {
+        format!("{}:{}", self.dir.path().display(), extra.display())
+    }
+
     pub fn path(&self) -> String {
         format!("{}:/usr/bin:/bin", self.dir.path().display())
     }
