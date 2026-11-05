@@ -402,18 +402,9 @@ fn a_missing_multiplexer_is_reported_before_anything_runs() {
     let proj = project(&world);
     bless_empty(&world);
     world.stubs.remove("tmux");
-    // The host's /usr/bin may hold a real tmux (a CI runner's does), so the PATH is the stubs plus
-    // links to the two tools the stubs themselves use, and nothing else.
-    let tools = world.path().join("tools");
-    std::fs::create_dir_all(&tools).expect("a tools dir");
-    for tool in ["cat", "mv"] {
-        std::os::unix::fs::symlink(format!("/bin/{tool}"), tools.join(tool)).expect("a tool link");
-    }
-    let path = world.stubs.path_with(&tools);
 
     world
         .workon(&proj)
-        .env("PATH", path)
         .args(["--mux", "tmux", "--config", "empty"])
         .assert()
         .failure()

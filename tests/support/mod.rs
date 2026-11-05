@@ -51,11 +51,19 @@ fn default_body(name: &str) -> &'static str {
 
 pub struct Stubs {
     dir: tempfile::TempDir,
+    /// Links to the two tools the stubs themselves use, for a PATH that hides the host's.
+    tools: tempfile::TempDir,
+    host_hidden: std::cell::Cell<bool>,
 }
 
 impl Stubs {
     fn new() -> Self {
-        let stubs = Self { dir: tempfile::tempdir().expect("a stub dir") };
+        let tools = tempfile::tempdir().expect("a tools dir");
+        for tool in ["cat", "mv"] {
+            std::os::unix::fs::symlink(format!("/bin/{tool}"), tools.path().join(tool)).expect("a tool link");
+        }
+        let stubs =
+            Self { dir: tempfile::tempdir().expect("a stub dir"), tools, host_hidden: std::cell::Cell::new(false) };
         for name in programs() {
             stubs.set(&name, default_body(&name));
         }
@@ -88,17 +96,18 @@ impl Stubs {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("executable");
     }
 
-    /// Take `name` off the stub PATH, as on a machine that does not have it.
+    /// Take `name` off the stub PATH, as on a machine that does not have it. The host's
+    /// `/usr/bin:/bin` leaves the PATH too (a CI runner's holds a real tmux), keeping only links to the
+    /// tools the stubs use.
     pub fn remove(&self, name: &str) {
         std::fs::remove_file(self.dir.path().join(name)).expect("a stub to remove");
-    }
-
-    /// PATH of the stubs and `extra` alone, without the host's `/usr/bin:/bin`.
-    pub fn path_with(&self, extra: &Path) -> String {
-        format!("{}:{}", self.dir.path().display(), extra.display())
+        self.host_hidden.set(true);
     }
 
     pub fn path(&self) -> String {
+        if self.host_hidden.get() {
+            return format!("{}:{}", self.dir.path().display(), self.tools.path().display());
+        }
         format!("{}:/usr/bin:/bin", self.dir.path().display())
     }
 
