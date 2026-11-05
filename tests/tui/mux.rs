@@ -310,3 +310,124 @@ fn tmux_matches_session_names_exactly() {
     assert!(send.wait_for_exit(), "{}", send.screen());
     wait_and_read(&world, &proj, "tmux", &dotted, "dot-ok");
 }
+
+/// A `tmux` whose sessions are one file: `has-session` succeeds while it exists,
+/// `new-session` creates it and `kill-session` removes it.
+fn stateful_tmux(world: &World, session_exists: bool) {
+    let state = world.path().join("tmux-session");
+    if session_exists {
+        std::fs::write(&state, "").expect("an existing session");
+    }
+    let body = format!(
+        "state='{}'\ncase \"$1\" in\n  --version) exit 1 ;;\n  has-session) [ -e \"$state\" ]; exit $? ;;\n  \
+         new-session) : > \"$state\" ;;\n  kill-session) /bin/rm -f \"$state\" ;;\nesac\nexit 0",
+        state.display()
+    );
+    world.stubs.set("tmux", &body);
+}
+
+/// The first argument of each tmux call except the `has-session` and `--version` probes.
+fn tmux_names(world: &World) -> Vec<String> {
+    world
+        .stubs
+        .calls("tmux")
+        .into_iter()
+        .filter_map(|call| call.args.into_iter().next())
+        .filter(|name| name != "has-session" && name != "--version")
+        .collect()
+}
+
+#[test]
+fn tmux_opens_a_missing_session_and_attaches() {
+    let world = World::new();
+    let proj = project(&world);
+    bless_empty(&world);
+    stateful_tmux(&world, false);
+
+    world.workon(&proj).args(["--mux", "tmux", "--config", "empty"]).assert().success();
+
+    let created = calls_starting(&world, "tmux", "new-session");
+    assert_eq!(created.len(), 1, "{created:?}");
+    let attached = calls_starting(&world, "tmux", "attach-session");
+    assert_eq!(attached.len(), 1, "{attached:?}");
+    assert_eq!(attached[0].args, ["attach-session", "-t", "=proj:"]);
+    assert_eq!(attached[0].cwd, proj);
+    assert!(!tmux_names(&world).contains(&"kill-session".to_string()), "{:?}", tmux_names(&world));
+}
+
+#[test]
+fn tmux_attaches_to_a_running_session_without_touching_it() {
+    let world = World::new();
+    let proj = project(&world);
+    bless_empty(&world);
+    stateful_tmux(&world, true);
+
+    world.workon(&proj).args(["--mux", "tmux", "--config", "empty"]).assert().success();
+
+    let names = tmux_names(&world);
+    assert!(names.contains(&"attach-session".to_string()), "{names:?}");
+    assert!(!names.contains(&"new-session".to_string()), "{names:?}");
+    assert!(!names.contains(&"kill-session".to_string()), "{names:?}");
+}
+
+#[test]
+fn tmux_new_session_replaces_a_running_one() {
+    let world = World::new();
+    let proj = project(&world);
+    bless_empty(&world);
+    stateful_tmux(&world, true);
+
+    world.workon(&proj).args(["--mux", "tmux", "--config", "empty", "--new-session"]).assert().success();
+
+    let names = tmux_names(&world);
+    assert_eq!(names, ["kill-session", "new-session", "attach-session"], "{names:?}");
+}
+
+#[test]
+fn tmux_new_session_with_none_running_kills_nothing() {
+    let world = World::new();
+    let proj = project(&world);
+    bless_empty(&world);
+    stateful_tmux(&world, false);
+
+    world.workon(&proj).args(["--mux", "tmux", "--config", "empty", "--new-session"]).assert().success();
+
+    let names = tmux_names(&world);
+    assert_eq!(names, ["new-session", "attach-session"], "{names:?}");
+}
+
+#[test]
+fn a_missing_multiplexer_is_reported_before_anything_runs() {
+    let world = World::new();
+    let proj = project(&world);
+    bless_empty(&world);
+    world.stubs.remove("tmux");
+
+    world
+        .workon(&proj)
+        .args(["--mux", "tmux", "--config", "empty"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing dependencies:"))
+        .stderr(predicate::str::contains("tmux — not found. Install: brew install tmux"));
+}
+
+/// `WORKON_MUX` picks the multiplexer when no flag does; an empty one means the default.
+#[test]
+fn workon_mux_selects_the_multiplexer_unless_empty() {
+    let world = World::new();
+    let proj = project(&world);
+    bless_empty(&world);
+    stateful_tmux(&world, true);
+
+    world.workon(&proj).env("WORKON_MUX", "tmux").args(["--config", "empty"]).assert().success();
+    assert_eq!(calls_starting(&world, "tmux", "attach-session").len(), 1);
+    assert!(calls_starting(&world, "zellij", "--new-session-with-layout").is_empty());
+
+    let empty = World::new();
+    let proj = project(&empty);
+    bless_empty(&empty);
+    empty.workon(&proj).env("WORKON_MUX", "").args(["--config", "empty"]).assert().success();
+    assert_eq!(empty.stubs.call("zellij", "--new-session-with-layout").args[2..], ["--session", "proj"]);
+    assert!(empty.stubs.calls("tmux").is_empty());
+}

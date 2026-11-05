@@ -88,6 +88,11 @@ impl Stubs {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("executable");
     }
 
+    /// Take `name` off the stub PATH, as on a machine that does not have it.
+    pub fn remove(&self, name: &str) {
+        std::fs::remove_file(self.dir.path().join(name)).expect("a stub to remove");
+    }
+
     pub fn path(&self) -> String {
         format!("{}:/usr/bin:/bin", self.dir.path().display())
     }

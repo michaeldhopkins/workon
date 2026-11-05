@@ -158,8 +158,7 @@ fn delete_session(zellij: &str, name: &str) -> Result<()> {
 fn recover_session(name: &str) -> Result<()> {
     eprintln!("Warning: zellij session '{name}' appears hung, recovering...");
 
-    let pattern = anchored_server_pattern(name);
-    let _ = Cmd::new("pkill").args(["-9", "-f", &pattern]).timeout(ZELLIJ_TIMEOUT).run();
+    kill_server(&anchored_server_pattern(name));
 
     if let Ok(socket) = session_socket(name) {
         let _ = std::fs::remove_file(&socket);
@@ -168,6 +167,35 @@ fn recover_session(name: &str) -> Result<()> {
     // Give the kernel a beat to release the socket inode before relaunching.
     std::thread::sleep(Duration::from_millis(200));
     Ok(())
+}
+
+/// The test build never runs `pkill -f` (see [`kill_test_decoys`]); one body with the `#[cfg]`
+/// inside, so the mutants of this function are compiled and tested.
+fn kill_server(pattern: &str) {
+    #[cfg(not(test))]
+    {
+        let _ = Cmd::new("pkill").args(["-9", "-f", pattern]).timeout(ZELLIJ_TIMEOUT).run();
+    }
+    #[cfg(test)]
+    kill_test_decoys(pattern);
+}
+
+/// A mutant of the pattern (an empty one matches every process) must not signal whatever is
+/// running. It lists the matches with `pgrep` and kills, by pid, only the decoys the tests
+/// spawn (`TEST_DECOY_MARKER` in their command line).
+#[cfg(test)]
+fn kill_test_decoys(pattern: &str) {
+    let Ok(out) = Cmd::new("pgrep").args(["-f", pattern]).timeout(ZELLIJ_TIMEOUT).run() else {
+        return;
+    };
+    for pid in out.stdout_lossy().lines().map(str::trim).filter(|pid| pid.parse::<u32>().is_ok()) {
+        let Ok(command) = Cmd::new("ps").args(["-o", "command=", "-p", pid]).timeout(ZELLIJ_TIMEOUT).run() else {
+            continue;
+        };
+        if command.stdout_lossy().contains(tests::TEST_DECOY_MARKER) {
+            let _ = Cmd::new("kill").args(["-9", pid]).timeout(ZELLIJ_TIMEOUT).run();
+        }
+    }
 }
 
 /// Per-session socket path. Mirrors zellij's own derivation:
@@ -356,6 +384,9 @@ fn zellij_config_path() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every decoy server the tests spawn lives under this path; `kill_server` kills nothing else.
+    pub(super) const TEST_DECOY_MARKER: &str = "/tmp/zellij-test/";
 
     #[test]
     fn parse_descendants_finds_direct_children_linux_format() {
@@ -611,8 +642,8 @@ mod tests {
         let foo_session = format!("{unique}-foo");
         let foo_bar_session = format!("{unique}-foo-bar");
 
-        let foo_path = format!("/tmp/zellij-test/{foo_session}");
-        let foo_bar_path = format!("/tmp/zellij-test/{foo_bar_session}");
+        let foo_path = format!("{TEST_DECOY_MARKER}{foo_session}");
+        let foo_bar_path = format!("{TEST_DECOY_MARKER}{foo_bar_session}");
 
         let mut foo = spawn_fake_server(&foo_path);
         let mut foo_bar = spawn_fake_server(&foo_bar_path);
@@ -644,8 +675,8 @@ mod tests {
         let target = format!("{unique}-target");
         let bystander = format!("{unique}-bystander");
 
-        let mut target_proc = spawn_fake_server(&format!("/tmp/zellij-test/{target}"));
-        let mut bystander_proc = spawn_fake_server(&format!("/tmp/zellij-test/{bystander}"));
+        let mut target_proc = spawn_fake_server(&format!("{TEST_DECOY_MARKER}{target}"));
+        let mut bystander_proc = spawn_fake_server(&format!("{TEST_DECOY_MARKER}{bystander}"));
 
         std::thread::sleep(Duration::from_millis(150));
 
@@ -673,6 +704,23 @@ mod tests {
             bystander_pid_before, bystander_pid_after,
             "recover_session killed unrelated session — bystander pid changed"
         );
+    }
+
+    /// The test build's `kill_server` kills only the tests' own decoys, so a process that
+    /// matches the pattern but is not one of them (a real zellij server) survives.
+    #[test]
+    fn test_build_kill_server_spares_a_matching_process_that_is_not_a_decoy() {
+        let name = format!("workon-spare-{}", std::process::id());
+        let mut real = spawn_fake_server(&format!("/tmp/not-a-decoy/{name}"));
+        std::thread::sleep(Duration::from_millis(150));
+
+        recover_session(&name).expect("recover_session");
+        std::thread::sleep(Duration::from_millis(200));
+        let survived = real.try_wait().expect("try_wait").is_none();
+        let _ = real.kill();
+        let _ = real.wait();
+
+        assert!(survived, "a non-decoy process was killed");
     }
 
     /// A stand-in for `zellij` that appends its arguments to `log` and runs `body`.
