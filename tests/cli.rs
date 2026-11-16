@@ -388,23 +388,24 @@ fn last_lines(text: &str, n: usize) -> Vec<&str> {
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
-/// Issue #2: a Rails schema load that fails is reported by `create`, in its JSON and in its last
+/// Issue #2: a Rails command that fails is reported by `create`, in its JSON and in its last
 /// lines, which name the command that opens the workspace anyway. It exits 3 and keeps the
-/// workspace, so a script can tell it from a create that made nothing.
+/// workspace, so a script can tell it from a create that made nothing. The listing runs first,
+/// so a Rails that will not boot fails there and never prepares.
 #[test]
 fn create_reports_a_failed_schema_load() {
     let failing = [("bundle", "echo 'bundler: cannot load' >&2; exit 1")];
     let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &["--json"]);
 
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(report["failed_steps"], serde_json::json!(["rails db:schema:load"]), "{report}");
+    assert_eq!(report["failed_steps"], serde_json::json!(["list rails databases"]), "{report}");
     let ws_id = report["ws_id"].as_str().unwrap();
     assert!(Path::new(report["path"].as_str().unwrap()).is_dir(), "the workspace is kept: {report}");
     assert!(stderr.contains("bundler: cannot load"), "the step's own error is shown: {stderr}");
     assert_eq!(
         last_lines(&stderr, 2),
         [
-            "Warning: the workspace is not ready; failed (output above): rails db:schema:load".to_string(),
+            "Warning: the workspace is not ready; failed (output above): list rails databases".to_string(),
             format!("Open it anyway with: workon attach {ws_id}"),
         ],
         "{stderr}"
@@ -423,26 +424,24 @@ fn create_without_json_ends_with_the_same_lines() {
     assert_eq!(
         last_lines(&stderr, 2),
         [
-            "Warning: the workspace is not ready; failed (output above): rails db:schema:load".to_string(),
+            "Warning: the workspace is not ready; failed (output above): list rails databases".to_string(),
             format!("Open it anyway with: workon attach {ws_id}"),
         ],
         "{stderr}"
     );
 }
 
-/// A test database that cannot be created (the server is down) is a failed step too: the
-/// workspace would otherwise run its tests against the shared database.
+/// A Rails listing that cannot run (the server is down, the task fails) is a failed step,
+/// and prepare does not run against the primary checkout's databases.
 #[test]
 fn create_reports_a_test_database_it_could_not_create() {
-    let failing = [("createdb", "echo 'createdb: error: connection refused' >&2; exit 1")];
+    let failing = [("bundle", "echo 'connection refused' >&2; exit 1")];
     let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &["--json"]);
 
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let steps = report["failed_steps"].as_array().unwrap();
-    assert_eq!(steps.len(), 1, "{report}");
-    assert!(steps[0].as_str().unwrap().starts_with("create test database proj_ws_"), "{report}");
+    assert_eq!(report["failed_steps"], serde_json::json!(["list rails databases"]), "{report}");
     assert_eq!(report["dbs"], serde_json::json!([]), "nothing to drop: {report}");
-    assert!(stderr.contains("is the Postgres server running?"), "the reason is shown: {stderr}");
+    assert!(stderr.contains("connection refused"), "the reason is shown: {stderr}");
 }
 
 /// Issue #4: git-sourced gems live in a per-checkout bundler path the gitignored-file clone
@@ -459,10 +458,28 @@ fn create_checks_gems_before_loading_the_schema() {
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let ws = Path::new(report["path"].as_str().unwrap());
     let calls = world.stubs.calls("bundle");
-    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls.len(), 3, "{calls:?}");
     assert_eq!(calls[0].args, ["check"], "the gems are checked first: {calls:?}");
     assert_eq!(&calls[0].cwd, ws, "in the new workspace: {calls:?}");
-    assert_eq!(calls[1].args, ["exec", "rails", "db:schema:load"], "the schema load follows: {calls:?}");
+    assert_eq!(
+        calls[1].args.first().map(String::as_str),
+        Some("exec"),
+        "the names are listed before prepare: {calls:?}"
+    );
+    assert_eq!(calls[1].args.get(2).map(String::as_str), Some("runner"), "{calls:?}");
+    assert_eq!(calls[2].args, ["exec", "rails", "db:prepare"], "prepare follows a suffixed listing: {calls:?}");
+
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ws.join(".workon.json")).unwrap()).unwrap();
+    let session = &meta["session_env"];
+    assert!(session["WORKON_RAILS_DB_SUFFIX"].as_str().unwrap().starts_with("_ws_"), "{meta}");
+    assert!(session["RUBYOPT"].as_str().unwrap().contains("-r"), "{meta}");
+    assert!(session.get("DATABASE_URL").is_none(), "{meta}");
+    assert!(meta["env"].as_object().unwrap().is_empty(), "no dotenv vars: {meta}");
+    assert!(!ws.join(".env.test.local").exists(), "Rails writes no env file");
+    let script = world.home().join(".local/share/workon/rails_db_suffix.rb");
+    assert!(script.is_file(), "the suffix script is outside the workspace: {script:?}");
+    assert!(!ws.join("rails_db_suffix.rb").exists());
 }
 
 /// A failing check (the git-sourced gem is not yet checked out) runs the install,
@@ -478,7 +495,11 @@ fn create_installs_gems_when_the_check_fails() {
 
     let calls = world.stubs.calls("bundle");
     let args: Vec<Vec<&str>> = calls.iter().map(|c| c.args.iter().map(String::as_str).collect()).collect();
-    assert_eq!(args, [vec!["check"], vec!["install"], vec!["exec", "rails", "db:schema:load"]], "{calls:?}");
+    assert_eq!(args.len(), 4, "{calls:?}");
+    assert_eq!(args[0], ["check"], "{calls:?}");
+    assert_eq!(args[1], ["install"], "{calls:?}");
+    assert_eq!(&args[2][..3], ["exec", "rails", "runner"], "{calls:?}");
+    assert_eq!(args[3], ["exec", "rails", "db:prepare"], "{calls:?}");
 }
 
 /// A failed install is a failed step, and the schema load it would have left half-run
@@ -511,18 +532,79 @@ fn create_without_a_gemfile_skips_the_gem_check() {
 
     let calls = world.stubs.calls("bundle");
     let args: Vec<Vec<&str>> = calls.iter().map(|c| c.args.iter().map(String::as_str).collect()).collect();
-    assert_eq!(args, [vec!["exec", "rails", "db:schema:load"]], "{calls:?}");
+    assert_eq!(args.len(), 2, "{calls:?}");
+    assert_eq!(args[0][2], "runner", "{calls:?}");
+    assert_eq!(args[1], ["exec", "rails", "db:prepare"], "{calls:?}");
 }
 
-/// When `db/structure.sql` exists without `db/schema.rb`, `Rails::setup` sets
-/// `SCHEMA_FORMAT=sql` on `rails db:schema:load`; when `db/schema.rb` is present
-/// too, it leaves `SCHEMA_FORMAT` unset so Rails loads `db/schema.rb`.
+/// A name that does not end with the workspace suffix is the primary checkout's
+/// database. Prepare does not run, and nothing is recorded to drop.
+#[test]
+fn create_does_not_prepare_when_a_database_name_lacks_the_suffix() {
+    let world = World::new();
+    let proj = world.project(&[RAILS]);
+    world.stubs.set(
+        "bundle",
+        "if [ \"$3\" = runner ]; then\n\
+         printf 'WORKON_DB\\tdevelopment\\tpostgresql\\tapp_development\\n'\n\
+         exit 0\n\
+         fi\n\
+         echo 'prepare must not run' >&2\n\
+         exit 1\n",
+    );
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["list rails databases"]), "{report}");
+    assert_eq!(report["dbs"], serde_json::json!([]), "{report}");
+    let calls = world.stubs.calls("bundle");
+    assert!(calls.iter().all(|call| call.args.get(2).is_none_or(|arg| arg != "db:prepare")), "{calls:?}");
+}
+
+/// The names Rails reports, once they carry the suffix, are what teardown drops.
+#[test]
+fn create_records_the_suffixed_names_rails_reports() {
+    let world = World::new();
+    let proj = world.project(&[RAILS]);
+    world.stubs.set(
+        "bundle",
+        "if [ \"$3\" = runner ]; then\n\
+         printf 'WORKON_DB\\tdevelopment\\tpostgresql\\tapp%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
+         printf 'WORKON_DB\\ttest\\tpostgresql\\tapp_test%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
+         exit 0\n\
+         fi\n\
+         exit 0\n",
+    );
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dbs = report["dbs"].as_array().unwrap();
+    assert_eq!(dbs.len(), 2, "{report}");
+    assert!(dbs.iter().all(|db| db.as_str().unwrap().contains("_ws_")), "{report}");
+    let calls = world.stubs.calls("bundle");
+    assert!(calls.iter().any(|call| call.args.get(2).is_some_and(|arg| arg == "db:prepare")), "{calls:?}");
+}
+
+/// When `db/structure.sql` exists without `db/schema.rb`, prepare runs and
+/// `db:schema:load` carries `SCHEMA_FORMAT=sql` (`db:prepare` does not read it).
+/// When `db/schema.rb` is present too, the schema load does not run and
+/// `SCHEMA_FORMAT` stays unset.
 #[test]
 fn create_sets_schema_format_sql_for_structure_sql_without_schema_rb() {
     let sql_only = World::new();
     let proj_sql = sql_only.project(&[RAILS, ("db/structure.sql", "CREATE TABLE widgets (id bigint);\n")]);
-    sql_only.stubs.set("bundle", "[ \"$SCHEMA_FORMAT\" = sql ]");
+    sql_only.stubs.set(
+        "bundle",
+        "case \"$3\" in\n\
+         db:schema:load) [ \"$SCHEMA_FORMAT\" = sql ] ;;\n\
+         *) [ -z \"$SCHEMA_FORMAT\" ] ;;\n\
+         esac",
+    );
     sql_only.workon(&proj_sql).args(["create", "--json"]).assert().success();
+    let sql_args: Vec<Vec<String>> = sql_only.stubs.calls("bundle").iter().map(|call| call.args.clone()).collect();
+    assert!(sql_args.iter().any(|args| args.get(2).is_some_and(|arg| arg == "db:schema:load")), "{sql_args:?}");
 
     let both = World::new();
     let proj_both = both.project(&[
@@ -532,6 +614,8 @@ fn create_sets_schema_format_sql_for_structure_sql_without_schema_rb() {
     ]);
     both.stubs.set("bundle", "[ -z \"$SCHEMA_FORMAT\" ]");
     both.workon(&proj_both).args(["create", "--json"]).assert().success();
+    let both_args: Vec<Vec<String>> = both.stubs.calls("bundle").iter().map(|call| call.args.clone()).collect();
+    assert!(both_args.iter().all(|args| args.get(2).is_none_or(|arg| arg != "db:schema:load")), "{both_args:?}");
 }
 
 /// Every provisioner with a setup step carries its failure through to `failed_steps`.

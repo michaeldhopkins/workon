@@ -149,7 +149,7 @@ fn attach_hands_an_existing_workspace_to_zellij_and_keeps_it() {
     assert!(launch.cwd.exists(), "attach leaves the workspace in place");
 }
 
-/// Issue #2: a Rails app whose schema load fails, so `-w` stops to ask before zellij.
+/// Issue #2: a Rails app whose database listing fails, so `-w` stops to ask before zellij.
 fn world_whose_schema_load_fails() -> (World, std::path::PathBuf) {
     let world = World::new();
     let proj = world.project(&[("config/database.yml", "test:\n  adapter: postgresql\n")]);
@@ -192,7 +192,7 @@ fn not_ready_pause_n_removes_the_workspace_without_launching() {
         .all(|c| c.args.first().is_none_or(|a| a != "--new-session-with-layout")));
     assert!(tui.screen().contains("Cleaning up workspace"), "{}", tui.screen());
     assert!(!tui.screen().contains("Save under"), "declining asks nothing more");
-    assert_eq!(world.stubs.calls("dropdb").len(), 1, "the test database is dropped");
+    assert_eq!(world.stubs.calls("dropdb").len(), 0, "a failed listing records no database to drop");
     let left: Vec<_> = std::fs::read_dir(world.worktrees()).unwrap().flatten().map(|e| e.path()).collect();
     for dir in &left {
         assert_removed_soon(dir);

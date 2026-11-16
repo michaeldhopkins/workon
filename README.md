@@ -58,7 +58,7 @@ What it does:
 1. Initializes jj (colocated) if the project only has git
 2. Creates a jj workspace branched from trunk (main/master)
 3. Clones gitignored files (build artifacts, `node_modules/`, `target/`, etc.) using APFS `clonefile(2)` on macOS for near-instant copy-on-write directory cloning, with cross-platform reflink fallback via [clonetree](https://crates.io/crates/clonetree)
-4. For Rails apps: creates an isolated test database and loads the schema
+4. For Rails apps: creates isolated development and test databases and loads the schema into both
 5. If a setup step fails (a test database, schema load or migration, for any framework), says so and asks `Open it anyway? [Y/n]`; `n` removes the workspace
 6. Launches a Zellij session in the workspace
 7. On exit: prompts to bookmark uncommitted work, forgets the jj workspace, drops any test database, and removes the directory in the background
@@ -67,7 +67,7 @@ The primary session (plain `workon`) is unaffected — it works directly in the 
 
 ### Limitations
 
-- The workspace shares the development database with the primary session. Don't run migrations or the Rails server from a workspace.
+- Rails development and test databases belong to the workspace. The primary checkout keeps the database names in `config/database.yml`. A migration in the workspace applies to that workspace's databases.
 - `parallel_rspec` uses shared test databases. Use `bundle exec rspec` in the workspace for isolated specs.
 
 ## Headless workspaces

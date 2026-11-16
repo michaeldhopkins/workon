@@ -1,18 +1,19 @@
-//! Rails provisioner: an isolated Postgres test database per workspace, schema
-//! loaded. Preserves the behavior of the pre-registry `setup_rails_db`.
+//! Rails provisioner: isolated development and test databases per workspace.
 //!
-//! Isolation is delivered through `.env.test.local` (written by the caller from
-//! `Setup.env`), not the session env: dotenv-rails loads that file only under
-//! `RAILS_ENV=test`, so the workspace's dev commands keep using the dev DB while
-//! test commands use the isolated one. Injecting `DATABASE_URL` into the session
-//! would wrongly point every command at the test DB.
+//! `config/database.yml` keeps the primary checkout's names. The workspace
+//! exports `WORKON_RAILS_DB_SUFFIX` and a `RUBYOPT` that loads a script from
+//! workon's data directory. The script suffixes the development and test names
+//! (replicas stay put) and holds no per-workspace data. `DATABASE_URL` is left
+//! unset, so `db:prepare` creates and loads both databases. No file is written
+//! into the workspace.
 
 use std::path::Path;
 
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::{run_step, test_db_name, DbEngine, ProvisionCtx, Provisioner, Setup};
+use super::rails_suffix::{self, LIST_DATABASES, SUFFIX_VAR};
+use super::{run_step, ProvisionCtx, Provisioner, Resource, Setup};
 
 pub struct Rails;
 
@@ -27,64 +28,123 @@ impl Provisioner for Rails {
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
         let yml = std::fs::read_to_string(ctx.ws_dir.join("config/database.yml")).unwrap_or_default();
-        let engine = match adapter(&yml).as_deref() {
-            Some("postgresql") | None => DbEngine::Postgres,
-            Some("mysql2") | Some("mysql") | Some("trilogy") => DbEngine::Mysql,
-            Some("sqlite3") => return Ok(Setup::default()), // file-based, copied with the worktree
-            Some(other) => {
-                eprintln!("Rails adapter `{other}` not supported; skipping DB setup");
-                return Ok(Setup::default());
+        if !provisions_server_db(&yml) {
+            return Ok(Setup::default());
+        }
+
+        let script = match rails_suffix::install() {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("Warning: could not install the Rails database suffix: {err}");
+                return Ok(Setup { failed_steps: vec!["install rails db suffix".to_string()], ..Setup::default() });
             }
         };
-        let db = test_db_name(ctx.project_name, ctx.ws_id);
+        let suffix = rails_suffix::db_suffix(ctx.ws_id);
+        let inherited = ctx.mise_vars.get("RUBYOPT").cloned().or_else(|| std::env::var("RUBYOPT").ok());
+        let rubyopt = match rails_suffix::rubyopt_loading(inherited.as_deref(), &script) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("Warning: could not install the Rails database suffix: {err}");
+                return Ok(Setup { failed_steps: vec!["install rails db suffix".to_string()], ..Setup::default() });
+            }
+        };
 
-        eprintln!("Creating test database {db}...");
-        if let Err(e) = engine.create(&db) {
-            return Ok(Setup::database_not_created(&db, &e));
-        }
-
-        // The DB exists now — record it (resource-before-risk) so teardown drops
-        // it even if the schema load below fails.
-        let resource = engine.resource(&db);
-        let url = engine.url(&db);
-
-        // Gems before any bundler/Rails step (issue #4), then the schema load, which
-        // the install going wrong must not leave half-run.
         let mut failed_steps: Vec<String> = bundle_install(ctx).into_iter().collect();
+        // Names first. `db:prepare` creates whatever the hook resolved, so a hook
+        // that did not load must not run against the primary checkout's databases.
+        let mut resources = Vec::new();
         if failed_steps.is_empty() {
-            eprintln!("Loading schema...");
-            let mut cmd = Cmd::new("bundle")
-                .args(["exec", "rails", "db:schema:load"])
-                .env("RAILS_ENV", "test")
-                .env("DATABASE_URL", &url)
-                .in_dir(ctx.ws_dir);
-            if let Some(fmt) = schema_format(ctx.ws_dir) {
-                cmd = cmd.env("SCHEMA_FORMAT", fmt);
+            match list_databases(ctx, &suffix, &rubyopt) {
+                Ok(listed) => {
+                    let (isolated, all_isolated) = rails_suffix::isolated_resources(listed, &suffix);
+                    if all_isolated {
+                        resources = isolated;
+                    } else {
+                        eprintln!(
+                            "Warning: list rails databases failed: a database name did not end with the workspace suffix"
+                        );
+                        failed_steps.push("list rails databases".to_string());
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Warning: list rails databases failed: {err}");
+                    failed_steps.push("list rails databases".to_string());
+                }
             }
-            for (k, v) in ctx.mise_vars {
-                cmd = cmd.env(k, v);
-            }
-            failed_steps.extend(run_step(cmd, "rails db:schema:load"));
+        }
+        if failed_steps.is_empty() {
+            eprintln!("Preparing this workspace's Rails development and test databases...");
+            failed_steps.extend(run_step(prepare_cmd(ctx, &suffix, &rubyopt), "rails db:prepare"));
+        }
+        if failed_steps.is_empty() && schema_format(ctx.ws_dir) == Some("sql") {
+            failed_steps.extend(run_step(structure_load_cmd(ctx, &suffix, &rubyopt), "rails db:schema:load"));
         }
 
-        // No env_file: .env.test.local, which dotenv-rails loads under RAILS_ENV=test.
-        Ok(Setup::database_url(vec![resource], url, failed_steps))
+        Ok(Setup {
+            resources,
+            session_env: vec![(SUFFIX_VAR.to_string(), suffix), ("RUBYOPT".to_string(), rubyopt)],
+            failed_steps,
+            ..Setup::default()
+        })
     }
+}
+
+/// `true` when the first adapter is a server database. SQLite is a file that
+/// the worktree copy already has. An unknown adapter is skipped out loud.
+fn provisions_server_db(database_yml: &str) -> bool {
+    match adapter(database_yml).as_deref() {
+        Some("sqlite3") => false,
+        Some("postgresql" | "mysql2" | "mysql" | "trilogy") | None => true,
+        Some(other) => {
+            eprintln!("Rails adapter `{other}` not supported; skipping DB setup");
+            false
+        }
+    }
+}
+
+fn prepare_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
+    rails_cmd(ctx, suffix, rubyopt).args(["exec", "rails", "db:prepare"]).env("RAILS_ENV", "development")
+}
+
+/// `db:prepare` does not read `SCHEMA_FORMAT`. With `DATABASE_URL` unset this
+/// load covers development and the test database together.
+fn structure_load_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
+    rails_cmd(ctx, suffix, rubyopt)
+        .args(["exec", "rails", "db:schema:load"])
+        .env("RAILS_ENV", "development")
+        .env("SCHEMA_FORMAT", "sql")
+}
+
+fn list_databases(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Result<Vec<Resource>> {
+    let out = rails_cmd(ctx, suffix, rubyopt)
+        .args(["exec", "rails", "runner", LIST_DATABASES])
+        .env("RAILS_ENV", "development")
+        .run()
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(rails_suffix::parse_db_listing(&out.stdout_lossy()))
+}
+
+fn rails_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
+    let mut cmd = Cmd::new("bundle").in_dir(ctx.ws_dir);
+    for (key, value) in ctx.mise_vars {
+        cmd = cmd.env(key, value);
+    }
+    cmd.env(SUFFIX_VAR, suffix).env("RUBYOPT", rubyopt)
 }
 
 /// `bundle check || bundle install` in the workspace when it has a Gemfile. Git-sourced
 /// gems are checked out into a per-checkout bundler path the gitignored-file clone does
-/// not cover (issue #4), so `db:schema:load` would fail with "not yet checked out" until
-/// this runs. `None` means the gems are ready (or there is no Gemfile); a failed install
-/// is reported like every other step, naming its command.
+/// not cover (issue #4), so Rails would fail with "not yet checked out" until this runs.
+/// `None` means the gems are ready (or there is no Gemfile); a failed install is reported
+/// like every other step, naming its command.
 fn bundle_install(ctx: &ProvisionCtx<'_>) -> Option<String> {
     if !ctx.ws_dir.join("Gemfile").is_file() {
         return None;
     }
     let bundle = |args: &[&str]| {
         let mut cmd = Cmd::new("bundle").args(args).in_dir(ctx.ws_dir);
-        for (k, v) in ctx.mise_vars {
-            cmd = cmd.env(k, v);
+        for (key, value) in ctx.mise_vars {
+            cmd = cmd.env(key, value);
         }
         cmd
     };
@@ -96,7 +156,9 @@ fn bundle_install(ctx: &ProvisionCtx<'_>) -> Option<String> {
 
 /// `sql` when the app keeps `db/structure.sql` without `db/schema.rb`, else `None`
 /// (Rails' own default is `ruby`, `db/schema.rb`). Rails 7+ removed `db:structure:load`
-/// in favour of `db:schema:load` reading `SCHEMA_FORMAT=sql`.
+/// in favour of `db:schema:load` reading `SCHEMA_FORMAT=sql`. `db:prepare` does not
+/// read that variable, so a structure-only app is loaded with a following
+/// `db:schema:load`.
 pub(crate) fn schema_format(ws_dir: &Path) -> Option<&'static str> {
     (ws_dir.join("db/structure.sql").is_file() && !ws_dir.join("db/schema.rb").is_file()).then_some("sql")
 }
@@ -104,15 +166,27 @@ pub(crate) fn schema_format(ws_dir: &Path) -> Option<&'static str> {
 /// The first `adapter:` value in `database.yml` (usually under `default:`),
 /// e.g. `postgresql`, `mysql2`, `sqlite3`.
 pub(crate) fn adapter(database_yml: &str) -> Option<String> {
-    database_yml.lines().find_map(|l| {
-        let v = l.trim().strip_prefix("adapter:")?.trim();
-        (!v.is_empty()).then(|| v.to_string())
+    database_yml.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("adapter:")?.trim();
+        (!value.is_empty()).then(|| value.to_string())
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
+
     use super::*;
+
+    fn ctx<'a>(dir: &'a Path, project: &'a str, ws_id: &'a str, mise: &'a HashMap<String, String>) -> ProvisionCtx<'a> {
+        ProvisionCtx { project_dir: dir, project_name: project, ws_id, ws_dir: dir, mise_vars: mise }
+    }
+
+    fn with_data_dir<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
+        rails_suffix::with_env_var("WORKON_DATA_DIR", dir, body)
+    }
 
     #[test]
     fn schema_format_is_sql_only_when_structure_sql_exists_without_schema_rb() {
@@ -149,236 +223,344 @@ mod tests {
         assert!(Rails.detect(tmp.path()), "config/database.yml -> detected");
     }
 
-    /// `setup` creates the isolated DB and returns the resource + `DATABASE_URL`.
-    /// Gated on a reachable Postgres server; skips otherwise (schema load no-ops
-    /// without a real Rails app, which is fine — we're asserting the DB + Setup,
-    /// not the schema). Runs in CI's Postgres job.
     #[test]
-    fn setup_creates_db_and_returns_resource_and_env() {
-        use crate::provision::Resource;
-        use std::collections::HashMap;
-
-        let name = test_db_name("provtest", "ws-selftest");
-        // Skip unless we can create DBs; also clear any leftover so `setup`'s own
-        // createdb succeeds.
-        Resource::PostgresDb { name: name.clone() }.teardown();
-        if DbEngine::Postgres.create(&name).is_err() {
-            return; // no reachable Postgres server
-        }
-        Resource::PostgresDb { name: name.clone() }.teardown();
-
+    fn sqlite_writes_nothing_and_exports_nothing() {
         let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "development:\n  adapter: sqlite3\n  database: db/development.sqlite3\n",
+        )
+        .unwrap();
+        let mise = HashMap::new();
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-1", &mise)).unwrap());
+
+        assert!(setup.env.is_empty());
+        assert!(setup.session_env.is_empty());
+        assert!(setup.resources.is_empty());
+        assert!(setup.failed_steps.is_empty());
+        assert!(!data.join(rails_suffix::SCRIPT_NAME).exists());
+        assert!(!tmp.path().join(rails_suffix::SCRIPT_NAME).exists());
+    }
+
+    /// A server database exports the suffix and `RUBYOPT`, never `DATABASE_URL`,
+    /// and does not write the script into the app. Without a real Rails app the
+    /// listing fails and nothing is prepared or recorded.
+    #[test]
+    fn setup_exports_the_suffix_and_does_not_write_into_the_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
         std::fs::create_dir(tmp.path().join("config")).unwrap();
         std::fs::write(tmp.path().join("config/database.yml"), "test:\n  adapter: postgresql\n").unwrap();
         let mise = HashMap::new();
-        let ctx = ProvisionCtx {
-            project_dir: tmp.path(),
-            project_name: "provtest",
-            ws_id: "ws-selftest",
-            ws_dir: tmp.path(),
-            mise_vars: &mise,
-        };
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "provtest", "ws-selftest", &mise)).unwrap());
 
-        let setup = Rails.setup(&ctx).unwrap();
-        Resource::PostgresDb { name: name.clone() }.teardown(); // clean up before asserting
-
-        assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
-        assert_eq!(setup.env.len(), 1);
-        assert_eq!(setup.env[0].0, "DATABASE_URL");
-        assert!(setup.env[0].1.contains(&name), "url targets the db: {}", setup.env[0].1);
+        assert!(setup.env.is_empty(), "Rails no longer writes an env file: {:?}", setup.env);
+        assert!(setup.resources.is_empty(), "a failed prepare records no database: {:?}", setup.resources);
+        assert_eq!(setup.failed_steps, ["list rails databases"]);
+        assert_eq!(setup.session_env[0], (SUFFIX_VAR.to_string(), "_ws_selftest".to_string()));
+        assert_eq!(setup.session_env[1].0, "RUBYOPT");
+        let script = data.join(rails_suffix::SCRIPT_NAME);
+        assert!(script.is_file(), "the script lands in the data dir");
+        assert!(setup.session_env[1].1.contains(&format!("-r{}", script.display())));
+        assert!(!tmp.path().join(rails_suffix::SCRIPT_NAME).exists());
+        assert!(!tmp.path().join(".env.test.local").exists());
     }
 
-    /// Full cycle against the real Rails fixture: provision it, then assert the
-    /// schema was actually loaded into the isolated DB (the `widgets` table
-    /// exists), then drop it. Gated on a reachable Postgres AND the fixture's
-    /// bundle being installed (CI installs Ruby + runs `bundle install`; this
-    /// machine has both), skips otherwise.
     #[test]
-    fn rails_cycle_loads_schema_into_isolated_db() {
-        use crate::provision::Resource;
-        use std::collections::HashMap;
-        use std::process::Command;
+    fn setup_does_not_prepare_when_the_script_would_land_in_a_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("data").join(".git")).unwrap();
+        std::fs::write(tmp.path().join("config/database.yml"), "test:\n  adapter: postgresql\n").unwrap();
+        let mise = HashMap::new();
+        let data = tmp.path().join("data");
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-1", &mise)).unwrap());
 
-        let name = test_db_name("railsfix", "ws-cycle");
-        Resource::PostgresDb { name: name.clone() }.teardown();
-        if DbEngine::Postgres.create(&name).is_err() {
-            return; // no reachable Postgres server
+        assert_eq!(setup.failed_steps, ["install rails db suffix"]);
+        assert!(setup.session_env.is_empty(), "no hook, so no suffix that would miss");
+        assert!(setup.env.is_empty());
+        assert!(!data.join(rails_suffix::SCRIPT_NAME).exists());
+    }
+
+    fn bundle_ready(dir: &Path) -> bool {
+        Command::new("bundle").arg("check").current_dir(dir).output().is_ok_and(|out| out.status.success())
+    }
+
+    fn postgres_up() -> bool {
+        Command::new("psql").args(["-tAc", "SELECT 1"]).output().is_ok_and(|out| out.status.success())
+    }
+
+    fn widgets(name: &str) -> String {
+        let out = Command::new("psql").args(["-tAc", "select to_regclass('public.widgets')", name]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Full cycle against the real Rails fixture: `db:prepare` loads `widgets`
+    /// into the suffixed development and test databases. The replica is not
+    /// created and `DATABASE_URL` is not exported.
+    #[test]
+    fn rails_cycle_loads_schema_into_isolated_databases() {
+        let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
+        if !postgres_up() || !bundle_ready(fixture) {
+            return;
         }
-        Resource::PostgresDb { name: name.clone() }.teardown();
-
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails");
-        let bundle_ready = Command::new("bundle")
-            .arg("check")
-            .current_dir(fixture)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !bundle_ready {
-            return; // fixture gems not installed
+        let suffix = rails_suffix::db_suffix("ws-cycle");
+        let names = [format!("workon_rails_fixture_development{suffix}"), format!("workon_rails_fixture_test{suffix}")];
+        for name in &names {
+            Resource::PostgresDb { name: name.clone() }.teardown();
         }
 
-        // Provision runs `bundle exec rails db:schema:load` in ws_dir, so give it
-        // its own copy of the fixture.
         let tmp = tempfile::tempdir().unwrap();
         let ws_dir = tmp.path().join("railsfix-ws-cycle");
-        assert!(
-            Command::new("cp").args(["-R", fixture, ws_dir.to_str().unwrap()]).status().unwrap().success(),
-            "copy fixture",
-        );
-
+        let data = tmp.path().join("data");
+        assert!(Command::new("cp")
+            .args(["-R", fixture.to_str().unwrap(), ws_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
         let mise = HashMap::new();
-        let ctx = ProvisionCtx {
-            project_dir: &ws_dir,
-            project_name: "railsfix",
-            ws_id: "ws-cycle",
-            ws_dir: &ws_dir,
-            mise_vars: &mise,
-        };
-        let setup = Rails.setup(&ctx).unwrap();
-        assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(&ws_dir, "railsfix", "ws-cycle", &mise)).unwrap());
 
-        let out = Command::new("psql").args(["-tAc", "select to_regclass('public.widgets')", &name]).output().unwrap();
-        let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Resource::PostgresDb { name: name.clone() }.teardown(); // clean up before asserting
-
-        assert_eq!(table, "widgets", "db:schema:load should have created the widgets table");
+        let tables: Vec<String> = names.iter().map(|name| widgets(name)).collect();
+        for name in &names {
+            Resource::PostgresDb { name: name.clone() }.teardown();
+        }
+        assert!(setup.failed_steps.is_empty(), "{:?}", setup.failed_steps);
+        assert!(setup.env.is_empty());
+        assert_eq!(
+            setup.resources,
+            names.iter().map(|name| Resource::PostgresDb { name: name.clone() }).collect::<Vec<_>>()
+        );
+        assert_eq!(tables, ["widgets", "widgets"]);
+        assert!(!db_exists("workon_rails_fixture_replica"), "the replica stays unsuffixed and uncreated");
     }
 
     /// When a Rails app keeps `db/structure.sql` instead of `db/schema.rb`,
-    /// `Rails::setup` passes `SCHEMA_FORMAT=sql` to `db:schema:load` so Rails 7+
-    /// loads `db/structure.sql` instead of aborting on the missing `db/schema.rb`.
+    /// prepare creates the databases and `SCHEMA_FORMAT=sql db:schema:load`
+    /// loads `db/structure.sql` into both.
     #[test]
     fn rails_cycle_loads_structure_sql_when_schema_rb_is_absent() {
-        use crate::provision::Resource;
-        use std::collections::HashMap;
-        use std::process::Command;
-
-        let name = test_db_name("railsfix", "ws-struct");
-        Resource::PostgresDb { name: name.clone() }.teardown();
-        if DbEngine::Postgres.create(&name).is_err() {
-            return; // no reachable Postgres server
+        let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
+        if !postgres_up() || !bundle_ready(fixture) {
+            return;
         }
-        Resource::PostgresDb { name: name.clone() }.teardown();
-
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails");
-        let bundle_ready = Command::new("bundle")
-            .arg("check")
-            .current_dir(fixture)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !bundle_ready {
-            return; // fixture gems not installed
+        let suffix = rails_suffix::db_suffix("ws-struct");
+        let names = [format!("workon_rails_fixture_development{suffix}"), format!("workon_rails_fixture_test{suffix}")];
+        for name in &names {
+            Resource::PostgresDb { name: name.clone() }.teardown();
         }
 
         let tmp = tempfile::tempdir().unwrap();
         let ws_dir = tmp.path().join("railsfix-ws-struct");
-        assert!(
-            Command::new("cp").args(["-R", fixture, ws_dir.to_str().unwrap()]).status().unwrap().success(),
-            "copy fixture",
-        );
+        let data = tmp.path().join("data");
+        assert!(Command::new("cp")
+            .args(["-R", fixture.to_str().unwrap(), ws_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
         std::fs::remove_file(ws_dir.join("db/schema.rb")).unwrap();
         std::fs::write(
             ws_dir.join("db/structure.sql"),
             "CREATE TABLE public.widgets (id bigint PRIMARY KEY, name character varying);\n",
         )
         .unwrap();
-
         let mise = HashMap::new();
-        let ctx = ProvisionCtx {
-            project_dir: &ws_dir,
-            project_name: "railsfix",
-            ws_id: "ws-struct",
-            ws_dir: &ws_dir,
-            mise_vars: &mise,
-        };
-        let setup = Rails.setup(&ctx).unwrap();
-        let out = Command::new("psql").args(["-tAc", "select to_regclass('public.widgets')", &name]).output().unwrap();
-        let table = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Resource::PostgresDb { name: name.clone() }.teardown();
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(&ws_dir, "railsfix", "ws-struct", &mise)).unwrap());
+        let tables: Vec<String> = names.iter().map(|name| widgets(name)).collect();
+        for name in &names {
+            Resource::PostgresDb { name: name.clone() }.teardown();
+        }
 
-        assert!(setup.failed_steps.is_empty(), "structure.sql load should succeed: {:?}", setup.failed_steps);
-        assert_eq!(setup.resources, vec![Resource::PostgresDb { name: name.clone() }]);
-        assert_eq!(table, "widgets", "db:schema:load with SCHEMA_FORMAT=sql should have created the widgets table");
+        assert!(setup.failed_steps.is_empty(), "{:?}", setup.failed_steps);
+        assert_eq!(tables, ["widgets", "widgets"]);
     }
 
-    /// Proves what a Postgres Rails workspace's commands actually resolve to:
-    /// `Setup::database_url` writes `DATABASE_URL` only to `.env.test.local`
-    /// (`session_env` is empty) and leaves `config/database.yml` untouched, so
-    /// `RAILS_ENV=development` (`rails server`, `rails db:migrate`) still
-    /// resolves `ActiveRecord::Base.connection_db_config.database` to the
-    /// primary `development:` database from `config/database.yml`, while
-    /// `RAILS_ENV=test` without `dotenv-rails` resolves to the primary `test:`
-    /// database unless `.env.test.local` is loaded into `ENV["DATABASE_URL"]`.
-    #[test]
-    fn rails_postgres_workspace_leaves_development_pointing_at_primary_db() {
-        use crate::provision::Resource;
-        use std::process::Command;
-
-        let url = "postgresql://localhost/railsfix_ws_dev_share_test".to_string();
-        let setup = Setup::database_url(
-            vec![Resource::PostgresDb { name: "railsfix_ws_dev_share_test".into() }],
-            url.clone(),
-            Vec::new(),
-        );
-        assert!(setup.session_env.is_empty(), "DATABASE_URL must not be injected into session_env");
-        assert_eq!(setup.env_file, None, "defaults to .env.test.local");
-
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails");
-        let bundle_ready = Command::new("bundle")
-            .arg("check")
-            .current_dir(fixture)
+    fn db_exists(name: &str) -> bool {
+        assert!(name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'), "{name}");
+        let out = Command::new("psql")
+            .args(["-tAc", &format!("SELECT 1 FROM pg_database WHERE datname = '{name}'")])
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !bundle_ready {
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim() == "1"
+    }
+
+    /// A real jj workspace: setup leaves `jj status` clean and the main checkout
+    /// untouched, then the workspace's Rails commands use the suffixed databases.
+    #[test]
+    fn rails_workspace_isolates_databases_and_leaves_jj_clean() {
+        if !vcs_runner::jj_available() || !postgres_up() {
+            return;
+        }
+        let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
+        if !bundle_ready(fixture) {
             return;
         }
 
         let tmp = tempfile::tempdir().unwrap();
-        let ws_dir = tmp.path().join("railsfix-ws-dev-share");
-        assert!(
-            Command::new("cp").args(["-R", fixture, ws_dir.to_str().unwrap()]).status().unwrap().success(),
-            "copy fixture",
-        );
-        let yml = "default: &default\n  adapter: postgresql\n  pool: 5\n\ndevelopment:\n  <<: *default\n  database: primary_app_development\n\ntest:\n  <<: *default\n  database: primary_app_test\n";
-        std::fs::write(ws_dir.join("config/database.yml"), yml).unwrap();
-        std::fs::write(ws_dir.join(".env.test.local"), format!("DATABASE_URL={url}\n")).unwrap();
+        let repo = tmp.path().join("repo");
+        let ws = tmp.path().join("ws");
+        let data = tmp.path().join("workon-data");
+        assert!(Command::new("cp")
+            .args(["-R", fixture.to_str().unwrap(), repo.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
 
-        let resolve_db = |rails_env: &str, db_url: Option<&str>| -> String {
-            let mut cmd = Command::new("bundle");
-            cmd.args([
-                "exec",
-                "rails",
-                "runner",
-                "puts ActiveRecord::Base.configurations.configs_for(env_name: Rails.env, name: 'primary').database",
-            ])
-            .env("RAILS_ENV", rails_env)
-            .env_remove("DATABASE_URL")
-            .current_dir(&ws_dir);
-            if let Some(u) = db_url {
-                cmd.env("DATABASE_URL", u);
-            }
-            let out = cmd.output().unwrap();
-            assert!(out.status.success(), "rails runner failed: {}", String::from_utf8_lossy(&out.stderr));
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        let token = format!("w{:x}{:x}", std::process::id(), rand::random::<u32>());
+        let dev_bare = format!("{token}_{}", "d".repeat(70));
+        let test_bare = format!("{token}_test");
+        let replica_bare = format!("{token}_replica");
+        let yml = format!(
+            "\
+default: &default
+  adapter: postgresql
+  pool: 5
+
+development:
+  primary:
+    <<: *default
+    database: {dev_bare}
+  primary_replica:
+    <<: *default
+    database: {replica_bare}
+    replica: true
+
+test:
+  primary:
+    <<: *default
+    database: {test_bare}
+"
+        );
+        std::fs::write(repo.join("config/database.yml"), &yml).unwrap();
+        for bare in [&dev_bare, &test_bare, &replica_bare] {
+            assert!(!db_exists(bare), "the unsuffixed name must not already exist: {bare}");
+        }
+
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "t@t.com"]);
+        git(&repo, &["config", "user.name", "T"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "init"]);
+        vcs_runner::run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+        vcs_runner::run_jj(&repo, &["workspace", "add", ws.to_str().unwrap(), "--name", "rails-db", "-r", "main"])
+            .unwrap();
+        copy_bundle(&repo, &ws);
+
+        let before = snapshot(&repo);
+        let mise = HashMap::new();
+        let ws_ctx = ProvisionCtx {
+            project_dir: &repo,
+            project_name: "railsfix",
+            ws_id: "ws-isolate",
+            ws_dir: &ws,
+            mise_vars: &mise,
         };
+        let setup = with_data_dir(&data, || Rails.setup(&ws_ctx).unwrap());
+        let suffix = rails_suffix::db_suffix("ws-isolate");
 
-        assert_eq!(
-            resolve_db("development", None),
-            "primary_app_development",
-            "rails server / db:migrate (RAILS_ENV=development) touches the primary development DB"
+        let guard = DropDbs(setup.resources.clone());
+        let status = vcs_runner::run_jj_utf8(&ws, &["status"]).unwrap();
+        assert!(status.contains("no changes") || status.trim().is_empty(), "jj status after setup:\n{status}");
+        assert_eq!(snapshot(&repo), before, "the main checkout changed");
+        assert!(data.join(rails_suffix::SCRIPT_NAME).is_file());
+        assert!(!ws.join(rails_suffix::SCRIPT_NAME).exists());
+        assert!(!ws.join(".env.test.local").exists());
+        assert!(setup.env.is_empty());
+        assert!(setup.failed_steps.is_empty(), "{:?}", setup.failed_steps);
+        assert!(setup.resources.len() >= 2, "{:?}", setup.resources);
+        for resource in &setup.resources {
+            let name = resource.db_name();
+            assert!(name.ends_with(&suffix), "{name}");
+            assert!(name.len() <= 63, "{name}");
+            assert_eq!(widgets(name), "widgets", "{name}");
+        }
+        let bare_prefix = dev_bare.chars().take(63).collect::<String>();
+        for bare in [&dev_bare, &test_bare, &replica_bare, &bare_prefix] {
+            if db_exists(bare) {
+                Resource::PostgresDb { name: bare.clone() }.teardown();
+                panic!("unsuffixed database was created: {bare}");
+            }
+        }
+
+        let env = &setup.session_env;
+        rails_ok(&ws, env, &["exec", "rails", "runner", "raise 'suffix missing' unless ENV['WORKON_RAILS_DB_SUFFIX']"]);
+        rails_ok(&ws, env, &["exec", "bin/rails", "test"]);
+        rails_ok(&ws, env, &["exec", "bin/rails", "test:all"]);
+        rails_ok(&ws, env, &["exec", "bin/rails", "db:test:prepare"]);
+        let test_db = setup.resources.iter().find(|resource| resource.db_name().contains("_test")).unwrap();
+        assert_eq!(widgets(test_db.db_name()), "widgets");
+        drop(guard);
+    }
+
+    struct DropDbs(Vec<Resource>);
+
+    impl Drop for DropDbs {
+        fn drop(&mut self) {
+            for resource in &self.0 {
+                resource.teardown();
+            }
+        }
+    }
+
+    fn rails_ok(ws: &Path, env: &[(String, String)], args: &[&str]) {
+        let mut cmd = Command::new("bundle");
+        cmd.args(args).current_dir(ws).env_remove("DATABASE_URL");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "bundle {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(
-            resolve_db("test", None),
-            "primary_app_test",
-            "without dotenv-rails loading .env.test.local, RAILS_ENV=test stays on database.yml's test DB"
-        );
-        assert_eq!(
-            resolve_db("test", Some(&url)),
-            "railsfix_ws_dev_share_test",
-            "when .env.test.local is loaded into DATABASE_URL under RAILS_ENV=test, Rails targets the isolated test DB"
-        );
+    }
+
+    fn copy_bundle(from: &Path, to: &Path) {
+        for name in ["Gemfile.lock", ".bundle", "vendor"] {
+            let src = from.join(name);
+            if !src.exists() {
+                continue;
+            }
+            let dest = to.join(name);
+            assert!(Command::new("cp")
+                .args(["-R", src.to_str().unwrap(), dest.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let mut full = vec!["-C", repo.to_str().unwrap()];
+        full.extend_from_slice(args);
+        let status = Command::new("git").args(&full).status().unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn snapshot(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let name = entry.file_name();
+            if name == ".git" || name == ".jj" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if path.is_file() {
+                out.insert(path.strip_prefix(root).unwrap().to_path_buf(), std::fs::read(&path).unwrap());
+            }
+        }
     }
 
     proptest::proptest! {

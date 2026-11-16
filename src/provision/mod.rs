@@ -19,6 +19,7 @@ pub(crate) mod phoenix;
 pub(crate) mod prisma;
 mod python_venv;
 pub(crate) mod rails;
+pub(crate) mod rails_suffix;
 
 pub trait Provisioner: Send + Sync {
     fn name(&self) -> &'static str;
@@ -50,23 +51,24 @@ pub struct Setup {
     /// loads only in its test environment.
     pub env: Vec<(String, String)>,
     /// Vars to inject into the workspace *session* (merged with mise env on
-    /// attach), for a framework whose test var is safe session-wide because it
-    /// only takes effect under that framework's test env — Phoenix's
-    /// `MIX_TEST_PARTITION` (read only under `MIX_ENV=test`). Distinct from `env`:
-    /// a session-wide `DATABASE_URL` would wrongly point every dev command at the
-    /// test DB, so URLs go in `env` (test-file-scoped) and never here.
+    /// attach). Phoenix's `MIX_TEST_PARTITION` is read only under `MIX_ENV=test`.
+    /// Rails' `WORKON_RAILS_DB_SUFFIX` and `RUBYOPT` suffix the development and
+    /// test database names, so the workspace has its own and the primary checkout
+    /// keeps the names in `config/database.yml`. A session-wide `DATABASE_URL` is
+    /// not used: it would replace one environment's database and stop Rails from
+    /// preparing the other. URLs stay in `env`.
     pub session_env: Vec<(String, String)>,
     /// Which generated env file the vars go in. `None` = `.env.test.local`
     /// (Rails/dotenv default); Laravel needs `.env.testing`, etc.
     pub env_file: Option<String>,
-    /// Setup steps that ran and failed (`rails db:schema:load`, …). The resources and env
+    /// Setup steps that ran and failed (`rails db:prepare`, …). The resources and env
     /// above still stand, but the workspace is not ready, and `create` says so (issue #2).
     pub failed_steps: Vec<String>,
 }
 
 impl Setup {
     /// A test database reached through `DATABASE_URL` in the generated env file: what
-    /// Rails, Alembic and Django return once the database exists. Kept apart from
+    /// Alembic and Django return once the database exists. Kept apart from
     /// their `setup`, which needs a live server, so each field can be tested.
     pub(crate) fn database_url(resources: Vec<Resource>, url: String, failed_steps: Vec<String>) -> Self {
         Self { resources, env: vec![("DATABASE_URL".to_string(), url)], failed_steps, ..Self::default() }

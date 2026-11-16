@@ -47,6 +47,11 @@ owed = []
 ]
 "src/provision/prisma.rs" = ["the_datasource_provider_and_url_var_read_back"]
 "src/provision/rails.rs" = ["adapter_is_the_first_adapter_line_with_a_value"]
+"src/provision/rails_suffix.rs" = [
+  "the_suffix_is_an_identifier_and_keeps_the_workspace_id",
+  "rubyopt_loads_the_script_once",
+  "a_listing_keeps_only_marked_development_and_test_server_rows",
+]
 "src/spawn_retry.rs" = ["only_etxtbusy_reads_as_a_busy_executable"]
 "src/stale.rs" = [
   "a_path_is_dropped_exactly_when_it_sits_inside_a_stale_output_dir",

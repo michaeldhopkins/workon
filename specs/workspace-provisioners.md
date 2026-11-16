@@ -128,21 +128,21 @@ sqlite/in-memory project is recognized and left alone.
 An injected DB identity only isolates the DB if it reaches the user's test run —
 but *how* differs by framework, and using the wrong channel breaks things:
 
-- **Dotenv file, test-scoped** (Rails): write `DATABASE_URL` to `.env.test.local`,
-  which dotenv-rails loads **only** under `RAILS_ENV=test`. Putting it in the
-  *session* env would be wrong — every `rails console`/`server` in the workspace
-  would then hit the test DB instead of dev. This is what workon does today and
-  is preserved. `.env.test.local` stays in `GENERATED_FILES` + VCS-ignored.
+- **Session env, database-name suffix** (Rails): export `WORKON_RAILS_DB_SUFFIX`
+  and `RUBYOPT=-r <workon data dir>/rails_db_suffix.rb`. The script is embedded
+  in the binary and written to workon's data directory on first use, never into
+  the workspace. It suffixes the development and test database names from
+  `config/database.yml` and leaves replicas alone. `DATABASE_URL` is not set:
+  a session-wide URL replaces one environment and stops `db:prepare` from
+  preparing the other. The primary checkout keeps the names in the file.
 - **Session env, test-only var** (Phoenix): `MIX_TEST_PARTITION` only affects
   `MIX_ENV=test`, so it's safe to put in the workspace session env; a dotenv file
-  wouldn't reach `mix`. This needs `session::launch`/`attach` to merge a persisted
-  env map (from `.workon.json`) with mise env — deferred to the Phoenix step.
+  wouldn't reach `mix`. `session::launch`/`attach` merge the persisted env map
+  from `.workon.json` with mise env. Session env wins.
 
-So `Setup.env` is written to `.env.test.local` (the step-1 mechanism, correct for
-Rails) and persisted in `.workon.json` (`env: {K:V}`) for reference and for the
-future session-env path. Each provisioner declares which channel its vars need;
-the framework's own env-scoping (Rails' `.env.test.local`, Phoenix's
-`MIX_ENV=test`) is what keeps dev commands unaffected.
+So `Setup.env` is written to `.env.test.local` (Alembic, Django, Prisma) and
+persisted in `.workon.json`. `Setup.session_env` is merged into the workspace
+session. Each provisioner declares which channel its vars need.
 
 ### Registry, ordering, conflicts
 
@@ -163,7 +163,7 @@ table are load-bearing — they came out of the research and are the "fluency."
 
 | Ecosystem | Detect | Mode | Isolation hook | Prepare | Teardown |
 |---|---|---|---|---|---|
-| **Rails** | `config/database.yml` (+ `bin/rails`) | workon-managed | `DATABASE_URL` + `RAILS_ENV=test` | `createdb`, `bundle check \|\| bundle install` if a Gemfile (git-sourced gems live in a per-checkout bundler path), then `RAILS_ENV=test bin/rails db:schema:load` | `dropdb <name>` |
+| **Rails** | `config/database.yml` (+ `bin/rails`) | workon-managed | `WORKON_RAILS_DB_SUFFIX` + `RUBYOPT=-r` the data-dir script | `bundle check \|\| bundle install` if a Gemfile (git-sourced gems live in a per-checkout bundler path), then a `rails runner` that must report only suffixed names, then `RAILS_ENV=development rails db:prepare` (and `SCHEMA_FORMAT=sql rails db:schema:load` when the app has only `db/structure.sql`) | `dropdb` on the suffixed names Rails reports |
 | **Django** | `manage.py` | framework-managed | `DATABASE_URL` **iff** settings use `dj_database_url`; else none | none (runner builds `test_<NAME>`) | none |
 | **Alembic** | `alembic.ini`/`[tool.alembic]` + `versions/` | workon-managed *if* Postgres | `DATABASE_URL` **iff** `env.py` reads it | `createdb`, `alembic upgrade head` | `dropdb <name>` |
 | **Phoenix/Ecto** | `mix.exs` dep on `:ecto_sql` | workon-managed | `MIX_TEST_PARTITION` (built-in) | `MIX_ENV=test mix ecto.create && ecto.migrate` | `dropdb <app>_test<part>` |
@@ -172,12 +172,15 @@ table are load-bearing — they came out of the research and are the "fluency."
 | **EF Core** | `*.csproj` w/ EF provider pkg + `Migrations/` | workon-managed unless InMemory/sqlite-mem/Testcontainers | `ConnectionStrings__<Name>` or `--connection` | `dotnet ef database update` | `dotnet ef database drop --force` |
 | **Python venv** | `.venv/pyvenv.cfg` | (path repair) | — | rewrite paths / re-link editable installs | none |
 
-Rails **`db:test:prepare` does not create the DB** (it purges + loads schema),
-so we keep `createdb` + `db:schema:load`. Two traps: a `url:` key in
-`database.yml` makes Rails ignore `DATABASE_URL`; and `DATABASE_URL` overrides
-even under `RAILS_ENV=test`, so workon must point it *at the isolated test DB*
-(a stray one would let test tasks purge dev/prod). `config/master.key` is
-gitignored → copied → normally fine.
+Rails **`db:test:prepare` does not create the DB** (it purges + loads schema).
+`db:prepare` with `RAILS_ENV=development` and no `DATABASE_URL` creates and
+loads development and test. The suffix hook rewrites a `url:` entry's path and
+a `database:` name. A replica, and a database with `database_tasks: false`,
+are left unsuffixed and are not created. Names are read before prepare: a name
+without the suffix aborts prepare, so a hook that did not load cannot migrate
+the primary checkout's database. A name longer than Postgres allows keeps its
+tail, which is the part that distinguishes development from test. SQLite is
+left alone. `config/master.key` is gitignored → copied → normally fine.
 
 Django's default `manage.py test` runner creates and drops `test_<NAME>` itself,
 so workon pre-creates nothing; isolation is only handing each workspace a

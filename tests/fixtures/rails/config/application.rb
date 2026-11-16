@@ -2,6 +2,7 @@ require_relative "boot"
 
 require "rails"
 require "active_record/railtie"
+require "rails/test_unit/railtie"
 
 # Smallest Rails app that `db:schema:load` works against — a workon test fixture,
 # not a real app. Eager loading is off so no `app/` tree is required.

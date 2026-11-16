@@ -1,5 +1,19 @@
-# The provisioner injects the isolated test DB via DATABASE_URL + RAILS_ENV=test,
-# which overrides these values; the name here is only a placeholder.
-test:
+# Names here belong to the primary checkout. A workspace suffixes development
+# and test; the replica is left alone.
+default: &default
   adapter: postgresql
-  database: workon_rails_fixture_placeholder
+  pool: 5
+
+development:
+  primary:
+    <<: *default
+    database: workon_rails_fixture_development
+  primary_replica:
+    <<: *default
+    database: workon_rails_fixture_replica
+    replica: true
+
+test:
+  primary:
+    <<: *default
+    database: workon_rails_fixture_test
