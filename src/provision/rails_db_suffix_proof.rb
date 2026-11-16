@@ -174,6 +174,75 @@ ENV["WORKON_RAILS_DB_SUFFIX"] = "_"
 bare, = database_of({ "development" => { "adapter" => "postgresql", "database" => "app_dev" } }, "development")
 expect_same("bare underscore", bare, "app_dev")
 
+ENV["WORKON_RAILS_DB_SUFFIX"] = SUFFIX
+
+socket_host, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "/var/run/postgresql", "database" => "app_dev", "replica" => true } },
+  "development"
+)
+expect_suffixed("socket directory host", socket_host)
+
+service_host, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "postgres", "database" => "app_dev", "replica" => true } },
+  "development"
+)
+expect_suffixed("single-label host", service_host)
+
+query_host, query_url = database_of(
+  { "development" => "postgresql:///app_dev?host=/var/run/postgresql&replica=true" },
+  "development"
+)
+expect_suffixed("url socket host", query_host)
+raise "url socket host left @url as #{query_url}" unless query_url.include?(query_host)
+
+false_hash, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "postgres", "database" => "app_dev", "replica" => "false" } },
+  "development"
+)
+expect_suffixed('hash replica "false"', false_hash)
+
+false_remote, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "db.example", "database" => "app_dev", "replica" => "false" } },
+  "development"
+)
+expect_suffixed('hash replica "false" on a dotted host', false_remote)
+
+ENV["DATABASE_URL"] = "postgres://localhost/from_env"
+sqlite_env, sqlite_env_url = database_of(
+  { "development" => { "adapter" => "sqlite3", "database" => "storage/development.sqlite3" } },
+  "development"
+)
+ENV.delete("DATABASE_URL")
+expect_suffixed("sqlite file plus DATABASE_URL", sqlite_env)
+raise "sqlite DATABASE_URL @url was not suffixed: #{sqlite_env_url}" unless sqlite_env_url.include?(sqlite_env)
+
+def owned(hash)
+  WorkonRailsDbSuffix.owned_rows(ActiveRecord::DatabaseConfigurations.new(hash))
+end
+
+local_rows = owned({ "development" => { "primary" => { "adapter" => "postgresql", "database" => "app_dev", "replica" => true } } })
+raise "local replica hidden from the listing: #{local_rows.inspect}" unless local_rows.any? { |row| row[2].end_with?(SUFFIX) }
+
+socket_rows = owned(
+  { "development" => { "primary" => { "adapter" => "postgresql", "host" => "/var/run/postgresql", "database" => "app_dev", "replica" => true } } }
+)
+raise "socket-directory replica hidden from the listing: #{socket_rows.inspect}" unless socket_rows.any? { |row| row[2].end_with?(SUFFIX) }
+
+false_rows = owned(
+  { "development" => { "primary" => { "adapter" => "postgresql", "host" => "db.example", "database" => "app_dev", "replica" => "false" } } }
+)
+raise "replica \"false\" hidden from the listing: #{false_rows.inspect}" unless false_rows.any? { |row| row[2].end_with?(SUFFIX) }
+
+remote_rows = owned(
+  { "development" => { "primary" => { "adapter" => "postgresql", "host" => "db.example", "database" => "app_dev", "replica" => true } } }
+)
+raise "remote replica was listed: #{remote_rows.inspect}" unless remote_rows.empty?
+
+tasks_rows = owned(
+  { "development" => { "primary" => { "adapter" => "postgresql", "database" => "app_dev", "database_tasks" => false } } }
+)
+raise "database_tasks false was listed: #{tasks_rows.inspect}" unless tasks_rows.empty?
+
 trace_after = ObjectSpace.each_object(TracePoint).select(&:enabled?)
 extra = trace_after.reject { |point| trace_before.include?(point.object_id) }
 raise "the hook enabled #{extra.size} TracePoint(s)" unless extra.empty?

@@ -5,7 +5,9 @@
 # The suffix is the only per-workspace input, and it comes from the environment.
 # Remote replicas, databases with database_tasks false, other environments, and
 # SQLite are left as config/database.yml wrote them. A replica with no host, a
-# localhost host, or a socket is suffixed so a read cannot use the primary checkout.
+# localhost host, a socket, a socket directory in host, or a single-label host
+# is suffixed so a read cannot use the primary checkout. HashConfig returns the
+# string "false" from replica?, and that string is not a replica.
 
 module WorkonRailsDbSuffix
   # `require` only. Wrapping `require_relative` resolves the path against
@@ -59,16 +61,12 @@ module WorkonRailsDbSuffix
     def apply(config)
       suffix = usable_suffix
       return if suffix.nil?
-      return unless config.env_name == "development" || config.env_name == "test"
-      return if sqlite?(config)
-      return if remote_replica?(config) || tasks_off?(config)
+      return unless owns?(config)
 
       limit = identifier_limit(config)
       database = config.database
-      if database.is_a?(String) && !database.empty?
-        suffixed = suffix_name(database, suffix, limit)
-        config._database = suffixed if suffixed != database
-      end
+      suffixed = suffix_name(database, suffix, limit)
+      config._database = suffixed if suffixed != database
       url = config.instance_variable_get(:@url)
       return unless url.is_a?(String) && !url.empty?
 
@@ -76,29 +74,72 @@ module WorkonRailsDbSuffix
       config.instance_variable_set(:@url, suffixed_url) if suffixed_url && suffixed_url != url
     end
 
+    # Development and test server databases the hook suffixes. Hidden from
+    # Rails' own task list: a local replica, and a HashConfig whose replica
+    # flag is the string "false".
+    def owns?(config)
+      return false unless config.env_name == "development" || config.env_name == "test"
+      return false if sqlite?(config) || remote_replica?(config) || tasks_off?(config)
+
+      config.database.is_a?(String) && !config.database.empty?
+    end
+
+    def owned_rows(configurations)
+      rows = []
+      %w[development test].each do |env|
+        configurations.configs_for(env_name: env, include_hidden: true).each do |config|
+          next unless owns?(config)
+
+          adapter = config.configuration_hash[:adapter] || config.configuration_hash["adapter"]
+          database = config.database
+          next if adapter.nil? || database.nil? || database.to_s.empty?
+
+          rows << [env, adapter.to_s, database.to_s]
+        end
+      end
+      rows
+    end
+
     def usable_suffix
       suffix = ENV.fetch("WORKON_RAILS_DB_SUFFIX", "")
       suffix.match?(/\A_[A-Za-z0-9_]+\z/) ? suffix : nil
     end
 
-    # Rails' own predicate, after UrlConfig has turned the string "false" into false.
+    # HashConfig#replica? returns the raw value, so the string "false" is truthy
+    # there. UrlConfig has already coerced that string to false.
     def remote_replica?(config)
-      return false unless config.replica?
-
-      !local?(config)
+      truthy_replica?(config) && !local?(config)
     end
 
+    # A replica whose flag is the string "false" still has database tasks.
+    # Rails hides it because the raw flag is truthy; the hook must not.
     def tasks_off?(config)
-      !config.replica? && !config.database_tasks?
+      return false if truthy_replica?(config)
+
+      config.configuration_hash[:database_tasks] == false
     end
 
+    def truthy_replica?(config)
+      case config.configuration_hash[:replica]
+      when true then true
+      when String then config.configuration_hash[:replica] != "false"
+      else false
+      end
+    end
+
+    # Libpq treats a host that starts with "/" as a Unix socket directory.
+    # A single-label name is the Compose service on that same server. A dotted
+    # name is a different host.
     def local?(config)
       hash = config.configuration_hash
-      socket = hash[:socket]
+      socket = hash[:socket] || hash["socket"]
       return true if socket.is_a?(String) && !socket.empty?
 
-      host = hash[:host].to_s
-      host.empty? || host == "localhost" || host == "127.0.0.1" || host == "::1"
+      host = (hash[:host] || hash["host"]).to_s
+      return true if host.empty? || host == "localhost" || host == "127.0.0.1" || host == "::1"
+      return true if host.start_with?("/")
+
+      !host.include?(".") && !host.include?(":") && host.match?(/\A[A-Za-z0-9-]+\z/)
     end
 
     def sqlite?(config)
