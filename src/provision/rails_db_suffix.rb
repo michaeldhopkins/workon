@@ -5,9 +5,10 @@
 # The suffix is the only per-workspace input, and it comes from the environment.
 # Remote replicas, databases with database_tasks false, other environments, and
 # SQLite are left as config/database.yml wrote them. A replica with no host, a
-# localhost host, a socket, a socket directory in host, or a single-label host
-# is suffixed so a read cannot use the primary checkout. HashConfig returns the
-# string "false" from replica?, and that string is not a replica.
+# localhost host (a trailing dot included), a loopback address, a socket, a
+# socket directory in host, or a single-label host is suffixed so a read cannot
+# use the primary checkout. HashConfig returns the string "false" from replica?,
+# and that string is not a replica.
 
 module WorkonRailsDbSuffix
   # `require` only. Wrapping `require_relative` resolves the path against
@@ -127,19 +128,40 @@ module WorkonRailsDbSuffix
       end
     end
 
-    # Libpq treats a host that starts with "/" as a Unix socket directory.
-    # A single-label name is the Compose service on that same server. A dotted
-    # name is a different host.
+    # Libpq treats a host that starts with "/" as a Unix socket directory, and
+    # tries each name in a comma-separated list. A single-label name, "_"
+    # included, is the service on this machine. A dotted name is a different host.
     def local?(config)
       hash = config.configuration_hash
       socket = hash[:socket] || hash["socket"]
       return true if socket.is_a?(String) && !socket.empty?
 
       host = (hash[:host] || hash["host"]).to_s
-      return true if host.empty? || host == "localhost" || host == "127.0.0.1" || host == "::1"
-      return true if host.start_with?("/")
+      return true if host.empty? || host.start_with?("/")
 
-      !host.include?(".") && !host.include?(":") && host.match?(/\A[A-Za-z0-9-]+\z/)
+      host.split(",").all? { |part| local_host?(part.strip) }
+    end
+
+    def local_host?(host)
+      return true if host.empty? || host.start_with?("/")
+
+      host = host.delete_suffix(".")
+      return true if host.casecmp("localhost").zero?
+
+      host = host[1..-2] if host.start_with?("[") && host.end_with?("]")
+      return true if loopback_address?(host)
+      return false if host.include?(".") || host.include?(":")
+
+      host.match?(/\A[A-Za-z0-9_-]+\z/)
+    end
+
+    # 127.0.0.0/8, ::1 in any written form, and an IPv4-mapped loopback.
+    # IPAddr#loopback? includes the mapped range on the Ruby this project runs.
+    def loopback_address?(host)
+      require "ipaddr"
+      IPAddr.new(host).loopback?
+    rescue IPAddr::Error
+      false
     end
 
     def sqlite?(config)

@@ -136,7 +136,11 @@ but *how* differs by framework, and using the wrong channel breaks things:
   a Rails workspace leaked into the parent shell. It suffixes
   development and test names, including a local replica. A replica is local when
   its host is empty, localhost, a loopback address, a socket, a socket directory
-  (a host starting with `/`), or a single-label host. A HashConfig `replica`
+  (a host starting with `/`), or a single-label host. A loopback address is any
+  address in 127.0.0.0/8, or the IPv6 loopback, including a bracketed, fully
+  written, or IPv4-mapped form. `localhost` includes a trailing dot. A
+  single-label host may include `_`. A comma-separated list is local when every
+  host is. A dotted name is a different host. A HashConfig `replica`
   value of the string `"false"` is not a replica. A remote replica and a
   non-replica database with `database_tasks: false` stay unsuffixed.
   `DATABASE_URL` is not set:

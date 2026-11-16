@@ -188,6 +188,32 @@ service_host, = database_of(
 )
 expect_suffixed("single-label host", service_host)
 
+local_replica_forms = {
+  "loopback 127.0.0.2" => "127.0.0.2",
+  "ipv6 loopback" => "::1",
+  "ipv6 expanded loopback" => "0:0:0:0:0:0:0:1",
+  "ipv6 fully written loopback" => "0000:0000:0000:0000:0000:0000:0000:0001",
+  "ipv6 bracketed loopback" => "[::1]",
+  "ipv4-mapped loopback" => "::ffff:127.0.0.1",
+  "localhost" => "localhost",
+  "localhost with a trailing dot" => "localhost.",
+  "single-label underscore" => "postgres_db",
+  "comma-separated local hosts" => "localhost,127.0.0.1",
+}
+local_replica_forms.each do |label, host|
+  database, = database_of(
+    { "development" => { "adapter" => "postgresql", "host" => host, "database" => "app_dev", "replica" => true } },
+    "development"
+  )
+  expect_suffixed(label, database)
+end
+
+docker_host, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "host.docker.internal", "database" => "app_dev", "replica" => true } },
+  "development"
+)
+expect_same("dotted host.docker.internal", docker_host, "app_dev")
+
 query_host, query_url = database_of(
   { "development" => "postgresql:///app_dev?host=/var/run/postgresql&replica=true" },
   "development"
