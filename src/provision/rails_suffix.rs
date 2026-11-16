@@ -17,7 +17,7 @@ const SCRIPT: &str = include_str!("rails_db_suffix.rb");
 
 /// `rails runner` prints one row per development and test database. Boot noise
 /// is anything that does not start with this marker.
-pub(crate) const LIST_DATABASES: &str = r#"server = 0; %w[development test].each do |env| ActiveRecord::Base.configurations.configs_for(env_name: env).each do |config| adapter = config.configuration_hash[:adapter] || config.configuration_hash["adapter"]; database = config.database; next if adapter.nil? || database.nil? || database.to_s.empty?; server += 1 unless %w[sqlite sqlite3].include?(adapter.to_s); $stdout.puts ["WORKON_DB", env, adapter, database].join("\t"); end; end; $stdout.puts ["WORKON_DB_SERVER", server].join("\t")"#;
+pub(crate) const LIST_DATABASES: &str = r#"rows = WorkonRailsDbSuffix.owned_rows(ActiveRecord::Base.configurations); rows.each { |env, adapter, database| $stdout.puts ["WORKON_DB", env, adapter, database].join("\t") }; $stdout.puts ["WORKON_DB_SERVER", rows.size].join("\t")"#;
 
 /// Postgres identifiers are 63 bytes. Eight of those are reserved for a hash
 /// tag so two long names cannot collapse into one suffix.
@@ -295,6 +295,12 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
+
+    #[test]
+    fn the_listing_asks_the_hook_which_databases_it_owns() {
+        assert!(LIST_DATABASES.contains("WorkonRailsDbSuffix.owned_rows"));
+        assert!(!LIST_DATABASES.contains("configs_for"));
+    }
 
     fn write_script(dir: &Path, bytes: &[u8]) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();

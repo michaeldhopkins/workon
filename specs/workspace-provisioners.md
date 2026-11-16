@@ -134,11 +134,18 @@ but *how* differs by framework, and using the wrong channel breaks things:
   when the workspace is created, on attach and `exec`, and when any session starts
   in that workspace. A session started in another directory drops a hook or suffix
   a Rails workspace leaked into the parent shell. It suffixes
-  development and test names, including a local replica. A remote replica and a
+  development and test names, including a local replica. A replica is local when
+  its host is empty, localhost, a loopback address, a socket, a socket directory
+  (a host starting with `/`), or a single-label host. A HashConfig `replica`
+  value of the string `"false"` is not a replica. A remote replica and a
   non-replica database with `database_tasks: false` stay unsuffixed.
   `DATABASE_URL` is not set:
   a session-wide URL replaces one environment and stops `db:prepare` from
-  preparing the other. The primary checkout keeps the names in the file.
+  preparing the other. When the parent or mise supplies a server `DATABASE_URL`
+  or `*_DATABASE_URL`, the listing sees it and `db:prepare` also runs with that
+  URL. The file's own `db:prepare` still omits those variables so the test
+  database is prepared. A sqlite `database.yml` with no server URL is left
+  alone. The primary checkout keeps the names in the file.
 - **Session env, test-only var** (Phoenix): `MIX_TEST_PARTITION` only affects
   `MIX_ENV=test`, so it's safe to put in the workspace session env; a dotenv file
   wouldn't reach `mix`. `session::launch`/`attach` merge the persisted env map
@@ -180,8 +187,10 @@ Rails **`db:test:prepare` does not create the DB** (it purges + loads schema).
 `db:prepare` with `RAILS_ENV=development` and no `DATABASE_URL` creates and
 loads development and test. The suffix hook rewrites a `url:` entry's path and
 a `database:` name. A remote replica, and a non-replica database with
-`database_tasks: false`, stay unsuffixed and are not created. A local replica is
-suffixed so a read does not use the primary checkout's database. Names are read
+`database_tasks: false`, stay unsuffixed and are not created. A local replica,
+including one whose host is a socket directory or a single-label name, is
+suffixed so a read does not use the primary checkout's database. A HashConfig
+`replica: "false"` is suffixed. Names are read
 before prepare: a name without the suffix aborts prepare, so a hook that did not
 load cannot migrate the primary checkout's database. A name that does not fit
 keeps a hash tag and the suffix when the suffix fits. MySQL's limit is 64 bytes
@@ -314,9 +323,8 @@ job, not the sum:
 
 Elixir/PHP/.NET run **detection** in the main job and their full cycle only where
 the toolchain exists (gated skip); add a job per stack later. Each gated skip is
-`log()`ged so a green run never overstates coverage. The Rails cycle on the
-`provisioners` job fails when Postgres or the fixture bundle is missing. Anywhere
-else it prints the skip and returns.
+`log()`ged so a green run never overstates coverage. The Rails cycle fails when
+Postgres or the fixture bundle is missing. It does not skip.
 
 **Isolation & safety:** every E2E test uses a temp `$HOME` + temp worktrees root;
 DB names carry the random `ws_id`; teardown drops them and a test-scope guard

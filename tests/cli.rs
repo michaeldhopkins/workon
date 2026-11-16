@@ -668,8 +668,9 @@ fn create_ignores_a_database_yml_that_is_not_rails() {
     assert!(meta["session_env"].as_object().unwrap().is_empty(), "{meta}");
 }
 
-/// Create keeps the caller's `RUBYOPT` and mise's, and `rails` does not see a
-/// database URL. `bundle check` still does: only the rails commands strip it.
+/// Create keeps the caller's `RUBYOPT` and mise's. The listing sees a database
+/// URL. The file's `db:prepare` does not, and a second prepare does, because
+/// that URL is the database the session opens. `bundle check` sees it too.
 #[test]
 fn create_merges_rubyopt_and_strips_database_urls_from_rails() {
     let world = World::new();
@@ -679,16 +680,19 @@ fn create_merges_rubyopt_and_strips_database_urls_from_rails() {
         .set("mise", "if [ \"$1\" = env ]; then printf '%s\\n' '{\"RUBYOPT\":\"--yjit\"}'; exit 0; fi\nexit 0\n");
     world.stubs.set(
         "bundle",
-        &format!(
-            "{SUFFIXED_LISTING}\
-             if [ \"$1\" = check ]; then printf '%s' \"$DATABASE_URL\" > \"$HOME/check-url\"; exit 0; fi\n\
-             if [ \"$1\" = exec ]; then\n\
-               printf '%s' \"$DATABASE_URL\" > \"$HOME/exec-url\"\n\
-               printf '%s' \"$QUEUE_DATABASE_URL\" > \"$HOME/exec-queue\"\n\
-               printf '%s' \"$RUBYOPT\" > \"$HOME/exec-rubyopt\"\n\
-             fi\n\
-             exit 0\n"
-        ),
+        "if [ \"$3\" = runner ]; then\n\
+           printf 'WORKON_DB\\tdevelopment\\tpostgresql\\tapp%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
+           printf 'WORKON_DB\\ttest\\tpostgresql\\tapp_test%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
+           printf 'WORKON_DB_SERVER\\t2\\n'\n\
+           printf 'runner\\t%s\\t%s\\n' \"$DATABASE_URL\" \"$QUEUE_DATABASE_URL\" >> \"$HOME/exec-urls\"\n\
+           exit 0\n\
+         fi\n\
+         if [ \"$1\" = check ]; then printf '%s' \"$DATABASE_URL\" > \"$HOME/check-url\"; exit 0; fi\n\
+         if [ \"$1\" = exec ]; then\n\
+           printf '%s\\t%s\\t%s\\n' \"$3\" \"$DATABASE_URL\" \"$QUEUE_DATABASE_URL\" >> \"$HOME/exec-urls\"\n\
+           printf '%s' \"$RUBYOPT\" > \"$HOME/exec-rubyopt\"\n\
+         fi\n\
+         exit 0\n",
     );
 
     let out = world
@@ -703,8 +707,15 @@ fn create_merges_rubyopt_and_strips_database_urls_from_rails() {
 
     let home = world.home();
     assert_eq!(std::fs::read_to_string(home.join("check-url")).unwrap(), "postgres://localhost/primary");
-    assert_eq!(std::fs::read_to_string(home.join("exec-url")).unwrap(), "");
-    assert_eq!(std::fs::read_to_string(home.join("exec-queue")).unwrap(), "");
+    assert_eq!(
+        std::fs::read_to_string(home.join("exec-urls")).unwrap(),
+        "\
+runner\tpostgres://localhost/primary\tpostgres://localhost/queue
+runner\t\t
+db:prepare\t\t
+db:prepare\tpostgres://localhost/primary\tpostgres://localhost/queue
+"
+    );
     let rubyopt = std::fs::read_to_string(home.join("exec-rubyopt")).unwrap();
     assert!(rubyopt.split_whitespace().any(|token| token == "-W0"), "{rubyopt}");
     assert!(rubyopt.split_whitespace().any(|token| token == "--yjit"), "{rubyopt}");
@@ -720,6 +731,57 @@ fn create_merges_rubyopt_and_strips_database_urls_from_rails() {
     let stored = meta["session_env"]["RUBYOPT"].as_str().unwrap();
     assert!(stored.split_whitespace().any(|token| token == "-W0"), "{stored}");
     assert!(stored.split_whitespace().any(|token| token == "--yjit"), "{stored}");
+    assert!(meta["session_env"].get("DATABASE_URL").is_none(), "{meta}");
+}
+
+/// A sqlite `database.yml` plus a server `DATABASE_URL` is the database the
+/// app opens. The listing has to see the URL, and prepare runs with it.
+#[test]
+fn create_isolates_a_sqlite_file_when_database_url_is_a_server() {
+    let world = World::new();
+    let proj = world.project(&[
+        ("config/database.yml", "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n"),
+        RAILS_APP,
+    ]);
+    world.stubs.set(
+        "bundle",
+        "if [ \"$3\" = runner ]; then\n\
+           if [ -z \"$DATABASE_URL\" ]; then\n\
+             printf 'WORKON_DB_SERVER\\t0\\n'\n\
+           else\n\
+             printf 'WORKON_DB\\tdevelopment\\tpostgresql\\tfrom_env%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
+             printf 'WORKON_DB_SERVER\\t1\\n'\n\
+           fi\n\
+           exit 0\n\
+         fi\n\
+         if [ \"$3\" = db:prepare ]; then\n\
+           printf '%s\\n' \"$DATABASE_URL\" >> \"$HOME/prepares\"\n\
+           exit 0\n\
+         fi\n\
+         echo 'unexpected bundle' >&2\n\
+         exit 1\n",
+    );
+
+    let out = world
+        .workon(&proj)
+        .env("DATABASE_URL", "postgres://localhost/app_development")
+        .args(["create", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(world.home().join("prepares")).unwrap(),
+        "postgres://localhost/app_development\n"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let dbs = report["dbs"].as_array().unwrap();
+    assert_eq!(dbs.len(), 1, "{report}");
+    assert!(dbs[0].as_str().unwrap().starts_with("from_env_ws_"), "{report}");
+    let ws = Path::new(report["path"].as_str().unwrap());
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ws.join(".workon.json")).unwrap()).unwrap();
+    assert!(meta["session_env"]["RUBYOPT"].as_str().unwrap().contains("-r"), "{meta}");
+    assert!(meta["session_env"].get("DATABASE_URL").is_none(), "{meta}");
 }
 
 /// A parent Rails workspace's hook does not ride into a plain session, or into

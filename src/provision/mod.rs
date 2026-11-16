@@ -55,9 +55,9 @@ pub struct Setup {
     /// attach). Phoenix's `MIX_TEST_PARTITION` is read only under `MIX_ENV=test`.
     /// Rails' `WORKON_RAILS_DB_SUFFIX` and `RUBYOPT` suffix the development and
     /// test database names, so the workspace has its own and the primary checkout
-    /// keeps the names in `config/database.yml`. A session-wide `DATABASE_URL` is
-    /// not used: it would replace one environment's database and stop Rails from
-    /// preparing the other. URLs stay in `env`.
+    /// keeps the names in `config/database.yml`. `DATABASE_URL` is not exported.
+    /// An inherited server URL is part of the listing and of one `db:prepare`;
+    /// the file's prepare omits it so the test database is still prepared.
     pub session_env: Vec<(String, String)>,
     /// Which generated env file the vars go in. `None` = `.env.test.local`
     /// (Rails/dotenv default); Laravel needs `.env.testing`, etc.

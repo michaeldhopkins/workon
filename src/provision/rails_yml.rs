@@ -34,6 +34,35 @@ pub(crate) fn needs_server_database(database_yml: &str) -> bool {
     }
 }
 
+/// A sqlite file still has to be proven when a database URL is not sqlite.
+/// The URL is what Rails opens for the current environment, in place of the file.
+pub(crate) fn needs_isolation<'a>(database_yml: &str, database_urls: impl IntoIterator<Item = &'a str>) -> bool {
+    needs_server_database(database_yml) || database_urls.into_iter().any(server_database_url)
+}
+
+/// A non-empty database URL whose scheme is not sqlite. A value that cannot
+/// be classified is not proof that the app stays on a sqlite file.
+pub(crate) fn server_database_url(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() {
+        return false;
+    }
+    let scheme = url_scheme(url).to_ascii_lowercase();
+    !matches!(scheme.as_str(), "sqlite" | "sqlite3")
+}
+
+fn url_scheme(url: &str) -> &str {
+    let Some(end) = url.find(':') else {
+        return "";
+    };
+    let scheme = &url[..end];
+    if scheme.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        scheme
+    } else {
+        ""
+    }
+}
+
 /// `gem "rails"` or `gem 'rails'`, not a comment and not a name that only
 /// contains the word.
 pub(crate) fn gemfile_depends_on_rails(gemfile: &str) -> bool {
@@ -148,6 +177,15 @@ mod tests {
         assert!(needs_server_database("adapter: sqlite3\ndatabase: <%= ENV[\"DATABASE_URL\"] %>\n"));
     }
 
+    #[test]
+    fn an_unclassifiable_database_url_on_sqlite_needs_isolation() {
+        let yml = "adapter: sqlite3\ndatabase: storage/development.sqlite3\n";
+        assert!(!needs_isolation(yml, std::iter::empty::<&str>()));
+        assert!(!needs_isolation(yml, ["", "sqlite3:storage/development.sqlite3"]));
+        assert!(needs_isolation(yml, ["postgres://localhost/app_development"]));
+        assert!(needs_isolation(yml, ["not a url"]));
+    }
+
     /// A pool size is ERB in a default Rails sqlite config. It is not a server
     /// database, and it must not make workon boot Rails or export the hook.
     #[test]
@@ -192,6 +230,25 @@ database: storage/development.sqlite3
             proptest::prop_assert!(!needs_server_database(&sqlite));
             let url = format!("adapter: sqlite3\nurl: {pool}\n");
             proptest::prop_assert!(needs_server_database(&url));
+        }
+
+        /// A sqlite file needs isolation exactly when a database URL is not sqlite.
+        /// A server file needs it with or without a URL.
+        #[test]
+        fn a_sqlite_file_needs_isolation_exactly_when_a_url_is_not_sqlite(
+            scheme in "(postgres|postgresql|mysql|mysql2|trilogy|sqlite|sqlite3)",
+            name in "[a-z]{1,8}",
+            blank in proptest::bool::ANY,
+        ) {
+            let yml = "adapter: sqlite3\ndatabase: storage/development.sqlite3\n";
+            let url = if blank { String::new() } else { format!("{scheme}://localhost/{name}") };
+            let expect = !blank && scheme != "sqlite" && scheme != "sqlite3";
+            proptest::prop_assert_eq!(needs_isolation(yml, [url.as_str()]), expect);
+            proptest::prop_assert!(needs_isolation("adapter: postgresql\n", std::iter::empty::<&str>()));
+            proptest::prop_assert!(needs_isolation(
+                "adapter: postgresql\n",
+                ["sqlite3:storage/x.sqlite3"],
+            ));
         }
 
         /// `gem "rails"` is a dependency. A comment, `rails-ujs`, and `haml-rails` are not.

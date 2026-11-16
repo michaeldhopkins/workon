@@ -4,10 +4,13 @@
 //! exports `WORKON_RAILS_DB_SUFFIX` and a `RUBYOPT` that loads a script from
 //! workon's data directory. The script suffixes development and test names,
 //! including local replicas, and holds no per-workspace data. `DATABASE_URL`
-//! is not exported. `db:prepare` runs only after `rails runner` reports that
-//! every owned server database ends with the suffix. No file is written into
-//! the workspace.
+//! is not exported. A server URL already in the environment is part of the
+//! listing. `db:prepare` for the file omits those variables, and when a server
+//! URL is set it also runs with that URL. Prepare runs only after `rails runner`
+//! reports that every owned server database ends with the suffix. No file is
+//! written into the workspace.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -15,7 +18,7 @@ use vcs_runner::Cmd;
 
 use super::rails_suffix::{self, Listing, LIST_DATABASES, SUFFIX_VAR};
 use super::rails_yml;
-use super::{run_step, ProvisionCtx, Provisioner, Setup};
+use super::{run_step, ProvisionCtx, Provisioner, Resource, Setup};
 
 pub struct Rails;
 
@@ -30,28 +33,15 @@ impl Provisioner for Rails {
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
         let yml = std::fs::read_to_string(ctx.ws_dir.join("config/database.yml")).unwrap_or_default();
-        if !rails_yml::needs_server_database(&yml) {
+        let urls = session_database_urls(ctx.mise_vars);
+        if !rails_yml::needs_isolation(&yml, urls.iter().map(|(_, value)| value.as_str())) {
             return Ok(Setup::default());
         }
 
         let suffix = rails_suffix::db_suffix(ctx.ws_id);
-        let script = match rails_suffix::install() {
-            Ok(path) => path,
-            Err(err) => {
-                eprintln!("Warning: could not install the Rails database suffix: {err}");
-                return Ok(uninstalled(suffix));
-            }
-        };
-        let process_rubyopt = std::env::var("RUBYOPT").ok();
-        let rubyopt = match rails_suffix::compose_rubyopt(
-            [ctx.mise_vars.get("RUBYOPT").map(String::as_str), process_rubyopt.as_deref()].into_iter().flatten(),
-            &script,
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("Warning: could not install the Rails database suffix: {err}");
-                return Ok(uninstalled(suffix));
-            }
+        let rubyopt = match hook_rubyopt(ctx, &suffix) {
+            Hook::Ready(value) => value,
+            Hook::Missing(setup) => return Ok(setup),
         };
 
         let mut failed_steps: Vec<String> = bundle_install(ctx).into_iter().collect();
@@ -59,27 +49,17 @@ impl Provisioner for Rails {
         // that does not prove the suffix must not run against the primary checkout.
         let mut resources = Vec::new();
         if failed_steps.is_empty() {
-            match list_databases(ctx, &suffix, &rubyopt) {
-                Ok(stdout) => match rails_suffix::judge_listing(&stdout, &suffix) {
-                    Listing::Isolated(isolated) => resources = isolated,
-                    Listing::NoServer => return Ok(Setup::default()),
-                    Listing::Unproven(reason) => {
-                        eprintln!("Warning: list rails databases failed: {reason}");
-                        failed_steps.push("list rails databases".to_string());
-                    }
-                },
-                Err(err) => {
-                    eprintln!("Warning: list rails databases failed: {err}");
+            match prove_isolated(ctx, &suffix, &rubyopt, &yml, &urls) {
+                Listed::Ready(proven) => {
+                    resources = proven.resources;
+                    failed_steps.extend(prepare_databases(ctx, &suffix, &rubyopt, &proven.modes));
+                }
+                Listed::NoServer => return Ok(Setup::default()),
+                Listed::Failed(reason) => {
+                    eprintln!("Warning: list rails databases failed: {reason}");
                     failed_steps.push("list rails databases".to_string());
                 }
             }
-        }
-        if failed_steps.is_empty() {
-            eprintln!("Preparing this workspace's Rails development and test databases...");
-            failed_steps.extend(run_step(prepare_cmd(ctx, &suffix, &rubyopt), "rails db:prepare"));
-        }
-        if failed_steps.is_empty() && schema_format(ctx.ws_dir) == Some("sql") {
-            failed_steps.extend(run_step(structure_load_cmd(ctx, &suffix, &rubyopt), "rails db:schema:load"));
         }
 
         Ok(Setup {
@@ -89,6 +69,158 @@ impl Provisioner for Rails {
             ..Setup::default()
         })
     }
+}
+
+enum Hook {
+    Ready(String),
+    Missing(Setup),
+}
+
+struct Proven {
+    resources: Vec<Resource>,
+    modes: Vec<PrepareMode>,
+}
+
+enum Listed {
+    Ready(Proven),
+    NoServer,
+    Failed(String),
+}
+
+enum PrepareMode {
+    /// The file's databases, with `DATABASE_URL` removed so test is prepared.
+    File,
+    /// The database a server URL in the environment makes the app open.
+    SessionUrl,
+}
+
+fn hook_rubyopt(ctx: &ProvisionCtx<'_>, suffix: &str) -> Hook {
+    let script = match rails_suffix::install() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("Warning: could not install the Rails database suffix: {err}");
+            return Hook::Missing(uninstalled(suffix.to_string()));
+        }
+    };
+    let process_rubyopt = std::env::var("RUBYOPT").ok();
+    match rails_suffix::compose_rubyopt(
+        [ctx.mise_vars.get("RUBYOPT").map(String::as_str), process_rubyopt.as_deref()].into_iter().flatten(),
+        &script,
+    ) {
+        Ok(value) => Hook::Ready(value),
+        Err(err) => {
+            eprintln!("Warning: could not install the Rails database suffix: {err}");
+            Hook::Missing(uninstalled(suffix.to_string()))
+        }
+    }
+}
+
+/// The listing keeps environment URLs, because that is the database the app
+/// opens. When the file itself has a server database, a second listing without
+/// those URLs proves the names `db:prepare` will create for the file.
+fn prove_isolated(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, yml: &str, urls: &[(String, String)]) -> Listed {
+    let kept = match list_databases(ctx, suffix, rubyopt, false) {
+        Ok(stdout) => stdout,
+        Err(err) => return Listed::Failed(err.to_string()),
+    };
+    let mut resources = match decide(&kept, suffix) {
+        Decide::Isolated(resources) => resources,
+        Decide::NoServer => return Listed::NoServer,
+        Decide::Failed(reason) => return Listed::Failed(reason),
+    };
+    let mut modes = Vec::new();
+    if rails_yml::needs_server_database(yml) && has_server_url(urls) {
+        match file_listing(ctx, suffix, rubyopt, &mut resources) {
+            FileList::Prepare => modes.push(PrepareMode::File),
+            FileList::Nothing => {}
+            FileList::Failed(reason) => return Listed::Failed(reason),
+        }
+    } else if rails_yml::needs_server_database(yml) {
+        modes.push(PrepareMode::File);
+    }
+    if has_server_url(urls) {
+        modes.push(PrepareMode::SessionUrl);
+    }
+    Listed::Ready(Proven { resources, modes })
+}
+
+enum Decide {
+    Isolated(Vec<Resource>),
+    NoServer,
+    Failed(String),
+}
+
+fn decide(stdout: &str, suffix: &str) -> Decide {
+    match rails_suffix::judge_listing(stdout, suffix) {
+        Listing::Isolated(resources) => Decide::Isolated(resources),
+        Listing::NoServer => Decide::NoServer,
+        Listing::Unproven(reason) => Decide::Failed(reason.to_string()),
+    }
+}
+
+enum FileList {
+    Prepare,
+    Nothing,
+    Failed(String),
+}
+
+fn file_listing(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, resources: &mut Vec<Resource>) -> FileList {
+    let stdout = match list_databases(ctx, suffix, rubyopt, true) {
+        Ok(stdout) => stdout,
+        Err(err) => return FileList::Failed(err.to_string()),
+    };
+    match decide(&stdout, suffix) {
+        Decide::Isolated(file_rows) => {
+            for resource in file_rows {
+                if !resources.contains(&resource) {
+                    resources.push(resource);
+                }
+            }
+            FileList::Prepare
+        }
+        Decide::NoServer => FileList::Nothing,
+        Decide::Failed(reason) => FileList::Failed(reason),
+    }
+}
+
+fn prepare_databases(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, modes: &[PrepareMode]) -> Vec<String> {
+    let mut failed = Vec::new();
+    let mut announced = false;
+    for mode in modes {
+        if !announced {
+            eprintln!("Preparing this workspace's Rails development and test databases...");
+            announced = true;
+        }
+        let strip_urls = matches!(mode, PrepareMode::File);
+        failed.extend(run_step(prepare_cmd(ctx, suffix, rubyopt, strip_urls), "rails db:prepare"));
+        if !failed.is_empty() {
+            break;
+        }
+        if schema_format(ctx.ws_dir) == Some("sql") {
+            failed.extend(run_step(structure_load_cmd(ctx, suffix, rubyopt, strip_urls), "rails db:schema:load"));
+        }
+        if !failed.is_empty() {
+            break;
+        }
+    }
+    failed
+}
+
+fn has_server_url(urls: &[(String, String)]) -> bool {
+    urls.iter().any(|(_, url)| rails_yml::server_database_url(url))
+}
+
+/// Process environment, with mise `[env]` overlaid. Only database URL keys.
+fn session_database_urls(mise: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut urls: HashMap<String, String> = std::env::vars().filter(|(key, _)| database_url_var(key)).collect();
+    for (key, value) in mise {
+        if database_url_var(key) {
+            urls.insert(key.clone(), value.clone());
+        }
+    }
+    let mut urls: Vec<_> = urls.into_iter().collect();
+    urls.sort();
+    urls
 }
 
 /// The hook is not loaded. Record the suffix anyway so a later attach or exec
@@ -107,21 +239,21 @@ fn rails_app(ws_dir: &Path) -> bool {
         || std::fs::read_to_string(ws_dir.join("Gemfile")).is_ok_and(|text| rails_yml::gemfile_depends_on_rails(&text))
 }
 
-fn prepare_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
-    rails_cmd(ctx, suffix, rubyopt).args(["exec", "rails", "db:prepare"]).env("RAILS_ENV", "development")
+fn prepare_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, strip_urls: bool) -> Cmd {
+    rails_cmd(ctx, suffix, rubyopt, strip_urls).args(["exec", "rails", "db:prepare"]).env("RAILS_ENV", "development")
 }
 
 /// `db:prepare` does not read `SCHEMA_FORMAT`. With `DATABASE_URL` unset this
 /// load covers development and the test database together.
-fn structure_load_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
-    rails_cmd(ctx, suffix, rubyopt)
+fn structure_load_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, strip_urls: bool) -> Cmd {
+    rails_cmd(ctx, suffix, rubyopt, strip_urls)
         .args(["exec", "rails", "db:schema:load"])
         .env("RAILS_ENV", "development")
         .env("SCHEMA_FORMAT", "sql")
 }
 
-fn list_databases(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Result<String> {
-    let out = rails_cmd(ctx, suffix, rubyopt)
+fn list_databases(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, strip_urls: bool) -> Result<String> {
+    let out = rails_cmd(ctx, suffix, rubyopt, strip_urls)
         .args(["exec", "rails", "runner", LIST_DATABASES])
         .env("RAILS_ENV", "development")
         .run()
@@ -129,17 +261,18 @@ fn list_databases(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Result
     Ok(out.stdout_lossy().into_owned())
 }
 
-fn rails_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
+fn rails_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, strip_urls: bool) -> Cmd {
     let mut cmd = Cmd::new("bundle").in_dir(ctx.ws_dir);
     for (key, value) in ctx.mise_vars {
-        if database_url_var(key) {
-            continue;
+        if !(strip_urls && database_url_var(key)) {
+            cmd = cmd.env(key, value);
         }
-        cmd = cmd.env(key, value);
     }
-    for (key, _) in std::env::vars() {
-        if database_url_var(&key) {
-            cmd = cmd.env_remove(key);
+    if strip_urls {
+        for (key, _) in std::env::vars() {
+            if database_url_var(&key) {
+                cmd = cmd.env_remove(key);
+            }
         }
     }
     cmd.env(SUFFIX_VAR, suffix).env("RUBYOPT", rubyopt)
@@ -200,7 +333,19 @@ mod tests {
     }
 
     fn with_data_dir<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
-        rails_suffix::with_env_var("WORKON_DATA_DIR", dir, body)
+        rails_suffix::with_env_var("WORKON_DATA_DIR", dir, || {
+            let saved: Vec<(String, String)> = std::env::vars().filter(|(key, _)| database_url_var(key)).collect();
+            for (key, _) in &saved {
+                // SAFETY: `with_env_var` holds `ENV_LOCK` across this closure.
+                unsafe { std::env::remove_var(key) };
+            }
+            let out = body();
+            for (key, value) in &saved {
+                // SAFETY: still under `ENV_LOCK`.
+                unsafe { std::env::set_var(key, value) };
+            }
+            out
+        })
     }
 
     /// The hook is loaded the way a workspace loads it (`RUBYOPT=-r` the script)
@@ -307,7 +452,23 @@ mod tests {
         )
         .unwrap();
         let mise = HashMap::new();
-        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-1", &mise)).unwrap());
+        let setup = with_data_dir(&data, || {
+            let prior_redis = std::env::var_os("REDIS_URL");
+            // SAFETY: `with_data_dir` holds `ENV_LOCK` across this closure.
+            unsafe {
+                std::env::set_var("DATABASE_URL", "sqlite3:storage/development.sqlite3");
+                std::env::set_var("REDIS_URL", "redis://localhost/0");
+            }
+            let setup = Rails.setup(&ctx(tmp.path(), "prov", "ws-1", &mise)).unwrap();
+            // SAFETY: still under `ENV_LOCK`.
+            unsafe {
+                match prior_redis {
+                    Some(value) => std::env::set_var("REDIS_URL", value),
+                    None => std::env::remove_var("REDIS_URL"),
+                }
+            }
+            setup
+        });
 
         assert!(setup.env.is_empty());
         assert!(setup.session_env.is_empty());
@@ -359,6 +520,65 @@ mod tests {
         );
         assert!(setup.env.is_empty());
         assert!(!data.join(rails_suffix::SCRIPT_NAME).exists());
+    }
+
+    /// A sqlite file plus a server `DATABASE_URL` is the database the app opens.
+    /// The hook has to be installed. Without Rails the listing fails closed and
+    /// nothing is prepared.
+    #[test]
+    fn a_sqlite_file_plus_a_server_url_installs_the_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n",
+        )
+        .unwrap();
+        let mise = HashMap::new();
+        let setup = with_data_dir(&data, || {
+            let prior = std::env::var_os("DATABASE_URL");
+            // SAFETY: `with_data_dir` holds `ENV_LOCK` across this closure.
+            unsafe { std::env::set_var("DATABASE_URL", "postgres://localhost/app_development") };
+            let setup = Rails.setup(&ctx(tmp.path(), "prov", "ws-url", &mise)).unwrap();
+            // SAFETY: still under `ENV_LOCK`.
+            unsafe {
+                match prior {
+                    Some(value) => std::env::set_var("DATABASE_URL", value),
+                    None => std::env::remove_var("DATABASE_URL"),
+                }
+            }
+            setup
+        });
+
+        assert!(setup.env.is_empty(), "{:?}", setup.env);
+        assert!(setup.resources.is_empty(), "{:?}", setup.resources);
+        assert_eq!(setup.failed_steps, ["list rails databases"]);
+        assert_eq!(setup.session_env[0], (SUFFIX_VAR.to_string(), "_ws_url".to_string()));
+        assert_eq!(setup.session_env[1].0, "RUBYOPT");
+        assert!(data.join(rails_suffix::SCRIPT_NAME).is_file());
+        assert!(!tmp.path().join(rails_suffix::SCRIPT_NAME).exists());
+    }
+
+    /// mise `[env]` overlays the process. A server URL from mise on a sqlite
+    /// file installs the hook the same way a parent `DATABASE_URL` does.
+    #[test]
+    fn a_mise_server_url_on_a_sqlite_file_installs_the_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n",
+        )
+        .unwrap();
+        let mise = HashMap::from([("DATABASE_URL".to_string(), "postgres://localhost/from_mise".to_string())]);
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-mise", &mise)).unwrap());
+
+        assert_eq!(setup.failed_steps, ["list rails databases"]);
+        assert_eq!(setup.session_env[0], (SUFFIX_VAR.to_string(), "_ws_mise".to_string()));
+        assert_eq!(setup.session_env[1].0, "RUBYOPT");
+        assert!(setup.session_env.iter().all(|(key, _)| key != "DATABASE_URL"));
     }
 
     /// A server adapter that the old first-line scan would skip still has to be
@@ -428,17 +648,10 @@ mod tests {
         Command::new("psql").args(["-tAc", "SELECT 1"]).output().is_ok_and(|out| out.status.success())
     }
 
-    /// On the provisioners CI job a missing service is a failed test. Elsewhere
-    /// the skip is printed, so a green local run does not claim the cycle ran.
-    fn require_ready(ready: bool, what: &str) -> bool {
-        if ready {
-            return true;
-        }
-        if std::env::var("GITHUB_JOB").ok().as_deref() == Some("provisioners") {
-            panic!("{what} is required on the provisioners job");
-        }
-        eprintln!("skipping Rails cycle: {what}");
-        false
+    /// A missing Postgres or fixture bundle fails the test. Skipping would
+    /// report the cycle green when it never touched a database.
+    fn require_ready(ready: bool, what: &str) {
+        assert!(ready, "{what} is required for the Rails cycle");
     }
 
     fn widgets(name: &str) -> String {
@@ -452,11 +665,8 @@ mod tests {
     #[test]
     fn rails_cycle_loads_schema_into_isolated_databases() {
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        if !require_ready(postgres_up(), "Postgres")
-            || !require_ready(bundle_ready(fixture), "the Rails fixture bundle")
-        {
-            return;
-        }
+        require_ready(postgres_up(), "Postgres");
+        require_ready(bundle_ready(fixture), "the Rails fixture bundle");
         let suffix = rails_suffix::db_suffix("ws-cycle");
         let names = [format!("workon_rails_fixture_development{suffix}"), format!("workon_rails_fixture_test{suffix}")];
         for name in &names {
@@ -494,11 +704,8 @@ mod tests {
     #[test]
     fn rails_cycle_loads_structure_sql_when_schema_rb_is_absent() {
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        if !require_ready(postgres_up(), "Postgres")
-            || !require_ready(bundle_ready(fixture), "the Rails fixture bundle")
-        {
-            return;
-        }
+        require_ready(postgres_up(), "Postgres");
+        require_ready(bundle_ready(fixture), "the Rails fixture bundle");
         let suffix = rails_suffix::db_suffix("ws-struct");
         let names = [format!("workon_rails_fixture_development{suffix}"), format!("workon_rails_fixture_test{suffix}")];
         for name in &names {
@@ -543,13 +750,10 @@ mod tests {
     /// untouched, then the workspace's Rails commands use the suffixed databases.
     #[test]
     fn rails_workspace_isolates_databases_and_leaves_jj_clean() {
-        if !require_ready(vcs_runner::jj_available(), "jj") || !require_ready(postgres_up(), "Postgres") {
-            return;
-        }
+        require_ready(vcs_runner::jj_available(), "jj");
+        require_ready(postgres_up(), "Postgres");
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        if !require_ready(bundle_ready(fixture), "the Rails fixture bundle") {
-            return;
-        }
+        require_ready(bundle_ready(fixture), "the Rails fixture bundle");
 
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
@@ -642,6 +846,7 @@ test:
         rails_ok(&ws, env, &["exec", "bin/rails", "test"]);
         rails_ok(&ws, env, &["exec", "bin/rails", "test:all"]);
         rails_ok(&ws, env, &["exec", "bin/rails", "db:test:prepare"]);
+        assert_database_url_is_suffixed(&ws, env, &dev_bare, &suffix);
         let test_db = setup.resources.iter().find(|resource| resource.db_name().contains("_test")).unwrap();
         assert_eq!(widgets(test_db.db_name()), "widgets");
         drop(guard);
@@ -657,19 +862,58 @@ test:
         }
     }
 
+    fn assert_database_url_is_suffixed(ws: &Path, env: &[(String, String)], bare: &str, suffix: &str) {
+        let url = format!("postgres://localhost/{bare}");
+        let listed = rails_output(
+            ws,
+            env,
+            &[
+                "exec",
+                "rails",
+                "runner",
+                "puts ActiveRecord::Base.configurations.configs_for(env_name: 'development', include_hidden: true).map { |config| config.database }",
+            ],
+            Some(&url),
+        );
+        assert!(
+            listed.status.success(),
+            "DATABASE_URL runner failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&listed.stdout),
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        let printed = String::from_utf8_lossy(&listed.stdout);
+        assert!(printed.lines().any(|line| line.trim_end().ends_with(suffix)), "{printed}");
+        assert!(printed.lines().all(|line| line.trim() != bare), "{printed}");
+        assert!(!db_exists(bare), "DATABASE_URL must not create the primary checkout's database");
+    }
+
     fn rails_ok(ws: &Path, env: &[(String, String)], args: &[&str]) {
-        let mut cmd = Command::new("bundle");
-        cmd.args(args).current_dir(ws).env_remove("DATABASE_URL");
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
-        let out = cmd.output().unwrap();
+        let out = rails_output(ws, env, args, None);
         assert!(
             out.status.success(),
             "bundle {args:?} failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// A session keeps `DATABASE_URL`. `bin/rails test` is not given one here:
+    /// that variable would point the test run at the development database.
+    fn rails_output(
+        ws: &Path,
+        env: &[(String, String)],
+        args: &[&str],
+        database_url: Option<&str>,
+    ) -> std::process::Output {
+        let mut cmd = Command::new("bundle");
+        cmd.args(args).current_dir(ws);
+        if let Some(url) = database_url {
+            cmd.env("DATABASE_URL", url);
+        }
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        cmd.output().unwrap()
     }
 
     fn copy_bundle(from: &Path, to: &Path) {
