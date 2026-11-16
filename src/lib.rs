@@ -17,6 +17,7 @@ pub mod mise_env;
 pub mod mux;
 pub mod not_ready;
 pub mod provision;
+pub mod rails_launch;
 pub mod registered;
 pub mod resolve;
 mod save_prompt;

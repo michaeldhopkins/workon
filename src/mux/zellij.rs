@@ -63,6 +63,9 @@ impl super::Multiplexer for Zellij {
         let args = create_args(open.name, open.layout_path, open.dir);
         let mut cmd = self.cmd();
         cmd = cmd.args(args).envs(open.extra_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        for key in open.clear {
+            cmd = cmd.env_remove(key);
+        }
         run(cmd)?;
         Ok(())
     }

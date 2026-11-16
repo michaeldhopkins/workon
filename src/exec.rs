@@ -26,8 +26,12 @@ pub fn cmd_exec(reference: Option<&str>, command: &[OsString]) -> Result<ExitCod
     // With the env's PATH set on the Command, std looks the program up on that PATH, and a
     // relative program (`bin/rails`) resolves against the workspace, since exec changes
     // directory first.
+    let launch = crate::rails_launch::prepared(&ws_dir)?;
     let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(&ws_dir).envs(crate::workspace::session_launch_env(&ws_dir));
+    cmd.args(args).current_dir(&ws_dir).envs(&launch.env);
+    for key in &launch.clear {
+        cmd.env_remove(key);
+    }
     let error = match run(&mut cmd) {
         Ok(code) => return Ok(code),
         Err(error) => error,

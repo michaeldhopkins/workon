@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 use super::{DbEngine, Resource};
 
@@ -16,7 +17,11 @@ const SCRIPT: &str = include_str!("rails_db_suffix.rb");
 
 /// `rails runner` prints one row per development and test database. Boot noise
 /// is anything that does not start with this marker.
-pub(crate) const LIST_DATABASES: &str = r#"%w[development test].each do |env| ActiveRecord::Base.configurations.configs_for(env_name: env).each do |config| adapter = config.configuration_hash[:adapter] || config.configuration_hash["adapter"]; database = config.database; next if adapter.nil? || database.nil? || database.to_s.empty?; $stdout.puts ["WORKON_DB", env, adapter, database].join("\t"); end; end"#;
+pub(crate) const LIST_DATABASES: &str = r#"server = 0; %w[development test].each do |env| ActiveRecord::Base.configurations.configs_for(env_name: env).each do |config| adapter = config.configuration_hash[:adapter] || config.configuration_hash["adapter"]; database = config.database; next if adapter.nil? || database.nil? || database.to_s.empty?; server += 1 unless %w[sqlite sqlite3].include?(adapter.to_s); $stdout.puts ["WORKON_DB", env, adapter, database].join("\t"); end; end; $stdout.puts ["WORKON_DB_SERVER", server].join("\t")"#;
+
+/// Postgres identifiers are 63 bytes. Eight of those are reserved for a hash
+/// tag so two long names cannot collapse into one suffix.
+const SUFFIX_LIMIT: usize = 55;
 
 /// `WORKON_DATA_DIR`, otherwise `$XDG_DATA_HOME/workon`, otherwise
 /// `~/.local/share/workon`. The last avoids `~/Library`, whose space would
@@ -35,12 +40,16 @@ pub(crate) fn data_dir() -> Result<PathBuf> {
 /// file is left untouched. A stale file is replaced. A path inside a git or jj
 /// repository is refused before any directory is created.
 pub(crate) fn install_at(dir: &Path) -> Result<PathBuf> {
+    let dir = absolute_dir(dir)?;
+    let path = dir.join(SCRIPT_NAME);
+    refuse_repository(&path)?;
+    std::fs::create_dir_all(&dir)?;
+    let dir = dir.canonicalize().with_context(|| format!("resolving {}", dir.display()))?;
     let path = dir.join(SCRIPT_NAME);
     refuse_repository(&path)?;
     if path.is_file() && std::fs::read(&path).ok().as_deref() == Some(SCRIPT.as_bytes()) {
         return Ok(path);
     }
-    std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{SCRIPT_NAME}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, SCRIPT)?;
     if let Err(err) = std::fs::rename(&tmp, &path) {
@@ -48,6 +57,16 @@ pub(crate) fn install_at(dir: &Path) -> Result<PathBuf> {
         return Err(err).with_context(|| format!("replacing {}", path.display()));
     }
     Ok(path)
+}
+
+/// `RUBYOPT=-r` is resolved against the later working directory, so a relative
+/// data dir has to become an absolute path before it is exported.
+fn absolute_dir(dir: &Path) -> Result<PathBuf> {
+    if dir.is_absolute() {
+        Ok(dir.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(dir))
+    }
 }
 
 pub(crate) fn install() -> Result<PathBuf> {
@@ -65,26 +84,113 @@ pub(crate) fn db_suffix(ws_id: &str) -> String {
             suffix.push('_');
         }
     }
-    suffix
+    if suffix.len() <= SUFFIX_LIMIT {
+        return suffix;
+    }
+    let tag = hex8(&Sha256::digest(suffix.as_bytes()));
+    let keep = SUFFIX_LIMIT - tag.len();
+    let mut out = String::new();
+    for ch in suffix.chars() {
+        if out.len() + ch.len_utf8() > keep {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push_str(&tag);
+    out
+}
+
+fn hex8(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(8);
+    for byte in bytes.iter().take(4) {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
 }
 
 /// `RUBYOPT` that loads `script` once. An existing value keeps its other flags.
 /// `RUBYOPT` splits on whitespace, so a path that contains whitespace is refused.
+#[cfg(test)]
 pub(crate) fn rubyopt_loading(existing: Option<&str>, script: &Path) -> Result<String> {
+    match existing {
+        Some(value) => compose_rubyopt([value], script),
+        None => compose_rubyopt(std::iter::empty(), script),
+    }
+}
+
+/// One `-r` of `script`, then every other flag from `sources`, in order.
+/// An older `-r` of `rails_db_suffix.rb` is dropped. A path with whitespace
+/// cannot be loaded: `RUBYOPT` splits on whitespace.
+pub(crate) fn compose_rubyopt<'a>(sources: impl IntoIterator<Item = &'a str>, script: &Path) -> Result<String> {
     let path = script.to_str().context("rails db suffix path is not Unicode")?;
     if path.chars().any(char::is_whitespace) {
         bail!("rails db suffix path contains whitespace, so RUBYOPT cannot load it: {path}");
     }
     let flag = format!("-r{path}");
-    let prior = existing.unwrap_or("").trim();
-    if prior.split_whitespace().any(|token| token == flag) {
-        return Ok(prior.to_string());
+    let mut tokens = Vec::new();
+    for source in sources {
+        for token in source.split_whitespace() {
+            if token == flag || hook_flag(token) || tokens.iter().any(|kept: &String| kept == token) {
+                continue;
+            }
+            tokens.push(token.to_string());
+        }
     }
-    if prior.is_empty() {
-        Ok(flag)
+    tokens.insert(0, flag);
+    Ok(tokens.join(" "))
+}
+
+fn hook_flag(token: &str) -> bool {
+    let Some(path) = token.strip_prefix("-r") else {
+        return false;
+    };
+    Path::new(path).file_name().and_then(|name| name.to_str()) == Some(SCRIPT_NAME)
+}
+
+/// `rubyopt` loads `rails_db_suffix.rb`.
+pub(crate) fn loads_hook(rubyopt: &str) -> bool {
+    rubyopt.split_whitespace().any(hook_flag)
+}
+
+/// `rubyopt` with every `-r` of `rails_db_suffix.rb` removed.
+pub(crate) fn without_hook(rubyopt: &str) -> String {
+    rubyopt.split_whitespace().filter(|token| !hook_flag(token)).collect::<Vec<_>>().join(" ")
+}
+
+/// What a `rails runner` listing proved.
+pub(crate) enum Listing {
+    /// Every owned development and test server database ends with the suffix.
+    Isolated(Vec<Resource>),
+    /// The runner booted and reported no server database. SQLite only.
+    NoServer,
+    /// Prepare must not run. The string is the warning detail.
+    Unproven(&'static str),
+}
+
+pub(crate) fn judge_listing(stdout: &str, suffix: &str) -> Listing {
+    let listed = parse_db_listing(stdout);
+    match server_count(stdout) {
+        Some(0) if listed.is_empty() => return Listing::NoServer,
+        Some(count) if count != listed.len() => {
+            return Listing::Unproven("a server database was not reported as a database workon can isolate");
+        }
+        _ => {}
+    }
+    if listed.is_empty() || suffix.is_empty() {
+        return Listing::Unproven("rails reported no development or test database");
+    }
+    let (isolated, all) = isolated_resources(listed, suffix);
+    if all {
+        Listing::Isolated(isolated)
     } else {
-        Ok(format!("{flag} {prior}"))
+        Listing::Unproven("a database name did not end with the workspace suffix")
     }
+}
+
+fn server_count(stdout: &str) -> Option<usize> {
+    stdout.lines().rev().find_map(|line| line.strip_prefix("WORKON_DB_SERVER\t")?.trim().parse().ok())
 }
 
 /// Rows from [`LIST_DATABASES`]. SQLite and unknown adapters are not server
@@ -112,6 +218,9 @@ pub(crate) fn parse_db_listing(stdout: &str) -> Vec<Resource> {
 /// Names that do not end with `suffix` are the primary checkout's databases.
 /// They are dropped from the list, and `false` says the hook missed a row.
 pub(crate) fn isolated_resources(listed: Vec<Resource>, suffix: &str) -> (Vec<Resource>, bool) {
+    if listed.is_empty() || suffix.is_empty() {
+        return (Vec::new(), false);
+    }
     let isolated: Vec<Resource> =
         listed.iter().filter(|resource| resource.db_name().ends_with(suffix)).cloned().collect();
     let all_isolated = isolated.len() == listed.len();
@@ -120,7 +229,7 @@ pub(crate) fn isolated_resources(listed: Vec<Resource>, suffix: &str) -> (Vec<Re
 
 fn engine_for(adapter: &str) -> Option<DbEngine> {
     match adapter {
-        "postgresql" | "postgres" => Some(DbEngine::Postgres),
+        "postgresql" | "postgres" | "postgis" => Some(DbEngine::Postgres),
         "mysql2" | "mysql" | "trilogy" => Some(DbEngine::Mysql),
         _ => None,
     }
@@ -197,6 +306,20 @@ mod tests {
     fn set_modified(path: &Path, when: SystemTime) {
         let file = std::fs::File::options().write(true).open(path).unwrap();
         file.set_times(FileTimes::new().set_modified(when)).unwrap();
+    }
+
+    #[test]
+    fn the_installed_script_path_has_no_dotdot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sub").join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let via = tmp.path().join("sub").join("other").join("..").join("data");
+
+        let path = install_at(&via).unwrap();
+
+        assert!(path.is_absolute());
+        assert!(path.components().all(|component| component.as_os_str() != ".."));
+        assert_eq!(path, dir.canonicalize().unwrap().join(SCRIPT_NAME));
     }
 
     #[test]
@@ -318,6 +441,13 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_listing_is_not_a_workspace_database() {
+        let (isolated, all) = isolated_resources(Vec::new(), "_ws_1");
+        assert!(isolated.is_empty());
+        assert!(!all, "no rows is not proof the hook suffixed every database");
+    }
+
+    #[test]
     fn a_name_without_the_suffix_is_not_a_workspace_database() {
         let listed = vec![
             Resource::PostgresDb { name: "app_development_ws_1".into() },
@@ -376,18 +506,71 @@ mod tests {
             }
         }
 
+        /// A workspace id that does not fit still yields one identifier, and two
+        /// ids that share a long prefix stay different.
+        #[test]
+        fn a_long_workspace_id_stays_short_and_distinct(body in "[a-z]{60}") {
+            let mut other = body.clone();
+            let flipped = if other.ends_with('a') { 'b' } else { 'a' };
+            other.pop();
+            other.push(flipped);
+            let left = db_suffix(&body);
+            let right = db_suffix(&other);
+            proptest::prop_assert_ne!(&left, &right);
+            for suffix in [&left, &right] {
+                proptest::prop_assert!(suffix.len() <= 55);
+                proptest::prop_assert!(suffix.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()));
+            }
+        }
+
+        /// Flags from every source are kept once. An old copy of this script is not.
+        #[test]
+        fn rubyopt_merges_every_source_and_drops_an_old_hook(
+            user in "-[A-Za-z0-9]{1,6}",
+            mise in "-[A-Za-z0-9]{1,6}",
+        ) {
+            let script = Path::new("/tmp/workon/rails_db_suffix.rb");
+            let old = "-r/elsewhere/rails_db_suffix.rb";
+            let merged = compose_rubyopt([user.as_str(), &format!("{old} {mise}")], script).unwrap();
+            proptest::prop_assert!(merged.starts_with("-r/tmp/workon/rails_db_suffix.rb"));
+            proptest::prop_assert!(merged.split_whitespace().any(|token| token == user));
+            proptest::prop_assert!(merged.split_whitespace().any(|token| token == mise));
+            proptest::prop_assert!(!merged.contains("/elsewhere/"));
+            proptest::prop_assert_eq!(merged.split_whitespace().filter(|token| token.contains("rails_db_suffix.rb")).count(), 1);
+        }
+
+        /// No rows, or rows that miss the suffix, are not a reason to prepare.
+        #[test]
+        fn an_empty_listing_is_not_isolated(
+            suffix in "_[a-z0-9]{1,8}",
+            name in "[a-z]{1,12}",
+        ) {
+            proptest::prop_assert!(matches!(judge_listing("", &suffix), Listing::Unproven(_)));
+            proptest::prop_assert!(matches!(judge_listing("WORKON_DB_SERVER\t0\n", &suffix), Listing::NoServer));
+            let row = format!("WORKON_DB\tdevelopment\tpostgresql\t{name}\nWORKON_DB_SERVER\t1\n");
+            let decision = judge_listing(&row, &suffix);
+            if name.ends_with(&suffix) {
+                proptest::prop_assert!(matches!(decision, Listing::Isolated(_)));
+            } else {
+                proptest::prop_assert!(matches!(decision, Listing::Unproven(_)));
+            }
+        }
+
         /// Only a marked development or test row for a server adapter becomes a
         /// database to drop. Noise, SQLite, and other environments do not.
         #[test]
         fn a_listing_keeps_only_marked_development_and_test_server_rows(
             noise in "[^\n\t]{0,30}",
             env in "(development|test|production)",
-            adapter in "(postgresql|postgres|mysql2|mysql|trilogy|sqlite3|other)",
+            adapter in "(postgresql|postgres|mysql2|mysql|trilogy|postgis|sqlite3|other)",
             database in "[a-z0-9_]{1,20}",
         ) {
             let text = format!("{noise}\nWORKON_DB\t{env}\t{adapter}\t{database}\n{noise}\n");
             let got = parse_db_listing(&text);
-            let server = matches!(adapter.as_str(), "postgresql" | "postgres" | "mysql2" | "mysql" | "trilogy");
+            let server = matches!(
+                adapter.as_str(),
+                "postgresql" | "postgres" | "mysql2" | "mysql" | "trilogy" | "postgis"
+            );
             let wanted = server && (env == "development" || env == "test");
             if wanted {
                 proptest::prop_assert_eq!(got.len(), 1);

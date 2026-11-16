@@ -2,18 +2,20 @@
 //!
 //! `config/database.yml` keeps the primary checkout's names. The workspace
 //! exports `WORKON_RAILS_DB_SUFFIX` and a `RUBYOPT` that loads a script from
-//! workon's data directory. The script suffixes the development and test names
-//! (replicas stay put) and holds no per-workspace data. `DATABASE_URL` is left
-//! unset, so `db:prepare` creates and loads both databases. No file is written
-//! into the workspace.
+//! workon's data directory. The script suffixes development and test names,
+//! including local replicas, and holds no per-workspace data. `DATABASE_URL`
+//! is not exported. `db:prepare` runs only after `rails runner` reports that
+//! every owned server database ends with the suffix. No file is written into
+//! the workspace.
 
 use std::path::Path;
 
 use anyhow::Result;
 use vcs_runner::Cmd;
 
-use super::rails_suffix::{self, LIST_DATABASES, SUFFIX_VAR};
-use super::{run_step, ProvisionCtx, Provisioner, Resource, Setup};
+use super::rails_suffix::{self, Listing, LIST_DATABASES, SUFFIX_VAR};
+use super::rails_yml;
+use super::{run_step, ProvisionCtx, Provisioner, Setup};
 
 pub struct Rails;
 
@@ -23,49 +25,49 @@ impl Provisioner for Rails {
     }
 
     fn detect(&self, ws_dir: &Path) -> bool {
-        ws_dir.join("config/database.yml").is_file()
+        ws_dir.join("config/database.yml").is_file() && rails_app(ws_dir)
     }
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
         let yml = std::fs::read_to_string(ctx.ws_dir.join("config/database.yml")).unwrap_or_default();
-        if !provisions_server_db(&yml) {
+        if !rails_yml::needs_server_database(&yml) {
             return Ok(Setup::default());
         }
 
+        let suffix = rails_suffix::db_suffix(ctx.ws_id);
         let script = match rails_suffix::install() {
             Ok(path) => path,
             Err(err) => {
                 eprintln!("Warning: could not install the Rails database suffix: {err}");
-                return Ok(Setup { failed_steps: vec!["install rails db suffix".to_string()], ..Setup::default() });
+                return Ok(uninstalled(suffix));
             }
         };
-        let suffix = rails_suffix::db_suffix(ctx.ws_id);
-        let inherited = ctx.mise_vars.get("RUBYOPT").cloned().or_else(|| std::env::var("RUBYOPT").ok());
-        let rubyopt = match rails_suffix::rubyopt_loading(inherited.as_deref(), &script) {
+        let process_rubyopt = std::env::var("RUBYOPT").ok();
+        let rubyopt = match rails_suffix::compose_rubyopt(
+            [ctx.mise_vars.get("RUBYOPT").map(String::as_str), process_rubyopt.as_deref()].into_iter().flatten(),
+            &script,
+        ) {
             Ok(value) => value,
             Err(err) => {
                 eprintln!("Warning: could not install the Rails database suffix: {err}");
-                return Ok(Setup { failed_steps: vec!["install rails db suffix".to_string()], ..Setup::default() });
+                return Ok(uninstalled(suffix));
             }
         };
 
         let mut failed_steps: Vec<String> = bundle_install(ctx).into_iter().collect();
-        // Names first. `db:prepare` creates whatever the hook resolved, so a hook
-        // that did not load must not run against the primary checkout's databases.
+        // Names first. `db:prepare` creates whatever the hook resolved, so a listing
+        // that does not prove the suffix must not run against the primary checkout.
         let mut resources = Vec::new();
         if failed_steps.is_empty() {
             match list_databases(ctx, &suffix, &rubyopt) {
-                Ok(listed) => {
-                    let (isolated, all_isolated) = rails_suffix::isolated_resources(listed, &suffix);
-                    if all_isolated {
-                        resources = isolated;
-                    } else {
-                        eprintln!(
-                            "Warning: list rails databases failed: a database name did not end with the workspace suffix"
-                        );
+                Ok(stdout) => match rails_suffix::judge_listing(&stdout, &suffix) {
+                    Listing::Isolated(isolated) => resources = isolated,
+                    Listing::NoServer => return Ok(Setup::default()),
+                    Listing::Unproven(reason) => {
+                        eprintln!("Warning: list rails databases failed: {reason}");
                         failed_steps.push("list rails databases".to_string());
                     }
-                }
+                },
                 Err(err) => {
                     eprintln!("Warning: list rails databases failed: {err}");
                     failed_steps.push("list rails databases".to_string());
@@ -89,17 +91,20 @@ impl Provisioner for Rails {
     }
 }
 
-/// `true` when the first adapter is a server database. SQLite is a file that
-/// the worktree copy already has. An unknown adapter is skipped out loud.
-fn provisions_server_db(database_yml: &str) -> bool {
-    match adapter(database_yml).as_deref() {
-        Some("sqlite3") => false,
-        Some("postgresql" | "mysql2" | "mysql" | "trilogy") | None => true,
-        Some(other) => {
-            eprintln!("Rails adapter `{other}` not supported; skipping DB setup");
-            false
-        }
+/// The hook is not loaded. Record the suffix anyway so a later attach or exec
+/// refreshes the script and refuses to start if it still cannot.
+fn uninstalled(suffix: String) -> Setup {
+    Setup {
+        failed_steps: vec!["install rails db suffix".to_string()],
+        session_env: vec![(SUFFIX_VAR.to_string(), suffix)],
+        ..Setup::default()
     }
+}
+
+fn rails_app(ws_dir: &Path) -> bool {
+    ws_dir.join("bin/rails").is_file()
+        || ws_dir.join("config/application.rb").is_file()
+        || std::fs::read_to_string(ws_dir.join("Gemfile")).is_ok_and(|text| rails_yml::gemfile_depends_on_rails(&text))
 }
 
 fn prepare_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
@@ -115,21 +120,33 @@ fn structure_load_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cm
         .env("SCHEMA_FORMAT", "sql")
 }
 
-fn list_databases(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Result<Vec<Resource>> {
+fn list_databases(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Result<String> {
     let out = rails_cmd(ctx, suffix, rubyopt)
         .args(["exec", "rails", "runner", LIST_DATABASES])
         .env("RAILS_ENV", "development")
         .run()
         .map_err(|err| anyhow::anyhow!(err))?;
-    Ok(rails_suffix::parse_db_listing(&out.stdout_lossy()))
+    Ok(out.stdout_lossy().into_owned())
 }
 
 fn rails_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str) -> Cmd {
     let mut cmd = Cmd::new("bundle").in_dir(ctx.ws_dir);
     for (key, value) in ctx.mise_vars {
+        if database_url_var(key) {
+            continue;
+        }
         cmd = cmd.env(key, value);
     }
+    for (key, _) in std::env::vars() {
+        if database_url_var(&key) {
+            cmd = cmd.env_remove(key);
+        }
+    }
     cmd.env(SUFFIX_VAR, suffix).env("RUBYOPT", rubyopt)
+}
+
+fn database_url_var(key: &str) -> bool {
+    key == "DATABASE_URL" || key.ends_with("_DATABASE_URL")
 }
 
 /// `bundle check || bundle install` in the workspace when it has a Gemfile. Git-sourced
@@ -163,22 +180,20 @@ pub(crate) fn schema_format(ws_dir: &Path) -> Option<&'static str> {
     (ws_dir.join("db/structure.sql").is_file() && !ws_dir.join("db/schema.rb").is_file()).then_some("sql")
 }
 
-/// The first `adapter:` value in `database.yml` (usually under `default:`),
-/// e.g. `postgresql`, `mysql2`, `sqlite3`.
+/// The server adapter in `database.yml`, or the first adapter when there is none.
+#[cfg(test)]
 pub(crate) fn adapter(database_yml: &str) -> Option<String> {
-    database_yml.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("adapter:")?.trim();
-        (!value.is_empty()).then(|| value.to_string())
-    })
+    rails_yml::first_adapter(database_yml)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use super::*;
+    use crate::provision::Resource;
 
     fn ctx<'a>(dir: &'a Path, project: &'a str, ws_id: &'a str, mise: &'a HashMap<String, String>) -> ProvisionCtx<'a> {
         ProvisionCtx { project_dir: dir, project_name: project, ws_id, ws_dir: dir, mise_vars: mise }
@@ -186,6 +201,50 @@ mod tests {
 
     fn with_data_dir<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
         rails_suffix::with_env_var("WORKON_DATA_DIR", dir, body)
+    }
+
+    /// The hook is loaded the way a workspace loads it (`RUBYOPT=-r` the script)
+    /// and must suffix the databases ActiveRecord actually builds. No connection.
+    #[test]
+    fn the_hook_suffixes_real_activerecord_configurations() {
+        let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
+        let script = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/provision/rails_db_suffix.rb"));
+        let tmp = tempfile::tempdir().unwrap();
+        let proof = tmp.path().join("proof.rb");
+        std::fs::write(&proof, include_str!("rails_db_suffix_proof.rb")).unwrap();
+        let mut cmd = if bundle_ready(fixture) {
+            let mut cmd = Command::new("bundle");
+            cmd.arg("exec").arg("ruby").current_dir(fixture);
+            cmd
+        } else if std::env::var("GITHUB_JOB").ok().as_deref() == Some("provisioners") {
+            panic!("the provisioners job has no Rails fixture bundle, so the ActiveRecord hook was not proven");
+        } else {
+            Command::new(ruby_with_activerecord().unwrap_or_else(|| PathBuf::from("ruby")))
+        };
+        // A parent GEM_HOME would hide the Ruby that actually has ActiveRecord.
+        let out = cmd
+            .arg(&proof)
+            .env("RUBYOPT", format!("-r{}", script.display()))
+            .env("WORKON_RAILS_DB_SUFFIX", "_ws_test1")
+            .env_remove("DATABASE_URL")
+            .env_remove("GEM_HOME")
+            .env_remove("GEM_PATH")
+            .env_remove("BUNDLE_GEMFILE")
+            .env_remove("RUBYLIB")
+            .output()
+            .expect("ruby");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stdout.trim().starts_with("NO_AR") {
+            assert_ne!(
+                std::env::var("GITHUB_JOB").ok().as_deref(),
+                Some("provisioners"),
+                "the provisioners job could not require active_record: {stderr}"
+            );
+            eprintln!("skipping ActiveRecord hook proof: active_record is not installed ({stdout} {stderr})");
+            return;
+        }
+        assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     }
 
     #[test]
@@ -214,13 +273,27 @@ mod tests {
     }
 
     #[test]
-    fn detects_a_rails_app_by_database_yml() {
+    fn detects_a_rails_app_by_its_own_files() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(!Rails.detect(tmp.path()), "no config/database.yml -> not detected");
+        let config = tmp.path().join("config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(config.join("database.yml"), "test:\n  adapter: postgresql\n").unwrap();
+        assert!(!Rails.detect(tmp.path()), "database.yml alone is not a Rails app");
 
-        std::fs::create_dir(tmp.path().join("config")).unwrap();
-        std::fs::write(tmp.path().join("config/database.yml"), "test:\n  adapter: postgresql\n").unwrap();
-        assert!(Rails.detect(tmp.path()), "config/database.yml -> detected");
+        std::fs::write(config.join("application.rb"), "module App\nend\n").unwrap();
+        assert!(Rails.detect(tmp.path()), "config/application.rb");
+        std::fs::remove_file(config.join("application.rb")).unwrap();
+        assert!(!Rails.detect(tmp.path()));
+
+        std::fs::create_dir(tmp.path().join("bin")).unwrap();
+        std::fs::write(tmp.path().join("bin/rails"), "#!/usr/bin/env ruby\n").unwrap();
+        assert!(Rails.detect(tmp.path()), "bin/rails");
+        std::fs::remove_file(tmp.path().join("bin/rails")).unwrap();
+
+        std::fs::write(tmp.path().join("Gemfile"), "# gem \"rails\"\ngem \"rails\"\n").unwrap();
+        assert!(Rails.detect(tmp.path()), "gem \"rails\"");
+        std::fs::write(tmp.path().join("Gemfile"), "gem \"haml-rails\"\n").unwrap();
+        assert!(!Rails.detect(tmp.path()), "a name that merely contains rails");
     }
 
     #[test]
@@ -261,7 +334,7 @@ mod tests {
         assert_eq!(setup.failed_steps, ["list rails databases"]);
         assert_eq!(setup.session_env[0], (SUFFIX_VAR.to_string(), "_ws_selftest".to_string()));
         assert_eq!(setup.session_env[1].0, "RUBYOPT");
-        let script = data.join(rails_suffix::SCRIPT_NAME);
+        let script = data.join(rails_suffix::SCRIPT_NAME).canonicalize().unwrap();
         assert!(script.is_file(), "the script lands in the data dir");
         assert!(setup.session_env[1].1.contains(&format!("-r{}", script.display())));
         assert!(!tmp.path().join(rails_suffix::SCRIPT_NAME).exists());
@@ -279,17 +352,93 @@ mod tests {
         let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-1", &mise)).unwrap());
 
         assert_eq!(setup.failed_steps, ["install rails db suffix"]);
-        assert!(setup.session_env.is_empty(), "no hook, so no suffix that would miss");
+        assert_eq!(
+            setup.session_env,
+            vec![(SUFFIX_VAR.to_string(), "_ws_1".to_string())],
+            "the suffix is recorded so attach refuses to start without a hook"
+        );
         assert!(setup.env.is_empty());
         assert!(!data.join(rails_suffix::SCRIPT_NAME).exists());
+    }
+
+    /// A server adapter that the old first-line scan would skip still has to be
+    /// proven. The runner cannot boot here, so prepare does not run.
+    #[test]
+    fn a_hidden_server_database_is_not_silently_skipped() {
+        for yml in [
+            "development:\n  adapter: sqlite3\n  database: db/q.sqlite3\nprimary:\n  adapter: postgresql\n",
+            "development:\n  adapter: \"postgresql\"\n",
+            "development:\n  adapter: postgresql # primary\n",
+            "development:\n  adapter: postgis\n",
+            "development:\n  adapter: <%= ENV[\"DB_ADAPTER\"] %>\n",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let data = tmp.path().join("data");
+            std::fs::create_dir(tmp.path().join("config")).unwrap();
+            std::fs::write(tmp.path().join("config/database.yml"), yml).unwrap();
+            let mise = HashMap::new();
+            let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-1", &mise)).unwrap());
+            assert_eq!(setup.failed_steps, ["list rails databases"], "{yml}: {:?}", setup.failed_steps);
+            assert!(!setup.session_env.is_empty(), "{yml} exported nothing, so Rails would use the primary names");
+            assert!(setup.resources.is_empty(), "{yml}");
+        }
     }
 
     fn bundle_ready(dir: &Path) -> bool {
         Command::new("bundle").arg("check").current_dir(dir).output().is_ok_and(|out| out.status.success())
     }
 
+    /// A mise-installed Ruby whose own gem directory contains ActiveRecord.
+    /// The `ruby` on PATH often does not. The newest version wins.
+    fn ruby_with_activerecord() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME")?;
+        let root = PathBuf::from(home).join(".local/share/mise/installs/ruby");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&root).ok()?.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.chars().next().is_some_and(|ch| ch.is_ascii_digit()) || !name.contains('.') {
+                continue;
+            }
+            let ruby = entry.path().join("bin/ruby");
+            if ruby.is_file() && activerecord_gem(&entry.path()) {
+                found.push((name.to_string(), ruby));
+            }
+        }
+        found.sort();
+        found.pop().map(|(_, ruby)| ruby)
+    }
+
+    fn activerecord_gem(prefix: &Path) -> bool {
+        let Ok(apis) = std::fs::read_dir(prefix.join("lib/ruby/gems")) else {
+            return false;
+        };
+        for api in apis.flatten() {
+            let Ok(gems) = std::fs::read_dir(api.path().join("gems")) else {
+                continue;
+            };
+            if gems.flatten().any(|gem| gem.file_name().to_string_lossy().starts_with("activerecord-")) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn postgres_up() -> bool {
         Command::new("psql").args(["-tAc", "SELECT 1"]).output().is_ok_and(|out| out.status.success())
+    }
+
+    /// On the provisioners CI job a missing service is a failed test. Elsewhere
+    /// the skip is printed, so a green local run does not claim the cycle ran.
+    fn require_ready(ready: bool, what: &str) -> bool {
+        if ready {
+            return true;
+        }
+        if std::env::var("GITHUB_JOB").ok().as_deref() == Some("provisioners") {
+            panic!("{what} is required on the provisioners job");
+        }
+        eprintln!("skipping Rails cycle: {what}");
+        false
     }
 
     fn widgets(name: &str) -> String {
@@ -303,7 +452,9 @@ mod tests {
     #[test]
     fn rails_cycle_loads_schema_into_isolated_databases() {
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        if !postgres_up() || !bundle_ready(fixture) {
+        if !require_ready(postgres_up(), "Postgres")
+            || !require_ready(bundle_ready(fixture), "the Rails fixture bundle")
+        {
             return;
         }
         let suffix = rails_suffix::db_suffix("ws-cycle");
@@ -343,7 +494,9 @@ mod tests {
     #[test]
     fn rails_cycle_loads_structure_sql_when_schema_rb_is_absent() {
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        if !postgres_up() || !bundle_ready(fixture) {
+        if !require_ready(postgres_up(), "Postgres")
+            || !require_ready(bundle_ready(fixture), "the Rails fixture bundle")
+        {
             return;
         }
         let suffix = rails_suffix::db_suffix("ws-struct");
@@ -390,11 +543,11 @@ mod tests {
     /// untouched, then the workspace's Rails commands use the suffixed databases.
     #[test]
     fn rails_workspace_isolates_databases_and_leaves_jj_clean() {
-        if !vcs_runner::jj_available() || !postgres_up() {
+        if !require_ready(vcs_runner::jj_available(), "jj") || !require_ready(postgres_up(), "Postgres") {
             return;
         }
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        if !bundle_ready(fixture) {
+        if !require_ready(bundle_ready(fixture), "the Rails fixture bundle") {
             return;
         }
 
@@ -560,22 +713,6 @@ test:
             } else if path.is_file() {
                 out.insert(path.strip_prefix(root).unwrap().to_path_buf(), std::fs::read(&path).unwrap());
             }
-        }
-    }
-
-    proptest::proptest! {
-        /// Whatever surrounds it, the first `adapter:` line with a value names the adapter.
-        #[test]
-        fn adapter_is_the_first_adapter_line_with_a_value(
-            before in proptest::collection::vec("  (database|host|pool): [a-z0-9_]{0,8}", 0..4),
-            blank_first in proptest::bool::ANY,
-            indent in " {0,4}",
-            value in "[a-z0-9_]{1,12}",
-            after in proptest::collection::vec("  adapter: [a-z]{1,8}", 0..3),
-        ) {
-            let blank = if blank_first { "  adapter:\n" } else { "" };
-            let yml = format!("test:\n{}\n{blank}{indent}adapter: {value}\n{}\n", before.join("\n"), after.join("\n"));
-            proptest::prop_assert_eq!(adapter(&yml), Some(value));
         }
     }
 }

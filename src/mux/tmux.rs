@@ -58,7 +58,7 @@ impl super::Multiplexer for Tmux {
         }
         let focused = panes::focused_index(&leaves);
         for (index, leaf) in leaves.iter().enumerate() {
-            let args = pane_args(open.name, open.dir, open.extra_env, leaf, index == 0);
+            let args = pane_args(open.name, open.dir, open.extra_env, open.clear, leaf, index == 0);
             run(self.cmd().args(args))?;
         }
         if focused != 0 {
@@ -98,6 +98,7 @@ pub(crate) fn pane_args(
     name: &str,
     dir: &Path,
     extra: &HashMap<String, String>,
+    clear: &[String],
     leaf: &panes::Leaf,
     first: bool,
 ) -> Vec<String> {
@@ -113,6 +114,12 @@ pub(crate) fn pane_args(
     for key in keys {
         args.push("-e".to_string());
         args.push(format!("{key}={}", extra[key]));
+    }
+    let mut cleared: Vec<&String> = clear.iter().filter(|key| !extra.contains_key(*key)).collect();
+    cleared.sort();
+    for key in cleared {
+        args.push("-e".to_string());
+        args.push(format!("{key}="));
     }
     if let Some(program) = &leaf.program {
         args.push("--".to_string());
@@ -142,8 +149,16 @@ mod tests {
 
     #[test]
     fn a_shell_session_is_detached_and_has_no_command() {
-        let args = pane_args("demo", Path::new("/work"), &HashMap::new(), &panes::Leaf::shell(), true);
+        let args = pane_args("demo", Path::new("/work"), &HashMap::new(), &[], &panes::Leaf::shell(), true);
         assert_eq!(args, vec!["new-session", "-d", "-s", "demo", "-c", "/work"]);
+    }
+
+    #[test]
+    fn a_cleared_name_is_an_empty_assignment() {
+        let clear = vec!["RUBYOPT".to_string(), "WORKON_RAILS_DB_SUFFIX".to_string()];
+        let args = pane_args("demo", Path::new("/work"), &HashMap::new(), &clear, &panes::Leaf::shell(), true);
+        assert!(args.windows(2).any(|pair| pair[0] == "-e" && pair[1] == "RUBYOPT="));
+        assert!(args.windows(2).any(|pair| pair[0] == "-e" && pair[1] == "WORKON_RAILS_DB_SUFFIX="));
     }
 
     #[test]
@@ -156,7 +171,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("B".to_string(), "2".to_string());
         env.insert("A".to_string(), "1".to_string());
-        let args = pane_args("demo", Path::new("/work"), &env, &leaf, false);
+        let args = pane_args("demo", Path::new("/work"), &env, &[], &leaf, false);
         assert_eq!(
             args,
             vec![

@@ -20,6 +20,7 @@ pub(crate) mod prisma;
 mod python_venv;
 pub(crate) mod rails;
 pub(crate) mod rails_suffix;
+pub(crate) mod rails_yml;
 
 pub trait Provisioner: Send + Sync {
     fn name(&self) -> &'static str;

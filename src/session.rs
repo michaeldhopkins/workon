@@ -21,17 +21,17 @@ pub fn run(
     layout_content: &str,
     config_name: &str,
 ) -> Result<()> {
-    let empty = std::collections::HashMap::new();
+    let ready = crate::rails_launch::for_launch(working_dir)?;
     if session_exists("zellij", name)? {
         if force_new {
             delete_session("zellij", name)?;
-            launch(name, layout, working_dir, &empty)
+            launch(name, layout, working_dir, &ready.env, &ready.clear)
         } else {
             ensure_layout_compatible(name, layout_content, config_name)?;
             attach(name, working_dir)
         }
     } else {
-        launch(name, layout, working_dir, &empty)
+        launch(name, layout, working_dir, &ready.env, &ready.clear)
     }
 }
 
@@ -260,11 +260,12 @@ pub fn launch(
     layout: &Path,
     working_dir: &Path,
     extra_env: &std::collections::HashMap<String, String>,
+    clear: &[String],
 ) -> Result<()> {
     // -w calls launch directly, so a non-zellij multiplexer is dispatched here
     // as well as from the no-subcommand path in main.
     if crate::mux::current() != crate::mux::MuxKind::Zellij {
-        return crate::mux::open_in_terminal(name, layout, working_dir, false, extra_env);
+        return crate::mux::open_in_terminal(name, layout, working_dir, false, extra_env, clear);
     }
 
     // A stale socket left by a crashed server can wedge the new server's
@@ -275,13 +276,15 @@ pub fn launch(
 
     // Interactive: needs full TTY (stdin/stdout/stderr inherited from parent),
     // which procpilot's Cmd doesn't support — use std::process::Command directly.
-    Command::new("zellij")
-        .args(["--new-session-with-layout", &layout.to_string_lossy(), "--session", name])
+    let mut cmd = Command::new("zellij");
+    cmd.args(["--new-session-with-layout", &layout.to_string_lossy(), "--session", name])
         .env("ZELLIJ_CONFIG_FILE", config.path())
         .envs(extra_env)
-        .current_dir(working_dir)
-        .status()
-        .context("failed to launch zellij session")?;
+        .current_dir(working_dir);
+    for key in clear {
+        cmd.env_remove(key);
+    }
+    cmd.status().context("failed to launch zellij session")?;
     Ok(())
 }
 

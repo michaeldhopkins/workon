@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::provision::{alembic, ef_core, laravel, phoenix, prisma, rails};
+use crate::provision::{alembic, ef_core, laravel, phoenix, prisma, rails_yml};
 
 /// Every parser workon runs over a file in the repo being opened, over another
 /// tool's stdout, or over a layout, with results returned so a target can check them.
@@ -16,7 +16,7 @@ pub struct Parsed {
 }
 
 pub fn parse_all(text: &str) -> Parsed {
-    let _ = rails::adapter(text);
+    let _ = rails_yml::first_adapter(text);
     let _ = prisma::datasource_provider(text);
     let _ = prisma::url_env_var(text);
     let _ = laravel::phpunit_db_connection(text);

@@ -368,6 +368,22 @@ fn create_warns_when_mise_shims_are_off_path() {
 }
 
 const RAILS: (&str, &str) = ("config/database.yml", "test:\n  adapter: postgresql\n");
+const RAILS_APP: (&str, &str) = ("config/application.rb", "module WorkonCli\nend\n");
+
+fn rails<'a>(extra: &'a [(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut files = vec![RAILS, RAILS_APP];
+    files.extend_from_slice(extra);
+    files
+}
+
+/// A `rails runner` that reports two suffixed databases and says it saw two server rows.
+const SUFFIXED_LISTING: &str = "\
+if [ \"$3\" = runner ]; then\n\
+ printf 'WORKON_DB\\tdevelopment\\tpostgresql\\tapp%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
+ printf 'WORKON_DB\\ttest\\tpostgresql\\tapp_test%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
+ printf 'WORKON_DB_SERVER\\t2\\n'\n\
+ exit 0\n\
+fi\n";
 
 /// Runs `workon create` with `args` in a project holding `files`, where `stubs` replace the
 /// default stand-ins; asserts exit 3 (not ready) and returns stdout and stderr.
@@ -395,7 +411,7 @@ fn last_lines(text: &str, n: usize) -> Vec<&str> {
 #[test]
 fn create_reports_a_failed_schema_load() {
     let failing = [("bundle", "echo 'bundler: cannot load' >&2; exit 1")];
-    let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &["--json"]);
+    let (_world, stdout, stderr) = create_not_ready(&rails(&[]), &failing, &["--json"]);
 
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["failed_steps"], serde_json::json!(["list rails databases"]), "{report}");
@@ -416,7 +432,7 @@ fn create_reports_a_failed_schema_load() {
 #[test]
 fn create_without_json_ends_with_the_same_lines() {
     let failing = [("bundle", "exit 1")];
-    let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &[]);
+    let (_world, stdout, stderr) = create_not_ready(&rails(&[]), &failing, &[]);
 
     let path = stdout.trim();
     assert!(Path::new(path).is_dir(), "{stdout}");
@@ -436,7 +452,7 @@ fn create_without_json_ends_with_the_same_lines() {
 #[test]
 fn create_reports_a_test_database_it_could_not_create() {
     let failing = [("bundle", "echo 'connection refused' >&2; exit 1")];
-    let (_world, stdout, stderr) = create_not_ready(&[RAILS], &failing, &["--json"]);
+    let (_world, stdout, stderr) = create_not_ready(&rails(&[]), &failing, &["--json"]);
 
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["failed_steps"], serde_json::json!(["list rails databases"]), "{report}");
@@ -450,7 +466,8 @@ fn create_reports_a_test_database_it_could_not_create() {
 #[test]
 fn create_checks_gems_before_loading_the_schema() {
     let world = World::new();
-    let proj = world.project(&[RAILS, ("Gemfile", "source \"https://rubygems.org\"\n")]);
+    let proj = world.project(&rails(&[("Gemfile", "source \"https://rubygems.org\"\n")]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
 
     let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -487,8 +504,8 @@ fn create_checks_gems_before_loading_the_schema() {
 #[test]
 fn create_installs_gems_when_the_check_fails() {
     let world = World::new();
-    let proj = world.project(&[RAILS, ("Gemfile", "source \"https://rubygems.org\"\n")]);
-    world.stubs.set("bundle", "if [ \"$1\" = check ]; then exit 1; fi\nexit 0");
+    let proj = world.project(&rails(&[("Gemfile", "source \"https://rubygems.org\"\n")]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}if [ \"$1\" = check ]; then exit 1; fi\nexit 0\n"));
 
     let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -512,7 +529,7 @@ fn create_reports_a_failed_bundle_install() {
          if [ \"$1\" = install ]; then echo 'bundler: not yet checked out' >&2; exit 1; fi\nexit 0",
     )];
     let (world, stdout, stderr) =
-        create_not_ready(&[RAILS, ("Gemfile", "source \"https://rubygems.org\"\n")], &failing, &["--json"]);
+        create_not_ready(&rails(&[("Gemfile", "source \"https://rubygems.org\"\n")]), &failing, &["--json"]);
 
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["failed_steps"], serde_json::json!(["bundle install"]), "{report}");
@@ -526,7 +543,8 @@ fn create_reports_a_failed_bundle_install() {
 #[test]
 fn create_without_a_gemfile_skips_the_gem_check() {
     let world = World::new();
-    let proj = world.project(&[RAILS]);
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
 
     world.workon(&proj).args(["create", "--json"]).assert().success();
 
@@ -542,11 +560,12 @@ fn create_without_a_gemfile_skips_the_gem_check() {
 #[test]
 fn create_does_not_prepare_when_a_database_name_lacks_the_suffix() {
     let world = World::new();
-    let proj = world.project(&[RAILS]);
+    let proj = world.project(&rails(&[]));
     world.stubs.set(
         "bundle",
         "if [ \"$3\" = runner ]; then\n\
          printf 'WORKON_DB\\tdevelopment\\tpostgresql\\tapp_development\\n'\n\
+         printf 'WORKON_DB_SERVER\\t1\\n'\n\
          exit 0\n\
          fi\n\
          echo 'prepare must not run' >&2\n\
@@ -566,16 +585,8 @@ fn create_does_not_prepare_when_a_database_name_lacks_the_suffix() {
 #[test]
 fn create_records_the_suffixed_names_rails_reports() {
     let world = World::new();
-    let proj = world.project(&[RAILS]);
-    world.stubs.set(
-        "bundle",
-        "if [ \"$3\" = runner ]; then\n\
-         printf 'WORKON_DB\\tdevelopment\\tpostgresql\\tapp%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
-         printf 'WORKON_DB\\ttest\\tpostgresql\\tapp_test%s\\n' \"$WORKON_RAILS_DB_SUFFIX\"\n\
-         exit 0\n\
-         fi\n\
-         exit 0\n",
-    );
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
 
     let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -594,28 +605,183 @@ fn create_records_the_suffixed_names_rails_reports() {
 #[test]
 fn create_sets_schema_format_sql_for_structure_sql_without_schema_rb() {
     let sql_only = World::new();
-    let proj_sql = sql_only.project(&[RAILS, ("db/structure.sql", "CREATE TABLE widgets (id bigint);\n")]);
+    let proj_sql = sql_only.project(&rails(&[("db/structure.sql", "CREATE TABLE widgets (id bigint);\n")]));
     sql_only.stubs.set(
         "bundle",
-        "case \"$3\" in\n\
-         db:schema:load) [ \"$SCHEMA_FORMAT\" = sql ] ;;\n\
-         *) [ -z \"$SCHEMA_FORMAT\" ] ;;\n\
-         esac",
+        &format!(
+            "{SUFFIXED_LISTING}\
+             case \"$3\" in\n\
+             db:schema:load) [ \"$SCHEMA_FORMAT\" = sql ] ;;\n\
+             *) [ -z \"$SCHEMA_FORMAT\" ] ;;\n\
+             esac"
+        ),
     );
     sql_only.workon(&proj_sql).args(["create", "--json"]).assert().success();
     let sql_args: Vec<Vec<String>> = sql_only.stubs.calls("bundle").iter().map(|call| call.args.clone()).collect();
     assert!(sql_args.iter().any(|args| args.get(2).is_some_and(|arg| arg == "db:schema:load")), "{sql_args:?}");
 
     let both = World::new();
-    let proj_both = both.project(&[
-        RAILS,
+    let proj_both = both.project(&rails(&[
         ("db/structure.sql", "CREATE TABLE widgets (id bigint);\n"),
         ("db/schema.rb", "ActiveRecord::Schema[7.1].define(version: 1) {}\n"),
-    ]);
-    both.stubs.set("bundle", "[ -z \"$SCHEMA_FORMAT\" ]");
+    ]));
+    both.stubs.set("bundle", &format!("{SUFFIXED_LISTING}[ -z \"$SCHEMA_FORMAT\" ]\n"));
     both.workon(&proj_both).args(["create", "--json"]).assert().success();
     let both_args: Vec<Vec<String>> = both.stubs.calls("bundle").iter().map(|call| call.args.clone()).collect();
     assert!(both_args.iter().all(|args| args.get(2).is_none_or(|arg| arg != "db:schema:load")), "{both_args:?}");
+}
+
+/// An empty successful listing is not proof. Prepare does not run, and the
+/// primary checkout's databases are not recorded.
+#[test]
+fn create_does_not_prepare_when_the_listing_is_empty() {
+    let world = World::new();
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", "exit 0\n");
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("rails reported no development or test database"), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["list rails databases"]), "{report}");
+    assert_eq!(report["dbs"], serde_json::json!([]), "{report}");
+    let calls = world.stubs.calls("bundle");
+    assert!(calls.iter().all(|call| call.args.get(2).is_none_or(|arg| arg != "db:prepare")), "{calls:?}");
+}
+
+/// `config/database.yml` without a Rails app is left alone.
+#[test]
+fn create_ignores_a_database_yml_that_is_not_rails() {
+    let world = World::new();
+    let proj = world.project(&[RAILS]);
+    world.stubs.set("bundle", "echo 'bundle must not run' >&2; exit 1\n");
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let calls = world.stubs.calls("bundle");
+    assert!(calls.is_empty(), "{calls:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ws = Path::new(report["path"].as_str().unwrap());
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ws.join(".workon.json")).unwrap()).unwrap();
+    assert!(meta["session_env"].as_object().unwrap().is_empty(), "{meta}");
+}
+
+/// Create keeps the caller's `RUBYOPT` and mise's, and `rails` does not see a
+/// database URL. `bundle check` still does: only the rails commands strip it.
+#[test]
+fn create_merges_rubyopt_and_strips_database_urls_from_rails() {
+    let world = World::new();
+    let proj = world.project(&rails(&[("Gemfile", "source \"https://rubygems.org\"\n")]));
+    world
+        .stubs
+        .set("mise", "if [ \"$1\" = env ]; then printf '%s\\n' '{\"RUBYOPT\":\"--yjit\"}'; exit 0; fi\nexit 0\n");
+    world.stubs.set(
+        "bundle",
+        &format!(
+            "{SUFFIXED_LISTING}\
+             if [ \"$1\" = check ]; then printf '%s' \"$DATABASE_URL\" > \"$HOME/check-url\"; exit 0; fi\n\
+             if [ \"$1\" = exec ]; then\n\
+               printf '%s' \"$DATABASE_URL\" > \"$HOME/exec-url\"\n\
+               printf '%s' \"$QUEUE_DATABASE_URL\" > \"$HOME/exec-queue\"\n\
+               printf '%s' \"$RUBYOPT\" > \"$HOME/exec-rubyopt\"\n\
+             fi\n\
+             exit 0\n"
+        ),
+    );
+
+    let out = world
+        .workon(&proj)
+        .env("RUBYOPT", "-W0")
+        .env("DATABASE_URL", "postgres://localhost/primary")
+        .env("QUEUE_DATABASE_URL", "postgres://localhost/queue")
+        .args(["create", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let home = world.home();
+    assert_eq!(std::fs::read_to_string(home.join("check-url")).unwrap(), "postgres://localhost/primary");
+    assert_eq!(std::fs::read_to_string(home.join("exec-url")).unwrap(), "");
+    assert_eq!(std::fs::read_to_string(home.join("exec-queue")).unwrap(), "");
+    let rubyopt = std::fs::read_to_string(home.join("exec-rubyopt")).unwrap();
+    assert!(rubyopt.split_whitespace().any(|token| token == "-W0"), "{rubyopt}");
+    assert!(rubyopt.split_whitespace().any(|token| token == "--yjit"), "{rubyopt}");
+    assert!(
+        rubyopt.split_whitespace().any(|token| token.starts_with("-r") && token.ends_with("rails_db_suffix.rb")),
+        "{rubyopt}"
+    );
+
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ws = Path::new(report["path"].as_str().unwrap());
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ws.join(".workon.json")).unwrap()).unwrap();
+    let stored = meta["session_env"]["RUBYOPT"].as_str().unwrap();
+    assert!(stored.split_whitespace().any(|token| token == "-W0"), "{stored}");
+    assert!(stored.split_whitespace().any(|token| token == "--yjit"), "{stored}");
+}
+
+/// A parent Rails workspace's hook does not ride into a plain session, or into
+/// `workon run`. The caller's other `RUBYOPT` flags stay.
+#[test]
+fn a_plain_session_drops_a_leaked_rails_hook() {
+    let world = World::new();
+    let proj = world.project(&[]);
+    world.stubs.set(
+        "zellij",
+        "case \"$1\" in\n\
+         --version) echo 'zellij 0.43.1' ;;\n\
+         list-sessions) echo 'No active zellij sessions found.' >&2; exit 1 ;;\n\
+         --new-session-with-layout)\n\
+           printf '%s' \"$RUBYOPT\" > \"$HOME/seen-rubyopt\"\n\
+           printf '%s' \"$WORKON_RAILS_DB_SUFFIX\" > \"$HOME/seen-suffix\"\n\
+           ;;\n\
+         esac\n",
+    );
+
+    world
+        .workon(&proj)
+        .env("RUBYOPT", "-W0 -r/leak/rails_db_suffix.rb")
+        .env("WORKON_RAILS_DB_SUFFIX", "_ws_leak")
+        .assert()
+        .success();
+
+    let home = world.home();
+    assert_eq!(std::fs::read_to_string(home.join("seen-rubyopt")).unwrap(), "-W0");
+    assert_eq!(std::fs::read_to_string(home.join("seen-suffix")).unwrap(), "");
+}
+
+/// `workon run` is the same kind of session: the leaked hook is removed there too.
+#[test]
+fn a_background_session_drops_a_leaked_rails_hook() {
+    let world = World::new();
+    let proj = world.project(&[]);
+    world.stubs.set(
+        "zellij",
+        "case \"$1\" in\n\
+         --version) echo 'zellij 0.43.1' ;;\n\
+         list-sessions) echo 'No active zellij sessions found.' >&2; exit 1 ;;\n\
+         attach)\n\
+           if [ \"$2\" = --create-background ]; then\n\
+             printf '%s' \"$RUBYOPT\" > \"$HOME/seen-rubyopt\"\n\
+             printf '%s' \"$WORKON_RAILS_DB_SUFFIX\" > \"$HOME/seen-suffix\"\n\
+           fi\n\
+           ;;\n\
+         esac\n",
+    );
+
+    world
+        .workon(&proj)
+        .args(["run"])
+        .env("RUBYOPT", "-r/leak/rails_db_suffix.rb")
+        .env("WORKON_RAILS_DB_SUFFIX", "_ws_leak")
+        .assert()
+        .success();
+
+    let home = world.home();
+    assert_eq!(std::fs::read_to_string(home.join("seen-rubyopt")).unwrap(), "");
+    assert_eq!(std::fs::read_to_string(home.join("seen-suffix")).unwrap(), "");
 }
 
 /// Every provisioner with a setup step carries its failure through to `failed_steps`.

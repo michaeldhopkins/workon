@@ -1,6 +1,10 @@
 # Literals the parsers in src/provision/*.rs, src/deps.rs, src/vcs/jj.rs and
 # src/layout.rs branch on.
 "adapter:"
+"postgis"
+"mysql2"
+"trilogy"
+"<%"
 "provider"
 "datasource"
 "env(\""

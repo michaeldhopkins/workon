@@ -40,6 +40,9 @@ impl super::Multiplexer for Zmx {
         let args = run_args(open.name, &leaf);
         let mut cmd = self.cmd();
         cmd = cmd.args(args).envs(open.extra_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        for key in open.clear {
+            cmd = cmd.env_remove(key);
+        }
         run(cmd)?;
         Ok(())
     }

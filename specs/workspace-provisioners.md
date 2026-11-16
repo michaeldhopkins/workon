@@ -130,9 +130,13 @@ but *how* differs by framework, and using the wrong channel breaks things:
 
 - **Session env, database-name suffix** (Rails): export `WORKON_RAILS_DB_SUFFIX`
   and `RUBYOPT=-r <workon data dir>/rails_db_suffix.rb`. The script is embedded
-  in the binary and written to workon's data directory on first use, never into
-  the workspace. It suffixes the development and test database names from
-  `config/database.yml` and leaves replicas alone. `DATABASE_URL` is not set:
+  in the binary and written to workon's data directory, outside every repository,
+  when the workspace is created, on attach and `exec`, and when any session starts
+  in that workspace. A session started in another directory drops a hook or suffix
+  a Rails workspace leaked into the parent shell. It suffixes
+  development and test names, including a local replica. A remote replica and a
+  non-replica database with `database_tasks: false` stay unsuffixed.
+  `DATABASE_URL` is not set:
   a session-wide URL replaces one environment and stops `db:prepare` from
   preparing the other. The primary checkout keeps the names in the file.
 - **Session env, test-only var** (Phoenix): `MIX_TEST_PARTITION` only affects
@@ -163,7 +167,7 @@ table are load-bearing — they came out of the research and are the "fluency."
 
 | Ecosystem | Detect | Mode | Isolation hook | Prepare | Teardown |
 |---|---|---|---|---|---|
-| **Rails** | `config/database.yml` (+ `bin/rails`) | workon-managed | `WORKON_RAILS_DB_SUFFIX` + `RUBYOPT=-r` the data-dir script | `bundle check \|\| bundle install` if a Gemfile (git-sourced gems live in a per-checkout bundler path), then a `rails runner` that must report only suffixed names, then `RAILS_ENV=development rails db:prepare` (and `SCHEMA_FORMAT=sql rails db:schema:load` when the app has only `db/structure.sql`) | `dropdb` on the suffixed names Rails reports |
+| **Rails** | `config/database.yml` and `bin/rails`, `config/application.rb`, or `gem "rails"` | workon-managed | `WORKON_RAILS_DB_SUFFIX` + `RUBYOPT=-r` the data-dir script | `bundle check \|\| bundle install` if a Gemfile (git-sourced gems live in a per-checkout bundler path), then a `rails runner` that must report only suffixed names, then `RAILS_ENV=development rails db:prepare` (and `SCHEMA_FORMAT=sql rails db:schema:load` when the app has only `db/structure.sql`) | `dropdb` on the suffixed names Rails reports |
 | **Django** | `manage.py` | framework-managed | `DATABASE_URL` **iff** settings use `dj_database_url`; else none | none (runner builds `test_<NAME>`) | none |
 | **Alembic** | `alembic.ini`/`[tool.alembic]` + `versions/` | workon-managed *if* Postgres | `DATABASE_URL` **iff** `env.py` reads it | `createdb`, `alembic upgrade head` | `dropdb <name>` |
 | **Phoenix/Ecto** | `mix.exs` dep on `:ecto_sql` | workon-managed | `MIX_TEST_PARTITION` (built-in) | `MIX_ENV=test mix ecto.create && ecto.migrate` | `dropdb <app>_test<part>` |
@@ -175,12 +179,14 @@ table are load-bearing — they came out of the research and are the "fluency."
 Rails **`db:test:prepare` does not create the DB** (it purges + loads schema).
 `db:prepare` with `RAILS_ENV=development` and no `DATABASE_URL` creates and
 loads development and test. The suffix hook rewrites a `url:` entry's path and
-a `database:` name. A replica, and a database with `database_tasks: false`,
-are left unsuffixed and are not created. Names are read before prepare: a name
-without the suffix aborts prepare, so a hook that did not load cannot migrate
-the primary checkout's database. A name longer than Postgres allows keeps its
-tail, which is the part that distinguishes development from test. SQLite is
-left alone. `config/master.key` is gitignored → copied → normally fine.
+a `database:` name. A remote replica, and a non-replica database with
+`database_tasks: false`, stay unsuffixed and are not created. A local replica is
+suffixed so a read does not use the primary checkout's database. Names are read
+before prepare: a name without the suffix aborts prepare, so a hook that did not
+load cannot migrate the primary checkout's database. A name that does not fit
+keeps a hash tag and the suffix when the suffix fits. MySQL's limit is 64 bytes
+and Postgres's is 63. SQLite is left alone. `config/master.key` is gitignored →
+copied → normally fine.
 
 Django's default `manage.py test` runner creates and drops `test_<NAME>` itself,
 so workon pre-creates nothing; isolation is only handing each workspace a
@@ -308,7 +314,9 @@ job, not the sum:
 
 Elixir/PHP/.NET run **detection** in the main job and their full cycle only where
 the toolchain exists (gated skip); add a job per stack later. Each gated skip is
-`log()`ged so a green run never overstates coverage.
+`log()`ged so a green run never overstates coverage. The Rails cycle on the
+`provisioners` job fails when Postgres or the fixture bundle is missing. Anywhere
+else it prints the skip and returns.
 
 **Isolation & safety:** every E2E test uses a temp `$HOME` + temp worktrees root;
 DB names carry the random `ws_id`; teardown drops them and a test-scope guard

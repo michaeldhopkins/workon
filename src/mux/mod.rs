@@ -29,6 +29,9 @@ pub struct Open<'a> {
     pub layout_path: &'a Path,
     pub layout: &'a str,
     pub extra_env: &'a HashMap<String, String>,
+    /// Names to drop from the inherited environment. tmux can only set a pane
+    /// variable, so an entry here becomes `-e KEY=` (empty).
+    pub clear: &'a [String],
 }
 
 /// Create, drive, and close one session. Interactive attach inherits the terminal.
@@ -86,6 +89,7 @@ pub fn open_in_terminal(
     dir: &Path,
     force_new: bool,
     extra_env: &HashMap<String, String>,
+    clear: &[String],
 ) -> Result<()> {
     let layout = std::fs::read_to_string(layout_path)?;
     let mux = backend();
@@ -93,7 +97,7 @@ pub fn open_in_terminal(
         mux.kill(name)?;
     }
     if !mux.exists(name)? {
-        mux.ensure(&Open { name, dir, layout_path, layout: &layout, extra_env })?;
+        mux.ensure(&Open { name, dir, layout_path, layout: &layout, extra_env, clear })?;
     }
     mux.attach(name, dir)
 }
@@ -104,12 +108,13 @@ pub fn run_background(
     dir: &Path,
     layout_path: &Path,
     extra_env: &HashMap<String, String>,
+    clear: &[String],
     command: Option<&str>,
 ) -> Result<()> {
     let layout = std::fs::read_to_string(layout_path)?;
     let mux = backend();
     if !mux.exists(name)? {
-        mux.ensure(&Open { name, dir, layout_path, layout: &layout, extra_env })?;
+        mux.ensure(&Open { name, dir, layout_path, layout: &layout, extra_env, clear })?;
     }
     if let Some(command) = command {
         send_soon(mux.as_ref(), name, command)?;

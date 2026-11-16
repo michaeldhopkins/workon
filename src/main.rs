@@ -68,8 +68,8 @@ fn run_in_background(name: Option<String>, config: Option<String>, command: Opti
     mux::require(&cfg.layout)?;
     let session = cli::given_name(name.as_deref()).unwrap_or(&project.name);
     let resolved = cfg.resolve()?;
-    let empty = std::collections::HashMap::new();
-    mux::run_background(session, &project.dir, resolved.path(), &empty, command.as_deref())?;
+    let ready = workon::rails_launch::for_launch(&project.dir)?;
+    mux::run_background(session, &project.dir, resolved.path(), &ready.env, &ready.clear, command.as_deref())?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -134,8 +134,15 @@ fn run_session(session: cli::SessionArgs) -> Result<ExitCode> {
     }
     let layout = cfg.resolve()?;
     if mux::current() != mux::MuxKind::Zellij {
-        let empty = std::collections::HashMap::new();
-        mux::open_in_terminal(name.unwrap_or(&project.name), layout.path(), &project.dir, session.new_session, &empty)?;
+        let ready = workon::rails_launch::for_launch(&project.dir)?;
+        mux::open_in_terminal(
+            name.unwrap_or(&project.name),
+            layout.path(),
+            &project.dir,
+            session.new_session,
+            &ready.env,
+            &ready.clear,
+        )?;
         return Ok(ExitCode::SUCCESS);
     }
     session::run(

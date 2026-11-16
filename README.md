@@ -68,7 +68,7 @@ The primary session (plain `workon`) is unaffected — it works directly in the 
 ### Limitations
 
 - Rails development and test databases belong to the workspace. The primary checkout keeps the database names in `config/database.yml`. A migration in the workspace applies to that workspace's databases.
-- `parallel_rspec` uses shared test databases. Use `bundle exec rspec` in the workspace for isolated specs.
+- `parallel_rspec` in the workspace uses that workspace's suffixed test database. When `database.yml` appends `TEST_ENV_NUMBER`, the worker number is part of the name the suffix is added to.
 
 ## Headless workspaces
 

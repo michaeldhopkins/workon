@@ -152,7 +152,10 @@ fn attach_hands_an_existing_workspace_to_zellij_and_keeps_it() {
 /// Issue #2: a Rails app whose database listing fails, so `-w` stops to ask before zellij.
 fn world_whose_schema_load_fails() -> (World, std::path::PathBuf) {
     let world = World::new();
-    let proj = world.project(&[("config/database.yml", "test:\n  adapter: postgresql\n")]);
+    let proj = world.project(&[
+        ("config/database.yml", "test:\n  adapter: postgresql\n"),
+        ("config/application.rb", "module WorkonCli\nend\n"),
+    ]);
     world.stubs.set("bundle", "echo 'bundler: cannot load' >&2; exit 1");
     (world, proj)
 }

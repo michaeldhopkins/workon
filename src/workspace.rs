@@ -77,7 +77,7 @@ struct Workspace {
 /// `null` when absent) so the file is self-describing; missing fields on read
 /// (an older or partial file) decode to `None`.
 #[derive(Serialize, Deserialize, Default)]
-struct WorkspaceMeta {
+pub(crate) struct WorkspaceMeta {
     #[serde(default)]
     base: Option<String>,
     #[serde(default)]
@@ -91,7 +91,7 @@ struct WorkspaceMeta {
     /// Vars a provisioner asked to inject into the workspace session (not a
     /// file); merged with mise env on attach. See `provision::Setup::session_env`.
     #[serde(default)]
-    session_env: HashMap<String, String>,
+    pub(crate) session_env: HashMap<String, String>,
     /// Legacy single-DB field, read for back-compat and mapped to a
     /// `PostgresDb` resource on load; new files write `resources` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,7 +112,7 @@ fn write_meta(ws_dir: &Path, meta: &WorkspaceMeta) -> Result<()> {
 /// Read `.workon.json` back. A missing file (older workspace, or none written)
 /// or a malformed one decodes to all-`None` — teardown then skips save
 /// detection rather than acting on bad provenance.
-fn read_meta(ws_dir: &Path) -> WorkspaceMeta {
+pub(crate) fn read_meta(ws_dir: &Path) -> WorkspaceMeta {
     let path = ws_dir.join(WORKON_JSON);
     let Ok(content) = std::fs::read_to_string(&path) else {
         return WorkspaceMeta::default();
@@ -295,17 +295,16 @@ fn provision_in(
 /// the caller can surface the resume hint. Recomputes mise env from the worktree
 /// so it works the same in a fresh process.
 fn attach(ws: &Workspace, cfg: &Config, resume: Option<&str>) -> Result<Option<String>> {
-    // mise env + any provisioner session env (Phoenix's MIX_TEST_PARTITION, …),
-    // read fresh from `.workon.json` so a headless `attach` in a new process
-    // behaves identically, so the user's own test runs hit the isolated DB.
-    let mise_vars = session_launch_env(&ws.ws_dir);
+    // mise env plus `.workon.json`. A Rails workspace refreshes its hook; any
+    // other workspace drops a hook the parent shell leaked in.
+    let launch = crate::rails_launch::prepared(&ws.ws_dir)?;
     let tab_name = match ws.name.as_deref() {
         Some(l) => capitalize(l),
         None => format!("{}-{}", ws.project_name, ws.ws_id),
     };
 
     let (ws_layout, session_id) = session_layout(cfg, &ws.ws_dir, resume)?;
-    session::launch(&tab_name, ws_layout.path(), &ws.ws_dir, &mise_vars)?;
+    session::launch(&tab_name, ws_layout.path(), &ws.ws_dir, &launch.env, &launch.clear)?;
 
     Ok(session_id)
 }
@@ -869,16 +868,6 @@ fn do_copy_files(project_dir: &Path, ws_dir: &Path, files: &[String], cancelled:
     }
 }
 
-/// The environment handed to the workspace session: mise env plus any provisioner
-/// session env recorded in `.workon.json`. Session env wins on conflict — it
-/// carries the workspace's test-DB isolation identity (Phoenix's
-/// `MIX_TEST_PARTITION`), which must not be shadowed by an inherited mise value.
-pub(crate) fn session_launch_env(ws_dir: &Path) -> HashMap<String, String> {
-    let mut vars = crate::mise_env::mise_env("mise", ws_dir);
-    vars.extend(read_meta(ws_dir).session_env);
-    vars
-}
-
 fn trust_mise_configs(ws_dir: &Path) -> Result<()> {
     if !binary_available("mise") {
         return Ok(());
@@ -1069,7 +1058,7 @@ mod tests {
             },
         )
         .unwrap();
-        let env = session_launch_env(tmp.path());
+        let env = crate::rails_launch::prepared(tmp.path()).unwrap().env;
         assert_eq!(env.get("MIX_TEST_PARTITION").map(String::as_str), Some("_ws_abc"));
     }
 
