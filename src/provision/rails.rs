@@ -5,8 +5,9 @@
 //! workon's data directory. The script suffixes development and test names,
 //! including local replicas, and holds no per-workspace data. `DATABASE_URL`
 //! is not exported. A server URL already in the environment is part of the
-//! listing. `db:prepare` for the file omits those variables, and when a server
-//! URL is set it also runs with that URL. Prepare runs only after `rails runner`
+//! listing. A server URL in a dotenv file Rails loads is part of that decision
+//! too. `db:prepare` for the file omits parent and mise variables, and when a
+//! server URL is set it also runs with that URL. Prepare runs only after `rails runner`
 //! reports that every owned server database ends with the suffix. No file is
 //! written into the workspace.
 
@@ -16,6 +17,7 @@ use std::path::Path;
 use anyhow::Result;
 use vcs_runner::Cmd;
 
+use super::rails_dotenv::{self, DotenvFault};
 use super::rails_suffix::{self, Listing, LIST_DATABASES, SUFFIX_VAR};
 use super::rails_yml;
 use super::{run_step, ProvisionCtx, Provisioner, Resource, Setup};
@@ -33,7 +35,11 @@ impl Provisioner for Rails {
 
     fn setup(&self, ctx: &ProvisionCtx<'_>) -> Result<Setup> {
         let yml = std::fs::read_to_string(ctx.ws_dir.join("config/database.yml")).unwrap_or_default();
-        let urls = session_database_urls(ctx.mise_vars);
+        let mut urls = session_database_urls(ctx.mise_vars);
+        match rails_dotenv::database_urls(ctx.ws_dir, &dotenv_env(ctx.mise_vars)) {
+            Ok(from_files) => urls.extend(from_files),
+            Err(fault) => return Ok(unproven_dotenv(ctx, &fault)),
+        }
         if !rails_yml::needs_isolation(&yml, urls.iter().map(|(_, value)| value.as_str())) {
             return Ok(Setup::default());
         }
@@ -125,6 +131,12 @@ fn prove_isolated(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, yml: &str
     };
     let mut resources = match decide(&kept, suffix) {
         Decide::Isolated(resources) => resources,
+        // A development listing does not load `.env.test`. A server URL that
+        // lives only there still has to keep the hook. Preparing would run
+        // before that URL is proven, so record nothing and create nothing.
+        Decide::NoServer if has_server_url(urls) => {
+            return Listed::Ready(Proven { resources: Vec::new(), modes: Vec::new() });
+        }
         Decide::NoServer => return Listed::NoServer,
         Decide::Failed(reason) => return Listed::Failed(reason),
     };
@@ -223,6 +235,38 @@ fn session_database_urls(mise: &HashMap<String, String>) -> Vec<(String, String)
     urls
 }
 
+/// The environment dotenv-rails sees: the process, with mise overlaid. A key
+/// already set here wins over every dotenv file.
+fn dotenv_env(mise: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut env: HashMap<String, String> = std::env::vars().collect();
+    for (key, value) in mise {
+        env.insert(key.clone(), value.clone());
+    }
+    env
+}
+
+/// The dotenv file could not be read or parsed. Install the hook and stop
+/// before prepare: an unreadable file is not proof that Rails stays on sqlite.
+fn unproven_dotenv(ctx: &ProvisionCtx<'_>, fault: &DotenvFault) -> Setup {
+    eprintln!(
+        "Warning: Rails dotenv file {} could not be read or parsed, so isolation is not proven ({})",
+        fault.path.display(),
+        fault.reason()
+    );
+    let suffix = rails_suffix::db_suffix(ctx.ws_id);
+    match hook_rubyopt(ctx, &suffix) {
+        Hook::Ready(rubyopt) => Setup {
+            session_env: vec![(SUFFIX_VAR.to_string(), suffix), ("RUBYOPT".to_string(), rubyopt)],
+            failed_steps: vec!["read rails dotenv".to_string()],
+            ..Setup::default()
+        },
+        Hook::Missing(mut setup) => {
+            setup.failed_steps.insert(0, "read rails dotenv".to_string());
+            setup
+        }
+    }
+}
+
 /// The hook is not loaded. Record the suffix anyway so a later attach or exec
 /// refreshes the script and refuses to start if it still cannot.
 fn uninstalled(suffix: String) -> Setup {
@@ -279,7 +323,7 @@ fn rails_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, strip_urls: bo
 }
 
 fn database_url_var(key: &str) -> bool {
-    key == "DATABASE_URL" || key.ends_with("_DATABASE_URL")
+    rails_yml::is_database_url_key(key)
 }
 
 /// `bundle check || bundle install` in the workspace when it has a Gemfile. Git-sourced
@@ -579,6 +623,118 @@ mod tests {
         assert_eq!(setup.session_env[0], (SUFFIX_VAR.to_string(), "_ws_mise".to_string()));
         assert_eq!(setup.session_env[1].0, "RUBYOPT");
         assert!(setup.session_env.iter().all(|(key, _)| key != "DATABASE_URL"));
+    }
+
+    /// A Rails 8 sqlite file whose server URL lives only in the dotenv files
+    /// dotenv-rails loads. The parent and mise have neither variable. Without
+    /// the hook, Rails opens the primary checkout's database.
+    #[test]
+    fn a_sqlite_file_plus_a_dotenv_server_url_installs_the_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "\
+default: &default
+  adapter: sqlite3
+  pool: <%= ENV.fetch(\"RAILS_MAX_THREADS\") { 5 } %>
+  timeout: 5000
+development:
+  <<: *default
+  database: storage/development.sqlite3
+test:
+  <<: *default
+  database: storage/test.sqlite3
+",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".env.development"), "DATABASE_URL=postgres://localhost/app_development\n")
+            .unwrap();
+        std::fs::write(tmp.path().join(".env"), "DATABASE_URL=postgres://localhost/app_development\n").unwrap();
+        std::fs::write(tmp.path().join(".env.test"), "DATABASE_URL=postgres://localhost/app_test\n").unwrap();
+        let mise = HashMap::new();
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-dotenv", &mise)).unwrap());
+
+        assert!(setup.env.is_empty(), "{:?}", setup.env);
+        assert!(setup.resources.is_empty(), "{:?}", setup.resources);
+        assert_eq!(
+            setup.failed_steps,
+            ["list rails databases"],
+            "failed_steps={:?} session_env={:?} resources={:?}",
+            setup.failed_steps,
+            setup.session_env,
+            setup.resources
+        );
+        assert_eq!(setup.session_env[0], (SUFFIX_VAR.to_string(), "_ws_dotenv".to_string()));
+        assert_eq!(setup.session_env[1].0, "RUBYOPT");
+        assert!(data.join(rails_suffix::SCRIPT_NAME).is_file());
+        assert!(!tmp.path().join(rails_suffix::SCRIPT_NAME).exists());
+        assert!(setup.session_env.iter().all(|(key, _)| key != "DATABASE_URL"));
+    }
+
+    /// `db:test:purge` boots the test env, which loads `.env.test` and not the
+    /// development files. That URL alone still has to install the hook.
+    #[test]
+    fn a_server_url_only_in_env_test_installs_the_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".env.test"), "DATABASE_URL=postgres://localhost/app_test\n").unwrap();
+        let mise = HashMap::new();
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-testenv", &mise)).unwrap());
+        assert_eq!(setup.failed_steps, ["list rails databases"], "{:?}", setup.session_env);
+        assert_eq!(setup.session_env[0].0, SUFFIX_VAR);
+    }
+
+    /// A line that does not parse is not "no URL". Setup warns and stops
+    /// before prepare, with the hook recorded so a later session still suffixes.
+    #[test]
+    fn an_unparsed_dotenv_file_does_not_finish_setup_as_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".env"), "NOT A VALID LINE\n").unwrap();
+        let mise = HashMap::new();
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-bad", &mise)).unwrap());
+        assert_eq!(setup.failed_steps, ["read rails dotenv"], "{:?}", setup.failed_steps);
+        assert_eq!(setup.session_env[0], (SUFFIX_VAR.to_string(), "_ws_bad".to_string()));
+        assert_eq!(setup.session_env[1].0, "RUBYOPT");
+        assert!(setup.resources.is_empty(), "{:?}", setup.resources);
+        assert!(data.join(rails_suffix::SCRIPT_NAME).is_file());
+    }
+
+    /// The URL dotenv will not apply is not a server database. A sqlite file
+    /// whose winning URL is sqlite stays a sqlite file.
+    #[test]
+    fn a_sqlite_dotenv_url_and_a_losing_server_url_are_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\ntest:\n  adapter: sqlite3\n  database: storage/test.sqlite3\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".env.development.local"), "DATABASE_URL=sqlite3:storage/development.sqlite3\n")
+            .unwrap();
+        std::fs::write(tmp.path().join(".env.test"), "DATABASE_URL=sqlite3:storage/test.sqlite3\n").unwrap();
+        std::fs::write(tmp.path().join(".env"), "DATABASE_URL=postgres://localhost/app_development\n").unwrap();
+        let mise = HashMap::from([("DATABASE_URL".to_string(), "sqlite3:storage/from_mise.sqlite3".to_string())]);
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-sqlite", &mise)).unwrap());
+        assert!(setup.failed_steps.is_empty(), "{:?}", setup.failed_steps);
+        assert!(setup.session_env.is_empty(), "{:?}", setup.session_env);
+        assert!(!data.join(rails_suffix::SCRIPT_NAME).exists());
     }
 
     /// A server adapter that the old first-line scan would skip still has to be

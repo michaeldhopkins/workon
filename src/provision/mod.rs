@@ -19,6 +19,7 @@ pub(crate) mod phoenix;
 pub(crate) mod prisma;
 mod python_venv;
 pub(crate) mod rails;
+pub(crate) mod rails_dotenv;
 pub(crate) mod rails_suffix;
 pub(crate) mod rails_yml;
 

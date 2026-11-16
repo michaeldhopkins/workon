@@ -141,11 +141,17 @@ but *how* differs by framework, and using the wrong channel breaks things:
   non-replica database with `database_tasks: false` stay unsuffixed.
   `DATABASE_URL` is not set:
   a session-wide URL replaces one environment and stops `db:prepare` from
-  preparing the other. When the parent or mise supplies a server `DATABASE_URL`
-  or `*_DATABASE_URL`, the listing sees it and `db:prepare` also runs with that
-  URL. The file's own `db:prepare` still omits those variables so the test
-  database is prepared. A sqlite `database.yml` with no server URL is left
-  alone. The primary checkout keeps the names in the file.
+  preparing the other. When the parent, mise, or a dotenv file supplies a
+  server `DATABASE_URL` or `*_DATABASE_URL`, the listing sees it and
+  `db:prepare` also runs with that URL. The dotenv files are the ones
+  dotenv-rails loads for development and for test (`.env.<env>.local`,
+  `.env.local` except in test, `.env.<env>`, `.env`). The first file wins, and
+  a variable already set by the parent or mise is left as it is. A file that
+  cannot be read or parsed is a failed step, not proof that there is no server
+  URL. The file's own `db:prepare` still omits parent and mise variables so the
+  test database is prepared. A sqlite `database.yml` with no server URL in the
+  parent, mise, or those files is left alone. The primary checkout keeps the
+  names in the file.
 - **Session env, test-only var** (Phoenix): `MIX_TEST_PARTITION` only affects
   `MIX_ENV=test`, so it's safe to put in the workspace session env; a dotenv file
   wouldn't reach `mix`. `session::launch`/`attach` merge the persisted env map

@@ -40,6 +40,12 @@ pub(crate) fn needs_isolation<'a>(database_yml: &str, database_urls: impl IntoIt
     needs_server_database(database_yml) || database_urls.into_iter().any(server_database_url)
 }
 
+/// `DATABASE_URL` or `<NAME>_DATABASE_URL`, the variables Active Record uses
+/// in place of a configuration from the file.
+pub(crate) fn is_database_url_key(key: &str) -> bool {
+    key == "DATABASE_URL" || key.ends_with("_DATABASE_URL")
+}
+
 /// A non-empty database URL whose scheme is not sqlite. A value that cannot
 /// be classified is not proof that the app stays on a sqlite file.
 pub(crate) fn server_database_url(url: &str) -> bool {
