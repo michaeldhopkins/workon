@@ -118,6 +118,8 @@ jobs:
       MYSQL_TCP_PORT: "3306"
       MYSQL_USER: root
       MYSQL_PWD: root
+      WORKON_REQUIRE_DB_CYCLES: "1"
+      JJ_VERSION: v0.45.1
     steps:
       - uses: actions/checkout@v7
       - name: Rust toolchain (rust-toolchain.toml)
@@ -169,6 +171,16 @@ jobs:
       - name: set up the Phoenix fixture's deps (so the cycle test runs)
         working-directory: tests/fixtures/phoenix
         run: mix local.hex --force && mix deps.get && mix compile
+      - name: Install jj (the Rails cycle needs it)
+        run: |
+          set -euo pipefail
+          url="https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" | tar xz -C "$tmp"
+          mkdir -p "$HOME/.local/bin"
+          install -m755 "$tmp/jj" "$HOME/.local/bin/jj"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/jj" --version
       - name: Install multiplexers
         run: sh scripts/install-multiplexers.sh
       - name: cargo test (DB-gated cycles run here)

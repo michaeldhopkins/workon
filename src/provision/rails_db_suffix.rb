@@ -11,6 +11,8 @@
 # and that string is not a replica.
 
 module WorkonRailsDbSuffix
+  # Prepended to Object, never Kernel: Zeitwerk aliases Kernel#require after
+  # this loads, and an alias of a prepended method loses its `super`.
   # `require` only. Wrapping `require_relative` resolves the path against
   # this file, so Active Record cannot load the sibling it asked for.
   module RequireHook
@@ -257,6 +259,6 @@ end
 
 unless WorkonRailsDbSuffix.instance_variable_get(:@armed)
   WorkonRailsDbSuffix.instance_variable_set(:@armed, true)
-  Kernel.prepend(WorkonRailsDbSuffix::RequireHook)
+  Object.prepend(WorkonRailsDbSuffix::RequireHook)
   WorkonRailsDbSuffix.install_if_ready
 end

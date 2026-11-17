@@ -828,10 +828,15 @@ test:
         Command::new("psql").args(["-tAc", "SELECT 1"]).output().is_ok_and(|out| out.status.success())
     }
 
-    /// A missing Postgres or fixture bundle fails the test. Skipping would
-    /// report the cycle green when it never touched a database.
-    fn require_ready(ready: bool, what: &str) {
-        assert!(ready, "{what} is required for the Rails cycle");
+    /// With `WORKON_REQUIRE_DB_CYCLES` set (ci.yml's provisioners job), a
+    /// missing Postgres, jj or fixture bundle fails the test: skipping would
+    /// report the cycle green when it never touched a database. Elsewhere the
+    /// cycle skips, as the other provisioners' cycles do.
+    fn require_ready(ready: bool, what: &str) -> bool {
+        if !ready && std::env::var_os("WORKON_REQUIRE_DB_CYCLES").is_some() {
+            panic!("{what} is required for the Rails cycle");
+        }
+        ready
     }
 
     fn widgets(name: &str) -> String {
@@ -845,8 +850,12 @@ test:
     #[test]
     fn rails_cycle_loads_schema_into_isolated_databases() {
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        require_ready(postgres_up(), "Postgres");
-        require_ready(bundle_ready(fixture), "the Rails fixture bundle");
+        if !require_ready(postgres_up(), "Postgres") {
+            return;
+        }
+        if !require_ready(bundle_ready(fixture), "the Rails fixture bundle") {
+            return;
+        }
         let suffix = rails_suffix::db_suffix("ws-cycle");
         let names = [format!("workon_rails_fixture_development{suffix}"), format!("workon_rails_fixture_test{suffix}")];
         for name in &names {
@@ -884,8 +893,12 @@ test:
     #[test]
     fn rails_cycle_loads_structure_sql_when_schema_rb_is_absent() {
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        require_ready(postgres_up(), "Postgres");
-        require_ready(bundle_ready(fixture), "the Rails fixture bundle");
+        if !require_ready(postgres_up(), "Postgres") {
+            return;
+        }
+        if !require_ready(bundle_ready(fixture), "the Rails fixture bundle") {
+            return;
+        }
         let suffix = rails_suffix::db_suffix("ws-struct");
         let names = [format!("workon_rails_fixture_development{suffix}"), format!("workon_rails_fixture_test{suffix}")];
         for name in &names {
@@ -930,10 +943,16 @@ test:
     /// untouched, then the workspace's Rails commands use the suffixed databases.
     #[test]
     fn rails_workspace_isolates_databases_and_leaves_jj_clean() {
-        require_ready(vcs_runner::jj_available(), "jj");
-        require_ready(postgres_up(), "Postgres");
+        if !require_ready(vcs_runner::jj_available(), "jj") {
+            return;
+        }
+        if !require_ready(postgres_up(), "Postgres") {
+            return;
+        }
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
-        require_ready(bundle_ready(fixture), "the Rails fixture bundle");
+        if !require_ready(bundle_ready(fixture), "the Rails fixture bundle") {
+            return;
+        }
 
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
