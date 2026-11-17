@@ -90,10 +90,18 @@ module WorkonRailsDbSuffix
 
     # Rails creates and drops databases over a connection to `postgres` with
     # schema_search_path "public". Suffixing it points that at a database that
-    # does not exist.
+    # does not exist. Only Rails' own Postgres tasks build it (public_schema_config), so
+    # the shape alone is not enough: an app's own database named "postgres" with the
+    # "public" search path must still be suffixed, or a workspace shares the main
+    # checkout's database.
     def maintenance_connection?(config)
       hash = config.configuration_hash
-      config.database == "postgres" && (hash[:schema_search_path] || hash["schema_search_path"]) == "public"
+      return false unless config.database == "postgres" && (hash[:schema_search_path] || hash["schema_search_path"]) == "public"
+
+      caller_locations(1, 60).any? do |frame|
+        path = frame.path.to_s
+        path.end_with?("postgresql_database_tasks.rb") || path.end_with?("tasks/abstract_tasks.rb")
+      end
     end
 
     def owned_rows(configurations)

@@ -319,10 +319,19 @@ raise "the hook enabled #{extra.size} TracePoint(s)" unless extra.empty?
 
 puts "OK"
 
-# Rails creates and drops databases over a `postgres` connection with
-# schema_search_path "public"; that one stays as Rails wrote it.
-maintenance, = database_of({ "development" => { "adapter" => "postgresql", "database" => "postgres", "schema_search_path" => "public" } }, "development")
-expect_same("maintenance connection", maintenance, "postgres")
+# An app whose own database is `postgres` with schema_search_path "public" is
+# still an app database: unsuffixed, a workspace would share the main checkout's.
+real_postgres, = database_of({ "development" => { "adapter" => "postgresql", "database" => "postgres", "schema_search_path" => "public" } }, "development")
+expect_suffixed("app database named postgres", real_postgres)
+
+# Rails creates and drops databases over a `postgres` connection it builds
+# itself in its Postgres tasks (public_schema_config); that one stays as Rails
+# wrote it, so the maintenance database exists to connect to.
+require "active_record/tasks/database_tasks"
+app = configs_for({ "development" => { "adapter" => "postgresql", "database" => "app_dev" } }).first
+tasks = ActiveRecord::Tasks::PostgreSQLDatabaseTasks.new(app)
+tasks.send(:establish_connection, tasks.send(:public_schema_config))
+expect_same("maintenance connection", ActiveRecord::Base.connection_db_config.database, "postgres")
 
 # Zeitwerk aliases Kernel#require after the hook loads; the hook must survive it.
 begin
