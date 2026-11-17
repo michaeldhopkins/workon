@@ -183,11 +183,19 @@ jobs:
         run: |
           BINARY="target/${{ matrix.target }}/release/workon"
           /usr/bin/ditto -c -k "$BINARY" "$RUNNER_TEMP/workon.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/workon.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
+          # Apple's service answers 500 now and then (2026-11-17); a fresh submission is safe.
+          for attempt in 1 2 3; do
+            if xcrun notarytool submit "$RUNNER_TEMP/workon.zip" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_ID_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait; then
+              break
+            fi
+            [ "$attempt" = 3 ] && exit 1
+            echo "notarytool failed (attempt $attempt), retrying"
+            sleep 30
+          done
           rm "$RUNNER_TEMP/workon.zip"
 
       - name: Download distribution assets
