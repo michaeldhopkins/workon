@@ -214,6 +214,38 @@ docker_host, = database_of(
 )
 expect_same("dotted host.docker.internal", docker_host, "app_dev")
 
+# libpq tries every listed host and connects to hostaddr, so a replica that
+# can land on this machine through any of them must be suffixed.
+mixed_replica_forms = {
+  "loopback then remote" => { "host" => "127.0.0.1,db.example" },
+  "localhost then remote" => { "host" => "localhost,db.example" },
+  "socket directory then remote" => { "host" => "/var/run/postgresql,db.example" },
+  "leading empty host" => { "host" => ",db.example" },
+  "trailing empty host" => { "host" => "db.example," },
+  "remote host with loopback hostaddr" => { "host" => "db.example", "hostaddr" => "127.0.0.1" },
+  "remote host with bracketed ipv6 loopback hostaddr" => { "host" => "db.example", "hostaddr" => "[::1]" },
+  "remote host with remote then loopback hostaddr" => { "host" => "db.example,db2.example", "hostaddr" => "10.0.0.5,127.0.0.1" },
+}
+mixed_replica_forms.each do |label, extra|
+  database, = database_of(
+    { "development" => { "adapter" => "postgresql", "database" => "app_dev", "replica" => true }.merge(extra) },
+    "development"
+  )
+  expect_suffixed(label, database)
+end
+
+remote_hostaddr, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "db.example", "hostaddr" => "10.0.0.5", "database" => "app_dev", "replica" => true } },
+  "development"
+)
+expect_same("remote host with remote hostaddr", remote_hostaddr, "app_dev")
+
+remote_list, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "db.example,db2.example", "database" => "app_dev", "replica" => true } },
+  "development"
+)
+expect_same("remote host list", remote_list, "app_dev")
+
 query_host, query_url = database_of(
   { "development" => "postgresql:///app_dev?host=/var/run/postgresql&replica=true" },
   "development"

@@ -129,17 +129,21 @@ module WorkonRailsDbSuffix
     end
 
     # Libpq treats a host that starts with "/" as a Unix socket directory, and
-    # tries each name in a comma-separated list. A single-label name, "_"
-    # included, is the service on this machine. A dotted name is a different host.
+    # tries each name in a comma-separated list, so a list naming this machine anywhere can
+    # connect to it, and a loopback hostaddr overrides host. A single-label name,
+    # "_" included, is the service on this machine. A dotted name is another host.
     def local?(config)
       hash = config.configuration_hash
       socket = hash[:socket] || hash["socket"]
       return true if socket.is_a?(String) && !socket.empty?
 
+      hostaddr = (hash[:hostaddr] || hash["hostaddr"]).to_s
+      return true if hostaddr.split(",").any? { |part| loopback_address?(part.strip) }
+
       host = (hash[:host] || hash["host"]).to_s
       return true if host.empty? || host.start_with?("/")
 
-      host.split(",").all? { |part| local_host?(part.strip) }
+      host.split(",", -1).any? { |part| local_host?(part.strip) }
     end
 
     def local_host?(host)
