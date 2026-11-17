@@ -63,17 +63,31 @@ pub(crate) fn database_urls(root: &Path, env: &HashMap<String, String>) -> Resul
     })
 }
 
-/// Only an app whose `Gemfile.lock` carries dotenv or dotenv-rails loads these
-/// files, so a `.env` written for another tool must not refuse setup. No lock,
-/// no dotenv.
+/// Only an app that depends on dotenv or dotenv-rails loads these files, so a
+/// `.env` written for another tool must not refuse setup. The lock is the proof;
+/// the Gemfile covers an app that does not commit its lock yet. A file that
+/// exists but cannot be read counts as listing it.
 fn lock_lists_dotenv(root: &Path) -> bool {
-    std::fs::read_to_string(root.join("Gemfile.lock")).is_ok_and(|text| lock_text_lists_dotenv(&text))
+    [("Gemfile.lock", lock_text_lists_dotenv as fn(&str) -> bool), ("Gemfile", gemfile_text_lists_dotenv)].iter().any(
+        |(name, lists)| match std::fs::read_to_string(root.join(name)) {
+            Ok(text) => lists(&text),
+            Err(err) => err.kind() != std::io::ErrorKind::NotFound,
+        },
+    )
 }
 
 fn lock_text_lists_dotenv(text: &str) -> bool {
     text.lines().any(|line| {
-        let name = line.trim().split([' ', '(']).next().unwrap_or("");
+        let name = line.trim().split([' ', '(']).next().unwrap_or("").trim_end_matches('!');
         name == "dotenv" || name == "dotenv-rails"
+    })
+}
+
+fn gemfile_text_lists_dotenv(text: &str) -> bool {
+    text.lines().map(str::trim).filter(|line| !line.starts_with('#')).any(|line| {
+        ["dotenv", "dotenv-rails"]
+            .iter()
+            .any(|gem| line.contains(&format!("\"{gem}\"")) || line.contains(&format!("'{gem}'")))
     })
 }
 
@@ -439,6 +453,24 @@ QUEUE_DATABASE_URL='postgres://localhost/queue'
         let err = result.unwrap_err();
         assert_eq!(err.path, path);
         assert_eq!(err.reason(), "could not be read");
+    }
+
+    #[test]
+    fn the_gemfile_or_a_bang_dependency_also_lists_dotenv() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "KEY=$(x)\n").unwrap();
+        std::fs::write(tmp.path().join("Gemfile"), "# gem \"dotenv-rails\"\ngem \"rails\"\n").unwrap();
+        assert!(database_urls(tmp.path(), &HashMap::new()).unwrap().is_empty(), "commented");
+        for gemfile in ["gem \"dotenv-rails\", groups: :development\n", "gem 'dotenv'\n"] {
+            std::fs::write(tmp.path().join("Gemfile"), gemfile).unwrap();
+            assert!(database_urls(tmp.path(), &HashMap::new()).is_err(), "{gemfile}");
+        }
+        std::fs::remove_file(tmp.path().join("Gemfile")).unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "DEPENDENCIES\n  dotenv!\n").unwrap();
+        assert!(database_urls(tmp.path(), &HashMap::new()).is_err(), "bang");
+        std::fs::remove_file(tmp.path().join("Gemfile.lock")).unwrap();
+        std::fs::create_dir(tmp.path().join("Gemfile.lock")).unwrap();
+        assert!(database_urls(tmp.path(), &HashMap::new()).is_err(), "unreadable lock");
     }
 
     #[test]

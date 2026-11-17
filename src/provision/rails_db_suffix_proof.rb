@@ -246,6 +246,18 @@ remote_list, = database_of(
 )
 expect_same("remote host list", remote_list, "app_dev")
 
+localhost_remote_addr, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "localhost", "hostaddr" => "10.0.0.5", "database" => "app_dev", "replica" => true } },
+  "development"
+)
+expect_same("localhost host with remote hostaddr", localhost_remote_addr, "app_dev")
+
+spaced_addr, = database_of(
+  { "development" => { "adapter" => "postgresql", "host" => "db.example", "hostaddr" => "10.0.0.5, 127.0.0.1", "database" => "app_dev", "replica" => true } },
+  "development"
+)
+expect_suffixed("hostaddr list with a space", spaced_addr)
+
 query_host, query_url = database_of(
   { "development" => "postgresql:///app_dev?host=/var/run/postgresql&replica=true" },
   "development"
