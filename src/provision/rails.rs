@@ -845,8 +845,8 @@ test:
     }
 
     /// Full cycle against the real Rails fixture: `db:prepare` loads `widgets`
-    /// into the suffixed development and test databases. The replica is not
-    /// created and `DATABASE_URL` is not exported.
+    /// into the suffixed development and test databases. The replica is
+    /// suffixed and listed, but Rails creates none for it, and `DATABASE_URL` is not exported.
     #[test]
     fn rails_cycle_loads_schema_into_isolated_databases() {
         let fixture = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rails"));
@@ -879,12 +879,15 @@ test:
         }
         assert!(setup.failed_steps.is_empty(), "{:?}", setup.failed_steps);
         assert!(setup.env.is_empty());
+        let replica = format!("workon_rails_fixture_replica{suffix}");
         assert_eq!(
             setup.resources,
-            names.iter().map(|name| Resource::PostgresDb { name: name.clone() }).collect::<Vec<_>>()
+            [&names[0], &replica, &names[1]].map(|name| Resource::PostgresDb { name: name.clone() }),
+            "the suffixed replica is listed so teardown covers it"
         );
         assert_eq!(tables, ["widgets", "widgets"]);
-        assert!(!db_exists("workon_rails_fixture_replica"), "the replica stays unsuffixed and uncreated");
+        assert!(!db_exists(&replica), "Rails creates no replica");
+        assert!(!db_exists("workon_rails_fixture_replica"), "the unsuffixed replica is never created");
     }
 
     /// When a Rails app keeps `db/structure.sql` instead of `db/schema.rb`,
@@ -1030,7 +1033,9 @@ test:
             let name = resource.db_name();
             assert!(name.ends_with(&suffix), "{name}");
             assert!(name.len() <= 63, "{name}");
-            assert_eq!(widgets(name), "widgets", "{name}");
+            if !name.contains("_replica_") {
+                assert_eq!(widgets(name), "widgets", "{name}");
+            }
         }
         let bare_prefix = dev_bare.chars().take(63).collect::<String>();
         for bare in [&dev_bare, &test_bare, &replica_bare, &bare_prefix] {
