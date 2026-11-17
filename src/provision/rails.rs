@@ -1110,7 +1110,9 @@ test:
         database_url: Option<&str>,
     ) -> std::process::Output {
         let mut cmd = Command::new("bundle");
-        cmd.args(args).current_dir(ws);
+        // Other tests set DATABASE_URL in this process for a while, and a child
+        // inherits whatever it holds when it starts.
+        cmd.args(args).current_dir(ws).env_remove("DATABASE_URL");
         if let Some(url) = database_url {
             cmd.env("DATABASE_URL", url);
         }
