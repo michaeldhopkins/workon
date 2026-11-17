@@ -799,4 +799,56 @@ mod tests {
         captured.sort();
         assert_eq!(captured, TESTED, "add a jj_<version> test for each directory under tests/fixtures/jj");
     }
+
+    #[test]
+    fn detail_of_names_the_root_or_says_there_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(detail_of(None), "no root");
+        assert_eq!(detail_of(Some(tmp.path())), canonical(tmp.path()).display().to_string());
+    }
+
+    #[test]
+    fn a_directory_known_only_by_its_nickname_is_added_once_and_a_blank_nickname_is_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let named = tmp.path().join("named");
+        let blank = tmp.path().join("blank");
+        for (dir, nickname) in [(&named, "My Work"), (&blank, "!!!")] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join(".workon.json"), format!(r#"{{"name":"{nickname}"}}"#)).unwrap();
+        }
+        let mut known = Vec::new();
+        add_directory(&named, &mut known);
+        add_directory(&blank, &mut known);
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].nickname.as_deref(), Some("My Work"));
+        assert_eq!(known[0].root, canonical(&named));
+        add_directory(&named, &mut known);
+        assert_eq!(known.len(), 1, "the same root is not added twice");
+    }
+
+    #[test]
+    fn registered_jj_workspaces_are_added_once_however_often_the_project_is_read() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "--initial-branch=main"]);
+        vcs_runner::run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+        let second = tmp.path().join("second");
+        vcs_runner::run_jj(&repo, &["workspace", "add", second.to_str().unwrap(), "--name", "second"]).unwrap();
+
+        let mut known = Vec::new();
+        add_jj_project(&repo, &mut known).unwrap();
+        let names: BTreeSet<_> = known.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, BTreeSet::from(["default", "second"]));
+        add_jj_project(&repo, &mut known).unwrap();
+        assert_eq!(known.len(), 2, "a root already known is not added again");
+
+        std::fs::remove_dir_all(&second).unwrap();
+        let mut fresh = Vec::new();
+        add_jj_project(&repo, &mut fresh).unwrap();
+        assert_eq!(fresh.len(), 1, "a registration whose directory is gone is skipped");
+    }
 }
