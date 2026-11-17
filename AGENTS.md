@@ -276,3 +276,4 @@ Pushing to `main` triggers `.github/workflows/release.yml` which:
 - Checks if the version in `Cargo.toml` has a corresponding git tag
 - If not, builds cross-platform binaries, publishes to crates.io, creates a GitHub release, and triggers a Homebrew tap update
 - Version bumps in `Cargo.toml` are what trigger releases — no manual tagging needed
+- A run whose macOS build never got a hosted runner (cancelled after 15 minutes, "Create release and publish" skipped) is retried with `gh workflow run release.yml`; the tag check makes a retry harmless.

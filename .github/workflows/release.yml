@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     branches: [main]
+  # A run whose hosted macOS runner never arrived (GitHub's capacity, 2026-11-17: "not
+  # acquired ... after multiple attempts", cancelled at 15 minutes) is retried with
+  # `gh workflow run release.yml`. The tag check keeps a retry from releasing twice.
+  workflow_dispatch:
 
 concurrency:
   group: release
