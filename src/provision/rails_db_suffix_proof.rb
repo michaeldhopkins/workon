@@ -318,3 +318,16 @@ extra = trace_after.reject { |point| trace_before.include?(point.object_id) }
 raise "the hook enabled #{extra.size} TracePoint(s)" unless extra.empty?
 
 puts "OK"
+
+# Rails creates and drops databases over a `postgres` connection with
+# schema_search_path "public"; that one stays as Rails wrote it.
+maintenance, = database_of({ "development" => { "adapter" => "postgresql", "database" => "postgres", "schema_search_path" => "public" } }, "development")
+expect_same("maintenance connection", maintenance, "postgres")
+
+# Zeitwerk aliases Kernel#require after the hook loads; the hook must survive it.
+begin
+  require "zeitwerk"
+  require "set"
+rescue LoadError
+  nil
+end

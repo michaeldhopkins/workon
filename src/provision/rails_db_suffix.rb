@@ -83,8 +83,17 @@ module WorkonRailsDbSuffix
     def owns?(config)
       return false unless config.env_name == "development" || config.env_name == "test"
       return false if sqlite?(config) || remote_replica?(config) || tasks_off?(config)
+      return false if maintenance_connection?(config)
 
       config.database.is_a?(String) && !config.database.empty?
+    end
+
+    # Rails creates and drops databases over a connection to `postgres` with
+    # schema_search_path "public". Suffixing it points that at a database that
+    # does not exist.
+    def maintenance_connection?(config)
+      hash = config.configuration_hash
+      config.database == "postgres" && (hash[:schema_search_path] || hash["schema_search_path"]) == "public"
     end
 
     def owned_rows(configurations)
