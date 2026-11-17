@@ -79,6 +79,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unlisted_workspace_in_a_clean_repo_reads_active() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        vcs_runner::run_jj(tmp.path(), &["git", "init"]).unwrap();
+        assert_eq!(listed_status(tmp.path(), None), "active");
+        assert_eq!(listed_status(tmp.path(), Some("default")), "active");
+    }
+
+    #[test]
     fn the_stack_revset_quotes_the_name_and_keeps_the_working_copy() {
         assert_eq!(stack_revset("ws-fresh"), r#"(trunk().."ws-fresh"@) | "ws-fresh"@"#);
         assert_eq!(quote_symbol("a\"b\\c"), r#""a\"b\\c""#);
