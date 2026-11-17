@@ -649,6 +649,7 @@ test:
 ",
         )
         .unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "    dotenv-rails (3.2.0)\n").unwrap();
         std::fs::write(tmp.path().join(".env.development"), "DATABASE_URL=postgres://localhost/app_development\n")
             .unwrap();
         std::fs::write(tmp.path().join(".env"), "DATABASE_URL=postgres://localhost/app_development\n").unwrap();
@@ -685,6 +686,7 @@ test:
             "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n",
         )
         .unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "    dotenv (3.2.0)\n").unwrap();
         std::fs::write(tmp.path().join(".env.test"), "DATABASE_URL=postgres://localhost/app_test\n").unwrap();
         let mise = HashMap::new();
         let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-testenv", &mise)).unwrap());
@@ -704,6 +706,7 @@ test:
             "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n",
         )
         .unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "    dotenv (3.2.0)\n").unwrap();
         std::fs::write(tmp.path().join(".env"), "NOT A VALID LINE\n").unwrap();
         let mise = HashMap::new();
         let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-bad", &mise)).unwrap());
@@ -712,6 +715,26 @@ test:
         assert_eq!(setup.session_env[1].0, "RUBYOPT");
         assert!(setup.resources.is_empty(), "{:?}", setup.resources);
         assert!(data.join(rails_suffix::SCRIPT_NAME).is_file());
+    }
+
+    /// A `.env` written for docker compose or a shell wrapper is not read by an
+    /// app that has no dotenv gem, so it must not refuse setup.
+    #[test]
+    fn an_unparsed_env_file_is_ignored_when_the_app_has_no_dotenv_gem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join("config/database.yml"),
+            "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "GEM\n  specs:\n    rails (8.0.0)\n").unwrap();
+        std::fs::write(tmp.path().join(".env"), "GIT_SHA=$(git rev-parse HEAD)\nKEY=a b\n").unwrap();
+        let mise = HashMap::new();
+        let setup = with_data_dir(&data, || Rails.setup(&ctx(tmp.path(), "prov", "ws-nodotenv", &mise)).unwrap());
+        assert!(setup.failed_steps.is_empty(), "{:?}", setup.failed_steps);
+        assert!(setup.session_env.is_empty(), "{:?}", setup.session_env);
     }
 
     /// The URL dotenv will not apply is not a server database. A sqlite file
@@ -726,6 +749,7 @@ test:
             "development:\n  adapter: sqlite3\n  database: storage/development.sqlite3\ntest:\n  adapter: sqlite3\n  database: storage/test.sqlite3\n",
         )
         .unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "    dotenv (3.2.0)\n").unwrap();
         std::fs::write(tmp.path().join(".env.development.local"), "DATABASE_URL=sqlite3:storage/development.sqlite3\n")
             .unwrap();
         std::fs::write(tmp.path().join(".env.test"), "DATABASE_URL=sqlite3:storage/test.sqlite3\n").unwrap();

@@ -48,6 +48,9 @@ impl ParseFault {
 /// Database URLs the workspace's development and test boots take from dotenv
 /// files. Keys already in `env` are omitted; the caller already has them.
 pub(crate) fn database_urls(root: &Path, env: &HashMap<String, String>) -> Result<Vec<(String, String)>, DotenvFault> {
+    if !lock_lists_dotenv(root) {
+        return Ok(Vec::new());
+    }
     let mut files = HashMap::new();
     for name in FILES {
         if let Some(text) = read_named(root, name)? {
@@ -57,6 +60,20 @@ pub(crate) fn database_urls(root: &Path, env: &HashMap<String, String>) -> Resul
     database_urls_in(&files, env).map_err(|fault| {
         let detail = fault.reason();
         DotenvFault { path: root.join(fault.file), detail }
+    })
+}
+
+/// Only an app whose `Gemfile.lock` carries dotenv or dotenv-rails loads these
+/// files, so a `.env` written for another tool must not refuse setup. No lock,
+/// no dotenv.
+fn lock_lists_dotenv(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("Gemfile.lock")).is_ok_and(|text| lock_text_lists_dotenv(&text))
+}
+
+fn lock_text_lists_dotenv(text: &str) -> bool {
+    text.lines().any(|line| {
+        let name = line.trim().split([' ', '(']).next().unwrap_or("");
+        name == "dotenv" || name == "dotenv-rails"
     })
 }
 
@@ -397,6 +414,7 @@ QUEUE_DATABASE_URL='postgres://localhost/queue'
     #[test]
     fn a_directory_is_ignored_and_unreadable_or_non_utf8_is_a_fault() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "    dotenv (3.2.0)\n").unwrap();
         std::fs::create_dir(tmp.path().join(".env")).unwrap();
         assert!(database_urls(tmp.path(), &HashMap::new()).unwrap().is_empty());
 
@@ -412,6 +430,7 @@ QUEUE_DATABASE_URL='postgres://localhost/queue'
     fn an_unreadable_file_is_a_fault() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Gemfile.lock"), "    dotenv-rails (3.2.0)\n").unwrap();
         let path = tmp.path().join(".env");
         std::fs::write(&path, "DATABASE_URL=postgres://localhost/app\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -420,6 +439,28 @@ QUEUE_DATABASE_URL='postgres://localhost/queue'
         let err = result.unwrap_err();
         assert_eq!(err.path, path);
         assert_eq!(err.reason(), "could not be read");
+    }
+
+    #[test]
+    fn dotenv_is_read_only_when_the_lock_lists_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            "GIT_SHA=$(git rev-parse HEAD)\nDATABASE_URL=postgres://localhost/app\n",
+        )
+        .unwrap();
+        assert!(database_urls(tmp.path(), &HashMap::new()).unwrap().is_empty(), "no lock");
+        std::fs::write(
+            tmp.path().join("Gemfile.lock"),
+            "GEM\n  specs:\n    dotenv_validator (1.0.0)\n    rails (8.0.0)\n",
+        )
+        .unwrap();
+        assert!(database_urls(tmp.path(), &HashMap::new()).unwrap().is_empty(), "lookalike gem");
+        for lock in ["    dotenv (3.2.0)\n", "    dotenv-rails (3.2.0)\n", "DEPENDENCIES\n  dotenv-rails\n"] {
+            std::fs::write(tmp.path().join("Gemfile.lock"), lock).unwrap();
+            let err = database_urls(tmp.path(), &HashMap::new()).unwrap_err();
+            assert_eq!(err.reason(), "command substitution", "{lock}");
+        }
     }
 
     proptest::proptest! {
