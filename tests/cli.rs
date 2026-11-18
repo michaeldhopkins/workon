@@ -598,6 +598,75 @@ fn create_records_the_suffixed_names_rails_reports() {
     assert!(calls.iter().any(|call| call.args.get(2).is_some_and(|arg| arg == "db:prepare")), "{calls:?}");
 }
 
+/// Issue #10 / #11: a dotfiles git repository at `$HOME` that ignores the data
+/// directory (`/*` in `.gitignore`) lets `create` create the directory, write
+/// `rails_db_suffix.rb` under `~/.local/share/workon` and `$XDG_DATA_HOME/workon`,
+/// and provision the workspace databases.
+#[test]
+fn create_installs_the_rails_suffix_when_home_is_a_git_repo_that_ignores_it() {
+    let world = World::new();
+    world.git(&world.home(), &["init", "-q"]);
+    std::fs::write(world.home().join(".gitignore"), "/*\n").unwrap();
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!([]), "{report}");
+    assert_eq!(report["dbs"].as_array().map(Vec::len), Some(2), "{report}");
+    let script = world.home().join(".local/share/workon/rails_db_suffix.rb");
+    assert!(script.is_file(), "the suffix script is written: {script:?}");
+
+    let xdg = world.home().join("xdg-data");
+    let out = world.workon(&proj).env("XDG_DATA_HOME", &xdg).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let xdg_script = xdg.join("workon/rails_db_suffix.rb");
+    assert!(xdg_script.is_file(), "the suffix script is written under XDG_DATA_HOME: {xdg_script:?}");
+}
+
+/// Workon's own data directory is never refused for sitting inside `$HOME`'s
+/// repository, even when that repository does not ignore it.
+#[test]
+fn create_installs_the_rails_suffix_in_its_own_data_dir_when_home_repo_does_not_ignore_it() {
+    let world = World::new();
+    world.git(&world.home(), &["init", "-q"]);
+    std::fs::write(world.home().join(".gitignore"), ".config/\n").unwrap();
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(world.home().join(".local/share/workon/rails_db_suffix.rb").is_file());
+}
+
+/// A data directory chosen with `WORKON_DATA_DIR` inside a repository that does
+/// not ignore it is still refused (exit 3, nothing created); the same repository
+/// ignoring it lets the script be written.
+#[test]
+fn create_refuses_a_chosen_rails_suffix_dir_in_a_repo_that_does_not_ignore_it() {
+    let world = World::new();
+    world.git(&world.home(), &["init", "-q"]);
+    std::fs::write(world.home().join(".gitignore"), ".config/\n").unwrap();
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
+
+    let chosen = world.home().join("kept/workon-data");
+    let out = world.workon(&proj).env("WORKON_DATA_DIR", &chosen).args(["create", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("refusing to write"), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["install rails db suffix"]), "{report}");
+    assert_eq!(report["dbs"], serde_json::json!([]), "{report}");
+    assert!(!world.home().join("kept").exists());
+
+    let ignored = world.home().join(".config/workon-data");
+    let out = world.workon(&proj).env("WORKON_DATA_DIR", &ignored).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(ignored.join("rails_db_suffix.rb").is_file());
+}
+
 /// When `db/structure.sql` exists without `db/schema.rb`, prepare runs and
 /// `db:schema:load` carries `SCHEMA_FORMAT=sql` (`db:prepare` does not read it).
 /// When `db/schema.rb` is present too, the schema load does not run and

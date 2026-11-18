@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
+use vcs_runner::Cmd;
 
 use super::{DbEngine, Resource};
 
@@ -26,27 +27,43 @@ const SUFFIX_LIMIT: usize = 55;
 /// `WORKON_DATA_DIR`, otherwise `$XDG_DATA_HOME/workon`, otherwise
 /// `~/.local/share/workon`. The last avoids `~/Library`, whose space would
 /// break `RUBYOPT`'s whitespace splitting.
+#[cfg(test)]
 pub(crate) fn data_dir() -> Result<PathBuf> {
+    Ok(data_location()?.0)
+}
+
+/// The data directory, and whether it is workon's own default location (under
+/// `$XDG_DATA_HOME` or `~/.local/share`) rather than one `WORKON_DATA_DIR` chose.
+fn data_location() -> Result<(PathBuf, bool)> {
     if let Some(dir) = env_nonempty("WORKON_DATA_DIR") {
-        return Ok(PathBuf::from(dir));
+        return Ok((PathBuf::from(dir), false));
     }
     if let Some(xdg) = env_nonempty("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(xdg).join("workon"));
+        return Ok((PathBuf::from(xdg).join("workon"), true));
     }
-    Ok(crate::home::home_dir()?.join(".local/share/workon"))
+    Ok((crate::home::home_dir()?.join(".local/share/workon"), true))
 }
 
 /// Write the embedded script under `dir` and return its path. A byte-identical
 /// file is left untouched. A stale file is replaced. A path inside a git or jj
-/// repository is refused before any directory is created.
+/// repository that does not ignore it is refused before any directory is created.
+#[cfg(test)]
 pub(crate) fn install_at(dir: &Path) -> Result<PathBuf> {
+    install_checked(dir, true)
+}
+
+fn install_checked(dir: &Path, guard_repository: bool) -> Result<PathBuf> {
     let dir = absolute_dir(dir)?;
     let path = dir.join(SCRIPT_NAME);
-    refuse_repository(&path)?;
+    if guard_repository {
+        refuse_repository(&path)?;
+    }
     std::fs::create_dir_all(&dir)?;
     let dir = dir.canonicalize().with_context(|| format!("resolving {}", dir.display()))?;
     let path = dir.join(SCRIPT_NAME);
-    refuse_repository(&path)?;
+    if guard_repository {
+        refuse_repository(&path)?;
+    }
     if path.is_file() && std::fs::read(&path).ok().as_deref() == Some(SCRIPT.as_bytes()) {
         return Ok(path);
     }
@@ -69,8 +86,12 @@ fn absolute_dir(dir: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Install into the data directory. Workon's own default location is not
+/// checked against an enclosing repository (a dotfiles repository at `$HOME`
+/// would otherwise block every workspace); a `WORKON_DATA_DIR` still is.
 pub(crate) fn install() -> Result<PathBuf> {
-    install_at(&data_dir()?)
+    let (dir, own) = data_location()?;
+    install_checked(&dir, !own)
 }
 
 /// `_` plus the workspace id, with every other character turned into `_`.
@@ -240,21 +261,63 @@ fn env_nonempty(var: &str) -> Option<String> {
 }
 
 /// Refuse when `path`, or a directory it would be created under, is inside a
-/// repository. The first existing ancestor is canonicalized, so a symlink into
-/// a repository is the repository.
+/// repository that does not ignore it. The first existing ancestor is
+/// canonicalized, so a symlink into a repository is the repository.
 fn refuse_repository(path: &Path) -> Result<()> {
     let Some(anchor) = first_existing(path) else {
         return Ok(());
     };
-    let canon = anchor.canonicalize().unwrap_or(anchor);
+    let canon = anchor.canonicalize().unwrap_or_else(|_| anchor.clone());
     let mut cursor = Some(canon.as_path());
     while let Some(dir) = cursor {
-        if dir.join(".git").exists() || dir.join(".jj").exists() {
+        if (dir.join(".git").exists() || dir.join(".jj").exists())
+            && !repo_relative(dir, &anchor, &canon, path).is_some_and(|rel| repo_ignores(dir, &rel))
+        {
             bail!("refusing to write {} inside a repository ({})", path.display(), dir.display());
         }
         cursor = dir.parent();
     }
     Ok(())
+}
+
+/// The path of `path` inside `repo`, keeping the uncreated tail below `anchor`
+/// after `anchor` is canonicalized to `canon_anchor`.
+fn repo_relative(repo: &Path, anchor: &Path, canon_anchor: &Path, path: &Path) -> Option<PathBuf> {
+    let tail = path.strip_prefix(anchor).ok()?;
+    canon_anchor.join(tail).strip_prefix(repo).ok().map(Path::to_path_buf)
+}
+
+fn repo_ignores(dir: &Path, rel: &Path) -> bool {
+    let Some((dir_str, rel_str)) = dir.to_str().zip(rel.to_str()) else {
+        return false;
+    };
+    if dir.join(".git").exists() {
+        return Cmd::new("git")
+            .in_dir(dir)
+            .env("GIT_CEILING_DIRECTORIES", dir_str)
+            .args(["check-ignore", "-q", "--", rel_str])
+            .run()
+            .is_ok();
+    }
+    let Ok(git_dir) = vcs_runner::run_jj_utf8_ignore_wc(dir, &["-R", dir_str, "git", "root"]) else {
+        return false;
+    };
+    Cmd::new("git")
+        .in_dir(dir)
+        .args([
+            "-c",
+            "core.bare=false",
+            "--git-dir",
+            &git_dir,
+            "--work-tree",
+            dir_str,
+            "check-ignore",
+            "-q",
+            "--",
+            rel_str,
+        ])
+        .run()
+        .is_ok()
 }
 
 fn first_existing(path: &Path) -> Option<PathBuf> {
@@ -393,6 +456,43 @@ mod tests {
         assert!(install_at(&link).is_err());
         assert!(!repo.join(SCRIPT_NAME).exists());
         assert!(!link.join(SCRIPT_NAME).exists());
+    }
+
+    #[test]
+    fn the_script_is_written_when_a_git_or_jj_repository_ignores_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("git-home");
+        std::fs::create_dir_all(&repo).unwrap();
+        vcs_runner::run_git(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join(".gitignore"), "/*\n!/tracked/\n!/tracked/**\n").unwrap();
+
+        let unignored = repo.join("tracked").join("workon");
+        let err = install_at(&unignored).unwrap_err();
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert!(!unignored.exists());
+
+        let ignored = repo.join(".local/share/workon");
+        let written = install_at(&ignored).unwrap();
+        assert!(written.is_file());
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let jj_repo = tmp.path().join("jj-home");
+        std::fs::create_dir_all(&jj_repo).unwrap();
+        vcs_runner::run_jj(&jj_repo, &["git", "init", "--no-colocate"]).unwrap();
+        std::fs::write(jj_repo.join(".gitignore"), "/*\n!/tracked/\n!/tracked/**\n").unwrap();
+
+        let jj_unignored = jj_repo.join("tracked").join("workon");
+        let err = install_at(&jj_unignored).unwrap_err();
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert!(!jj_unignored.exists());
+
+        let jj_ignored = jj_repo.join(".local/share/workon");
+        let written = install_at(&jj_ignored).unwrap();
+        assert!(written.is_file());
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
     }
 
     #[test]
@@ -584,6 +684,30 @@ mod tests {
             } else {
                 proptest::prop_assert!(got.is_empty());
             }
+        }
+
+        /// Canonicalizing the existing anchor keeps both the existing relative
+        /// prefix inside `repo` and the uncreated tail below `anchor`.
+        #[test]
+        fn the_path_inside_a_repository_keeps_the_uncreated_tail(
+            existing in proptest::collection::vec("[a-z]{1,8}", 0..3),
+            uncreated in proptest::collection::vec("[a-z]{1,8}", 1..4),
+        ) {
+            let raw_repo = PathBuf::from("/var/tmp/home");
+            let canon_repo = PathBuf::from("/private/var/tmp/home");
+            let anchor = existing.iter().fold(raw_repo.clone(), |acc, part| acc.join(part));
+            let canon_anchor = existing.iter().fold(canon_repo.clone(), |acc, part| acc.join(part));
+            let path = uncreated.iter().fold(anchor.clone(), |acc, part| acc.join(part));
+            let expected = existing.iter().chain(&uncreated).fold(PathBuf::new(), |acc, part| acc.join(part));
+
+            proptest::prop_assert_eq!(
+                repo_relative(&canon_repo, &anchor, &canon_anchor, &path),
+                Some(expected)
+            );
+            proptest::prop_assert_eq!(
+                repo_relative(Path::new("/elsewhere"), &anchor, &canon_anchor, &path),
+                None
+            );
         }
     }
 }
