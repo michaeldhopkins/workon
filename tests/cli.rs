@@ -625,10 +625,11 @@ fn create_installs_the_rails_suffix_when_home_is_a_git_repo_that_ignores_it() {
     assert!(xdg_script.is_file(), "the suffix script is written under XDG_DATA_HOME: {xdg_script:?}");
 }
 
-/// Workon's own data directory is never refused for sitting inside `$HOME`'s
-/// repository, even when that repository does not ignore it.
+/// Workon's default data directory is guarded like any other path: a `$HOME`
+/// repository that does not ignore `~/.local/share/workon` refuses it, and
+/// nothing is created.
 #[test]
-fn create_installs_the_rails_suffix_in_its_own_data_dir_when_home_repo_does_not_ignore_it() {
+fn create_refuses_the_default_rails_suffix_dir_when_home_repo_does_not_ignore_it() {
     let world = World::new();
     world.git(&world.home(), &["init", "-q"]);
     std::fs::write(world.home().join(".gitignore"), ".config/\n").unwrap();
@@ -636,8 +637,81 @@ fn create_installs_the_rails_suffix_in_its_own_data_dir_when_home_repo_does_not_
     world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
 
     let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to write"), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["install rails db suffix"]), "{report}");
+    assert!(!world.home().join(".local").exists(), "nothing is created in the home repository");
+}
+
+/// A stow-style `~/.local/share/workon` linked into a repository that does not
+/// ignore the target is refused: the tracked file there is not replaced.
+#[test]
+fn create_refuses_a_default_rails_suffix_dir_linked_into_a_repo_that_does_not_ignore_it() {
+    let world = World::new();
+    let dotfiles = world.path().join("dotfiles");
+    let target = dotfiles.join("data/workon");
+    std::fs::create_dir_all(&target).unwrap();
+    world.git(&dotfiles, &["init", "-q"]);
+    std::fs::write(dotfiles.join(".gitignore"), "/elsewhere/\n").unwrap();
+    std::fs::write(target.join("rails_db_suffix.rb"), "# tracked\n").unwrap();
+    world.git(&dotfiles, &["add", "-A"]);
+    world.git(&dotfiles, &["commit", "-q", "-m", "dotfiles"]);
+    link_default_data_dir(&world, &target);
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to write"), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["install rails db suffix"]), "{report}");
+    assert_eq!(std::fs::read_to_string(target.join("rails_db_suffix.rb")).unwrap(), "# tracked\n");
+    assert_eq!(world.git(&dotfiles, &["status", "--porcelain"]), "");
+}
+
+/// The same link into a repository that ignores the target is allowed.
+#[test]
+fn create_installs_the_rails_suffix_in_a_default_dir_linked_into_a_repo_that_ignores_it() {
+    let world = World::new();
+    let dotfiles = world.path().join("dotfiles");
+    let target = dotfiles.join("data/workon");
+    std::fs::create_dir_all(&target).unwrap();
+    world.git(&dotfiles, &["init", "-q"]);
+    std::fs::write(dotfiles.join(".gitignore"), "/data/\n").unwrap();
+    link_default_data_dir(&world, &target);
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
     assert!(out.status.success(), "{out:?}");
-    assert!(world.home().join(".local/share/workon/rails_db_suffix.rb").is_file());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!([]), "{report}");
+    assert!(target.join("rails_db_suffix.rb").is_file());
+}
+
+/// `~/.local/share/workon` as a symlink to `target`.
+fn link_default_data_dir(world: &World, target: &Path) {
+    let share = world.home().join(".local/share");
+    std::fs::create_dir_all(&share).expect("create .local/share");
+    std::os::unix::fs::symlink(target, share.join("workon")).expect("link .local/share/workon");
+}
+
+/// `XDG_DATA_HOME=./.data`, run from inside a project repository that does
+/// not ignore it, is checked like any other path: refused, nothing created.
+#[test]
+fn create_refuses_a_relative_xdg_data_home_inside_the_project_repo() {
+    let world = World::new();
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
+
+    let out = world.workon(&proj).env("XDG_DATA_HOME", "./.data").args(["create", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to write"), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["failed_steps"], serde_json::json!(["install rails db suffix"]), "{report}");
+    assert!(!proj.join(".data").exists());
+    assert_eq!(world.git(&proj, &["status", "--porcelain"]), "");
 }
 
 /// A data directory chosen with `WORKON_DATA_DIR` inside a repository that does

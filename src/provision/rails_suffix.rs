@@ -3,7 +3,7 @@
 //! per workspace. The workspace id is exported beside the script, and the script
 //! reads it from the environment.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -27,43 +27,39 @@ const SUFFIX_LIMIT: usize = 55;
 /// `WORKON_DATA_DIR`, otherwise `$XDG_DATA_HOME/workon`, otherwise
 /// `~/.local/share/workon`. The last avoids `~/Library`, whose space would
 /// break `RUBYOPT`'s whitespace splitting.
-#[cfg(test)]
 pub(crate) fn data_dir() -> Result<PathBuf> {
-    Ok(data_location()?.0)
-}
-
-/// The data directory, and whether it is workon's own default location (under
-/// `$XDG_DATA_HOME` or `~/.local/share`) rather than one `WORKON_DATA_DIR` chose.
-fn data_location() -> Result<(PathBuf, bool)> {
     if let Some(dir) = env_nonempty("WORKON_DATA_DIR") {
-        return Ok((PathBuf::from(dir), false));
+        return Ok(PathBuf::from(dir));
     }
     if let Some(xdg) = env_nonempty("XDG_DATA_HOME") {
-        return Ok((PathBuf::from(xdg).join("workon"), true));
+        return Ok(PathBuf::from(xdg).join("workon"));
     }
-    Ok((crate::home::home_dir()?.join(".local/share/workon"), true))
+    Ok(crate::home::home_dir()?.join(".local/share/workon"))
 }
 
 /// Write the embedded script under `dir` and return its path. A byte-identical
 /// file is left untouched. A stale file is replaced. A path inside a git or jj
-/// repository that does not ignore it is refused before any directory is created.
-#[cfg(test)]
+/// repository is refused unless git's ignore rules cover it (see
+/// [`refuse_repository`]). The first check runs before any directory is created.
+/// Directories this call created are removed again when it refuses.
 pub(crate) fn install_at(dir: &Path) -> Result<PathBuf> {
-    install_checked(dir, true)
+    install_checking(dir, refuse_repository)
 }
 
-fn install_checked(dir: &Path, guard_repository: bool) -> Result<PathBuf> {
+/// [`install_at`] with the repository check supplied, so a test can make the
+/// check after creation disagree with the check before it.
+fn install_checking(dir: &Path, check: impl Fn(&Path) -> Result<()>) -> Result<PathBuf> {
     let dir = absolute_dir(dir)?;
+    check(&dir.join(SCRIPT_NAME))?;
+    let created = missing_dirs(&dir);
+    let dir = match create_and_check(&dir, &check) {
+        Ok(canonical) => canonical,
+        Err(err) => {
+            remove_created(&created);
+            return Err(err);
+        }
+    };
     let path = dir.join(SCRIPT_NAME);
-    if guard_repository {
-        refuse_repository(&path)?;
-    }
-    std::fs::create_dir_all(&dir)?;
-    let dir = dir.canonicalize().with_context(|| format!("resolving {}", dir.display()))?;
-    let path = dir.join(SCRIPT_NAME);
-    if guard_repository {
-        refuse_repository(&path)?;
-    }
     if path.is_file() && std::fs::read(&path).ok().as_deref() == Some(SCRIPT.as_bytes()) {
         return Ok(path);
     }
@@ -86,12 +82,40 @@ fn absolute_dir(dir: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Install into the data directory. Workon's own default location is not
-/// checked against an enclosing repository (a dotfiles repository at `$HOME`
-/// would otherwise block every workspace); a `WORKON_DATA_DIR` still is.
+/// Create `dir`, resolve it, and check the resolved script path again: the
+/// answer for a directory that now exists can differ from the one for a path
+/// that did not.
+fn create_and_check(dir: &Path, check: &impl Fn(&Path) -> Result<()>) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let canonical = dir.canonicalize().with_context(|| format!("resolving {}", dir.display()))?;
+    check(&canonical.join(SCRIPT_NAME))?;
+    Ok(canonical)
+}
+
+/// The directories `create_dir_all(dir)` would create, deepest first. Empty
+/// when `dir` has a `..`, whose creations cannot be told apart lexically.
+fn missing_dirs(dir: &Path) -> Vec<PathBuf> {
+    if dir.components().any(|part| part == Component::ParentDir) {
+        return Vec::new();
+    }
+    dir.ancestors().take_while(|ancestor| !ancestor.exists()).map(Path::to_path_buf).collect()
+}
+
+/// `remove_dir` only removes an empty directory, so nothing that was already
+/// there, or that anything has since been written into, is lost.
+fn remove_created(created: &[PathBuf]) {
+    for dir in created {
+        if std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+    }
+}
+
+/// Install into the data directory, guarded like any other path: a data
+/// directory that resolves into a repository (a stow-style link into a
+/// dotfiles checkout, say) is refused unless that repository ignores it.
 pub(crate) fn install() -> Result<PathBuf> {
-    let (dir, own) = data_location()?;
-    install_checked(&dir, !own)
+    install_at(&data_dir()?)
 }
 
 /// `_` plus the workspace id, with every other character turned into `_`.
@@ -261,9 +285,18 @@ fn env_nonempty(var: &str) -> Option<String> {
 }
 
 /// Refuse when `path`, or a directory it would be created under, is inside a
-/// repository that does not ignore it. The first existing ancestor is
-/// canonicalized, so a symlink into a repository is the repository.
+/// git or jj repository that git would not ignore it in. "Ignore" is whatever
+/// `git check-ignore` reports: `.gitignore` files, `.git/info/exclude` and
+/// `core.excludesFile`, and never for a path git tracks. A jj repository without
+/// a `.git` is asked through its backing git store. When git (or jj) cannot be
+/// run, or says nothing, the path counts as not ignored. The first existing
+/// ancestor is canonicalized, so a symlink into a repository is the repository.
 fn refuse_repository(path: &Path) -> Result<()> {
+    refuse_repository_on(path, None)
+}
+
+/// [`refuse_repository`] with the `PATH` git is looked up on, for a test.
+fn refuse_repository_on(path: &Path, search_path: Option<&str>) -> Result<()> {
     let Some(anchor) = first_existing(path) else {
         return Ok(());
     };
@@ -271,7 +304,7 @@ fn refuse_repository(path: &Path) -> Result<()> {
     let mut cursor = Some(canon.as_path());
     while let Some(dir) = cursor {
         if (dir.join(".git").exists() || dir.join(".jj").exists())
-            && !repo_relative(dir, &anchor, &canon, path).is_some_and(|rel| repo_ignores(dir, &rel))
+            && !repo_relative(dir, &anchor, &canon, path).is_some_and(|rel| repo_ignores(dir, &rel, search_path))
         {
             bail!("refusing to write {} inside a repository ({})", path.display(), dir.display());
         }
@@ -287,12 +320,17 @@ fn repo_relative(repo: &Path, anchor: &Path, canon_anchor: &Path, path: &Path) -
     canon_anchor.join(tail).strip_prefix(repo).ok().map(Path::to_path_buf)
 }
 
-fn repo_ignores(dir: &Path, rel: &Path) -> bool {
+/// Whether git ignores `rel` in the repository at `dir`. Any failure is `false`.
+fn repo_ignores(dir: &Path, rel: &Path, search_path: Option<&str>) -> bool {
     let Some((dir_str, rel_str)) = dir.to_str().zip(rel.to_str()) else {
         return false;
     };
+    let git = || match search_path {
+        Some(path) => Cmd::new("git").env("PATH", path),
+        None => Cmd::new("git"),
+    };
     if dir.join(".git").exists() {
-        return Cmd::new("git")
+        return git()
             .in_dir(dir)
             .env("GIT_CEILING_DIRECTORIES", dir_str)
             .args(["check-ignore", "-q", "--", rel_str])
@@ -302,7 +340,7 @@ fn repo_ignores(dir: &Path, rel: &Path) -> bool {
     let Ok(git_dir) = vcs_runner::run_jj_utf8_ignore_wc(dir, &["-R", dir_str, "git", "root"]) else {
         return false;
     };
-    Cmd::new("git")
+    git()
         .in_dir(dir)
         .args([
             "-c",
@@ -493,6 +531,158 @@ mod tests {
         let written = install_at(&jj_ignored).unwrap();
         assert!(written.is_file());
         assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+    }
+
+    fn git_repo(root: &Path, gitignore: &str) -> PathBuf {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        vcs_runner::run_git(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join(".gitignore"), gitignore).unwrap();
+        repo
+    }
+
+    /// `git check-ignore` reports nothing for a tracked path, so a file git
+    /// tracks is never "ignored", even under an ignored directory: the
+    /// stale-file replace must not overwrite it.
+    #[test]
+    fn a_tracked_file_inside_an_ignored_directory_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo(tmp.path(), "/*\n");
+        let dir = repo.join("data/workon");
+        let tracked = write_script(&dir, b"# tracked\n");
+        vcs_runner::run_git(&repo, &["add", "-f", "--", "data/workon/rails_db_suffix.rb"]).unwrap();
+
+        let err = install_at(&dir).unwrap_err();
+
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert_eq!(std::fs::read(&tracked).unwrap(), b"# tracked\n", "the tracked file is not replaced");
+        install_at(&repo.join("data/untracked")).unwrap();
+    }
+
+    #[test]
+    fn a_missing_git_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo(tmp.path(), "/*\n");
+        let dir = repo.join("data/workon");
+        let script = dir.join(SCRIPT_NAME);
+        refuse_repository_on(&script, None).expect("the repository ignores the path while git runs");
+        let no_programs = tmp.path().join("no-programs");
+        std::fs::create_dir_all(&no_programs).unwrap();
+        let stand_in = no_programs.to_str().unwrap();
+
+        let err = refuse_repository_on(&script, Some(stand_in)).unwrap_err();
+        assert!(err.to_string().contains("refusing to write"), "{err}");
+
+        let err = install_checking(&dir, |path| refuse_repository_on(path, Some(stand_in))).unwrap_err();
+        assert!(err.to_string().contains("refusing to write"), "{err}");
+        assert!(!repo.join("data").exists(), "nothing is created when git cannot answer");
+    }
+
+    #[test]
+    fn a_colocated_jj_repository_is_judged_by_its_git_ignore_rules() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("colocated");
+        std::fs::create_dir_all(&repo).unwrap();
+        vcs_runner::run_jj(&repo, &["git", "init", "--colocate"]).unwrap();
+        assert!(repo.join(".git").exists() && repo.join(".jj").exists());
+        std::fs::write(repo.join(".gitignore"), "/*\n!/tracked/\n!/tracked/**\n").unwrap();
+
+        let unignored = repo.join("tracked").join("workon");
+        let err = install_at(&unignored).unwrap_err();
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert!(!unignored.exists());
+
+        let written = install_at(&repo.join(".local/share/workon")).unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+    }
+
+    /// `git check-ignore` also reads `.git/info/exclude` and `core.excludesFile`,
+    /// so a path they cover is ignored with no `.gitignore` entry.
+    #[test]
+    fn the_exclude_files_count_as_ignoring() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo(tmp.path(), "");
+        let dir = repo.join(".local/share/workon");
+        assert!(install_at(&dir).is_err());
+        assert!(!dir.exists());
+
+        std::fs::write(repo.join(".git/info/exclude"), "/.local/\n").unwrap();
+
+        let written = install_at(&dir).unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+
+        let other = tempfile::tempdir().unwrap();
+        let repo = git_repo(other.path(), "");
+        let excludes = other.path().join("global-excludes");
+        std::fs::write(&excludes, "/.local/\n").unwrap();
+        let dir = repo.join(".local/share/workon");
+        assert!(install_at(&dir).is_err());
+        vcs_runner::run_git(&repo, &["config", "core.excludesFile", excludes.to_str().unwrap()]).unwrap();
+
+        let written = install_at(&dir).unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+    }
+
+    /// When the check after creation disagrees with the one before it, the
+    /// directories this call made are removed and the ones already there stay.
+    #[test]
+    fn a_refusal_after_creation_removes_the_directories_it_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("existing");
+        std::fs::create_dir_all(existing.join("kept")).unwrap();
+        let dir = existing.join("kept").join("new").join("deeper");
+        let calls = std::cell::Cell::new(0);
+        let second_refuses = |_: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Ok(())
+            } else {
+                bail!("refusing to write: the repository does not ignore it")
+            }
+        };
+
+        let err = install_checking(&dir, second_refuses).unwrap_err();
+
+        assert!(err.to_string().contains("refusing to write"), "{err}");
+        assert_eq!(calls.get(), 2);
+        assert!(existing.join("kept").is_dir(), "a directory that was already there stays");
+        assert!(!existing.join("kept/new").exists(), "no stray directory is left behind");
+    }
+
+    #[test]
+    fn a_refusal_does_not_remove_a_directory_that_holds_something() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("new").join("deeper");
+        let refuses_after_a_file_appears = |_: &Path| {
+            if dir.exists() {
+                std::fs::write(tmp.path().join("new").join("note"), "x").unwrap();
+                bail!("refusing to write")
+            }
+            Ok(())
+        };
+
+        assert!(install_checking(&dir, refuses_after_a_file_appears).is_err());
+
+        assert!(tmp.path().join("new/note").is_file(), "a directory with a file in it is kept");
+        assert!(!dir.exists(), "the empty one below it is still removed");
+    }
+
+    #[test]
+    fn the_directories_to_create_are_found_without_following_dotdot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+
+        assert_eq!(
+            missing_dirs(&base.join("a").join("b")),
+            vec![base.join("a").join("b"), base.join("a")],
+            "deepest first, stopping at the first directory that exists"
+        );
+        assert!(missing_dirs(&base).is_empty());
+        assert!(missing_dirs(&base.join("a").join("..").join("b")).is_empty(), "a `..` path is left alone");
     }
 
     #[test]
