@@ -144,7 +144,10 @@ fn unbounded(name: &str, text: &str) -> Vec<String> {
 #[test]
 fn every_workflow_is_bounded() {
     let all = workflows();
-    assert!(all.len() >= 5, "found only {:?}", all.iter().map(|w| &w.0).collect::<Vec<_>>());
+    assert!(all.len() >= 3, "found only {:?}", all.iter().map(|w| &w.0).collect::<Vec<_>>());
+    for post_push in ["fuzz.yml", "mutants.yml"] {
+        assert!(!all.iter().any(|(n, _)| n == post_push), "{post_push} runs before each release, outside CI");
+    }
     let found: Vec<String> = all.iter().flat_map(|(n, t)| unbounded(n, t)).collect();
     assert!(
         found.is_empty(),

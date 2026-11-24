@@ -54,12 +54,13 @@ The captured range is jj 0.45.1. jj 0.46.0, released 2026-10-07, is not installe
 ## Fuzzing
 
 cargo-fuzz targets live in `fuzz/`, a standalone workspace built only by
-`cargo +nightly fuzz` (the `rust-fuzzing` skill has the general method). CI:
-`fuzz-replay.yml` replays each target's saved corpus on every push to `main` and
-every PR (the gate); `fuzz.yml` gives each target ~180s of mutation on each push
-to `main` through `fuzz/burst.sh` and saves the grown corpus (not a gate, no
-schedule; `workflow_dispatch` takes a longer budget). `tests/fuzz_targets_wired.rs`
-fails if a `[[bin]]` in `fuzz/Cargo.toml` is missing from either workflow.
+`cargo +nightly fuzz` (the `rust-fuzzing` skill has the general method). Fuzz
+bursts run on the changed code before each release, outside CI, through
+`fuzz/burst.sh`, and any crash is fixed in that release. CI runs only the fuzz
+replay: `fuzz-replay.yml` replays each target's committed `seed-*` inputs on
+every push to `main` and every PR. `tests/fuzz_targets_wired.rs` fails if a
+`[[bin]]` in `fuzz/Cargo.toml` is missing from `fuzz-replay.yml` or lacks its
+target file or committed `seed-*` inputs.
 
 ```sh
 cargo +nightly fuzz build
@@ -138,17 +139,16 @@ fixtures under `tests/fixtures/`.
 
 ## Mutation testing
 
-cargo-mutants (the `rust-mutation-testing` skill has the method).
-`.github/workflows/mutants.yml`, not gating: on PRs and pushes to `main`,
-`--in-diff` over the change (skipped with a warning above 25 selected mutants),
-`--jobs 2`. There is no whole-tree run: the rotating `--shard k/24` slice was
-removed on 2026-11-24, because deep runs over old code are paused (owner,
-2026-11-23), and its 15-minute wall had stopped run 45297950327 on a hung mutant.
-The findings below came from those slices and from full local sweeps.
+cargo-mutants (the `rust-mutation-testing` skill has the method). Mutation
+testing runs on the changed code (`cargo mutants --in-diff`) before each
+release, outside CI, and any MISSED mutant is fixed in that release (killed by a
+test or excluded in `.cargo/mutants.toml`). There is no CI mutants workflow and
+no whole-tree run. The findings below came from earlier rotating slices and full
+local sweeps.
 
 ```sh
 cargo mutants --list | wc -l                  # 658 on 2026-09-27
-cargo mutants -j2 --in-diff <(jj diff --git -r @-)   # what CI runs, locally
+cargo mutants -j2 --in-diff <(jj diff --git -r @-)   # one change, directly
 ```
 
 **Exclusions** (`.cargo/mutants.toml`):
@@ -161,7 +161,7 @@ cargo mutants -j2 --in-diff <(jj diff --git -r @-)   # what CI runs, locally
   Phoenix). Without a live server each returns the same empty `Setup` or does
   nothing, so no test can observe a mutant; they are asserted by the DB-gated
   cycle tests in ci.yml's `provisioners` job (Postgres, MySQL, one toolchain per
-  fixture). Giving the mutants jobs that environment would add those
+  fixture). Giving mutation runs that environment would add those
   toolchains' setup to every run; the helpers they call (adapter parsing,
   `test_db_name`, the URL and Npgsql encoders) are still mutated.
 - `Vcs::stranded_work -> vec![]`: the default body is `Vec::new()`.
@@ -171,7 +171,7 @@ cargo mutants -j2 --in-diff <(jj diff --git -r @-)   # what CI runs, locally
 - `session::run -> Ok(())`: it hands the terminal to a real zellij; its
   decisions (`session_exists`, `delete_session`) are tested with a stand-in.
 
-jj must be on PATH (the workflow pins it): the jj-backed tests return early
+jj must be on PATH for a mutation run: the jj-backed tests return early
 without it, which reads as a pass and would turn their mutants into false
 MISSED. Note that ci.yml's main job does not install jj, so those tests skip
 there.
