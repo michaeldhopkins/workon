@@ -50,9 +50,12 @@ pub(crate) fn install_at(dir: &Path) -> Result<PathBuf> {
 /// check after creation disagree with the check before it.
 fn install_checking(dir: &Path, check: impl Fn(&Path) -> Result<()>) -> Result<PathBuf> {
     let dir = absolute_dir(dir)?;
-    check(&dir.join(SCRIPT_NAME))?;
+    let tmp_name = format!(".{SCRIPT_NAME}.{}.tmp", std::process::id());
+    for name in [SCRIPT_NAME, tmp_name.as_str()] {
+        check(&dir.join(name))?;
+    }
     let created = missing_dirs(&dir);
-    let dir = match create_and_check(&dir, &check) {
+    let dir = match create_and_check(&dir, &tmp_name, &check) {
         Ok(canonical) => canonical,
         Err(err) => {
             remove_created(&created);
@@ -63,9 +66,8 @@ fn install_checking(dir: &Path, check: impl Fn(&Path) -> Result<()>) -> Result<P
     if path.is_file() && std::fs::read(&path).ok().as_deref() == Some(SCRIPT.as_bytes()) {
         return Ok(path);
     }
-    let tmp = dir.join(format!(".{SCRIPT_NAME}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, SCRIPT)?;
-    if let Err(err) = std::fs::rename(&tmp, &path) {
+    let tmp = dir.join(&tmp_name);
+    if let Err(err) = std::fs::write(&tmp, SCRIPT).and_then(|()| std::fs::rename(&tmp, &path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err).with_context(|| format!("replacing {}", path.display()));
     }
@@ -82,13 +84,15 @@ fn absolute_dir(dir: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Create `dir`, resolve it, and check the resolved script path again: the
-/// answer for a directory that now exists can differ from the one for a path
+/// Create `dir`, resolve it, and check the resolved script and temp paths again:
+/// the answer for a directory that now exists can differ from the one for a path
 /// that did not.
-fn create_and_check(dir: &Path, check: &impl Fn(&Path) -> Result<()>) -> Result<PathBuf> {
+fn create_and_check(dir: &Path, tmp_name: &str, check: &impl Fn(&Path) -> Result<()>) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let canonical = dir.canonicalize().with_context(|| format!("resolving {}", dir.display()))?;
-    check(&canonical.join(SCRIPT_NAME))?;
+    for name in [SCRIPT_NAME, tmp_name] {
+        check(&canonical.join(name))?;
+    }
     Ok(canonical)
 }
 
@@ -284,13 +288,18 @@ fn env_nonempty(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|value| !value.is_empty())
 }
 
+const GIT_ENV_VARS: [&str; 5] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_NAMESPACE"];
+
 /// Refuse when `path`, or a directory it would be created under, is inside a
 /// git or jj repository that git would not ignore it in. "Ignore" is whatever
 /// `git check-ignore` reports: `.gitignore` files, `.git/info/exclude` and
-/// `core.excludesFile`, and never for a path git tracks. A jj repository without
-/// a `.git` is asked through its backing git store. When git (or jj) cannot be
-/// run, or says nothing, the path counts as not ignored. The first existing
-/// ancestor is canonicalized, so a symlink into a repository is the repository.
+/// `core.excludesFile`, and never for a path in the git index. Because only the
+/// git index is checked for tracked files, a file that jj tracks in its working
+/// copy while `.gitignore` matches it still counts as ignored. A jj repository
+/// without a `.git` is asked through its backing git store. When git (or jj)
+/// cannot be run, or says nothing, the path counts as not ignored. The first
+/// existing ancestor is canonicalized, so a symlink into a repository is the
+/// repository.
 fn refuse_repository(path: &Path) -> Result<()> {
     refuse_repository_on(path, None)
 }
@@ -325,9 +334,12 @@ fn repo_ignores(dir: &Path, rel: &Path, search_path: Option<&str>) -> bool {
     let Some((dir_str, rel_str)) = dir.to_str().zip(rel.to_str()) else {
         return false;
     };
-    let git = || match search_path {
-        Some(path) => Cmd::new("git").env("PATH", path),
-        None => Cmd::new("git"),
+    let git = || {
+        let cmd = GIT_ENV_VARS.into_iter().fold(Cmd::new("git"), Cmd::env_remove);
+        match search_path {
+            Some(path) => cmd.env("PATH", path),
+            None => cmd,
+        }
     };
     if dir.join(".git").exists() {
         return git()
@@ -501,7 +513,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("git-home");
         std::fs::create_dir_all(&repo).unwrap();
-        vcs_runner::run_git(&repo, &["init", "-q"]).unwrap();
+        run_git(&repo, &["init", "-q"]);
         std::fs::write(repo.join(".gitignore"), "/*\n!/tracked/\n!/tracked/**\n").unwrap();
 
         let unignored = repo.join("tracked").join("workon");
@@ -533,10 +545,14 @@ mod tests {
         assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
     }
 
+    fn run_git(dir: &Path, args: &[&str]) {
+        GIT_ENV_VARS.into_iter().fold(Cmd::new("git"), Cmd::env_remove).in_dir(dir).args(args).run().unwrap();
+    }
+
     fn git_repo(root: &Path, gitignore: &str) -> PathBuf {
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        vcs_runner::run_git(&repo, &["init", "-q"]).unwrap();
+        run_git(&repo, &["init", "-q"]);
         std::fs::write(repo.join(".gitignore"), gitignore).unwrap();
         repo
     }
@@ -550,13 +566,105 @@ mod tests {
         let repo = git_repo(tmp.path(), "/*\n");
         let dir = repo.join("data/workon");
         let tracked = write_script(&dir, b"# tracked\n");
-        vcs_runner::run_git(&repo, &["add", "-f", "--", "data/workon/rails_db_suffix.rb"]).unwrap();
+        run_git(&repo, &["add", "-f", "--", "data/workon/rails_db_suffix.rb"]);
 
         let err = install_at(&dir).unwrap_err();
 
         assert!(err.to_string().contains("repository"), "{err}");
         assert_eq!(std::fs::read(&tracked).unwrap(), b"# tracked\n", "the tracked file is not replaced");
         install_at(&repo.join("data/untracked")).unwrap();
+    }
+
+    #[test]
+    fn an_inherited_git_env_pointing_at_a_decoy_repository_is_ignored() {
+        const CHILD_VAR: &str = "WORKON_TEST_ISOLATED_GIT_ENV";
+        if std::env::var_os(CHILD_VAR).is_none() {
+            let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "provision::rails_suffix::tests::an_inherited_git_env_pointing_at_a_decoy_repository_is_ignored",
+                ])
+                .env(CHILD_VAR, "1")
+                .output()
+                .expect("re-run the test binary");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{stdout}{stderr}");
+            assert!(stdout.contains("1 passed"), "the child test did not run: {stdout}");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let decoy = tmp.path().join("decoy");
+        std::fs::create_dir_all(&decoy).unwrap();
+        run_git(&decoy, &["init", "-q"]);
+        std::fs::write(decoy.join(".gitignore"), "/*\n").unwrap();
+        std::fs::write(decoy.join(".git/info/exclude"), "/*\n").unwrap();
+
+        let repo = git_repo(tmp.path(), "");
+        let dir = repo.join("data/workon");
+
+        for (var, val) in [
+            ("GIT_DIR", decoy.join(".git")),
+            ("GIT_WORK_TREE", decoy.clone()),
+            ("GIT_COMMON_DIR", decoy.join(".git")),
+            ("GIT_NAMESPACE", PathBuf::from("decoy")),
+        ] {
+            let err = with_env_var(var, &val, || install_at(&dir)).unwrap_err();
+            assert!(err.to_string().contains("repository"), "{var}: {err}");
+            assert!(!repo.join("data").exists(), "{var} must not let a directory be created");
+        }
+
+        let tracked_root = tmp.path().join("tracked");
+        let tracked_repo = git_repo(&tracked_root, "/*\n");
+        let tracked_dir = tracked_repo.join("data/workon");
+        let tracked = write_script(&tracked_dir, b"# tracked\n");
+        run_git(&tracked_repo, &["add", "-f", "--", "data/workon/rails_db_suffix.rb"]);
+        let err = with_env_var("GIT_INDEX_FILE", &decoy.join(".git/index"), || install_at(&tracked_dir)).unwrap_err();
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert_eq!(std::fs::read(&tracked).unwrap(), b"# tracked\n");
+
+        if vcs_runner::jj_available() {
+            let jj_repo = tmp.path().join("jj");
+            std::fs::create_dir_all(&jj_repo).unwrap();
+            vcs_runner::run_jj(&jj_repo, &["git", "init", "--no-colocate"]).unwrap();
+            let jj_dir = jj_repo.join("data/workon");
+            let err = with_env_var("GIT_COMMON_DIR", &decoy.join(".git"), || install_at(&jj_dir)).unwrap_err();
+            assert!(err.to_string().contains("repository"), "{err}");
+            assert!(!jj_repo.join("data").exists());
+        }
+    }
+
+    #[test]
+    fn the_temporary_file_must_also_be_ignored_by_the_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo(tmp.path(), "rails_db_suffix.rb\n");
+        let dir = repo.join("data/workon");
+        let tmp_file = dir.join(format!(".{SCRIPT_NAME}.{}.tmp", std::process::id()));
+
+        let err = install_at(&dir).unwrap_err();
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert!(!repo.join("data").exists(), "no directory is created when the temporary file is not ignored");
+
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = install_at(&dir).unwrap_err();
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert!(!dir.join(SCRIPT_NAME).exists());
+        assert!(!tmp_file.exists());
+
+        std::fs::write(repo.join(".gitignore"), "rails_db_suffix.rb\n.rails_db_suffix.rb.*.tmp\n").unwrap();
+        let written = install_at(&dir).unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+        assert!(!tmp_file.exists());
+
+        std::fs::write(&written, b"# stale\n").unwrap();
+        std::fs::write(&tmp_file, b"# tracked tmp\n").unwrap();
+        let rel_tmp = format!("data/workon/.{SCRIPT_NAME}.{}.tmp", std::process::id());
+        run_git(&repo, &["add", "-f", "--", &rel_tmp]);
+        let err = install_at(&dir).unwrap_err();
+        assert!(err.to_string().contains("repository"), "{err}");
+        assert_eq!(std::fs::read(&tmp_file).unwrap(), b"# tracked tmp\n");
+        assert_eq!(std::fs::read(&written).unwrap(), b"# stale\n");
     }
 
     #[test]
@@ -620,7 +728,7 @@ mod tests {
         std::fs::write(&excludes, "/.local/\n").unwrap();
         let dir = repo.join(".local/share/workon");
         assert!(install_at(&dir).is_err());
-        vcs_runner::run_git(&repo, &["config", "core.excludesFile", excludes.to_str().unwrap()]).unwrap();
+        run_git(&repo, &["config", "core.excludesFile", excludes.to_str().unwrap()]);
 
         let written = install_at(&dir).unwrap();
         assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
@@ -635,19 +743,19 @@ mod tests {
         std::fs::create_dir_all(existing.join("kept")).unwrap();
         let dir = existing.join("kept").join("new").join("deeper");
         let calls = std::cell::Cell::new(0);
-        let second_refuses = |_: &Path| {
+        let refuses_after_creation = |_: &Path| {
             calls.set(calls.get() + 1);
-            if calls.get() == 1 {
+            if !dir.exists() {
                 Ok(())
             } else {
                 bail!("refusing to write: the repository does not ignore it")
             }
         };
 
-        let err = install_checking(&dir, second_refuses).unwrap_err();
+        let err = install_checking(&dir, refuses_after_creation).unwrap_err();
 
         assert!(err.to_string().contains("refusing to write"), "{err}");
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
         assert!(existing.join("kept").is_dir(), "a directory that was already there stays");
         assert!(!existing.join("kept/new").exists(), "no stray directory is left behind");
     }
