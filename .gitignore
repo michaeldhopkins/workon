@@ -5,9 +5,8 @@
 # Playwright MCP session artifacts: page snapshots, console logs, screenshots.
 .playwright-mcp/
 
-# Fuzzing. The canonical corpus lives in the fuzz burst's GitHub Actions cache, not
-# in git: it grows without bound and is regenerable. The hand-written `seed-*`
-# inputs are committed, so a fresh clone or a cold cache has a starting point.
+# Fuzzing. Non-seed corpus files are local to a burst and ignored; only `seed-*`
+# inputs are committed.
 /fuzz/target/
 /fuzz/artifacts/
 /fuzz/coverage/

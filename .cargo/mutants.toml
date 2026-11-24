@@ -1,6 +1,6 @@
 # cargo-mutants configuration. Method: the `rust-mutation-testing` skill;
 # workon's specifics (findings, why each exclusion) are in AGENTS.md.
-# local-mutants: mutation runs on the changed code happen before each release, outside CI; session::run and live DB provisioners are in exclude_re, and tests use temp dirs and stand-in binaries.
+# Mutation runs happen before each release, outside CI.
 
 # Copy only what a fresh clone has. Without this every build directory gets
 # fuzz/target (1.1G) and the fixtures' installed deps (node_modules, vendor,
