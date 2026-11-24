@@ -140,28 +140,16 @@ fixtures under `tests/fixtures/`.
 
 cargo-mutants (the `rust-mutation-testing` skill has the method).
 `.github/workflows/mutants.yml`, not gating: on PRs and pushes to `main`,
-`--in-diff` over the change (skipped with a warning above 25 selected mutants);
-on pushes to `main` also one rotating slice, `--shard k/24` with
-`k = run_number % 24`, so the whole tree is covered once every 24 pushes. Both
-run `--jobs 2`; the slice summary prints how long cargo-mutants ran, which is
-the number to re-choose 24 from. The slice stops itself after 15 minutes, under
-the job's 25, so a hung mutant still gets a summary naming the newest logs and
-an uploaded `mutants.out`; `gh workflow run mutants.yml -f slice=<k>` re-runs
-one slice by number.
+`--in-diff` over the change (skipped with a warning above 25 selected mutants),
+`--jobs 2`. There is no whole-tree run: the rotating `--shard k/24` slice was
+removed on 2026-11-24, because deep runs over old code are paused (owner,
+2026-11-23), and its 15-minute wall had stopped run 45297950327 on a hung mutant.
+The findings below came from those slices and from full local sweeps.
 
 ```sh
 cargo mutants --list | wc -l                  # 658 on 2026-09-27
-cargo mutants -j2 --no-shuffle --shard 3/24   # one slice, as CI runs it
+cargo mutants -j2 --in-diff <(jj diff --git -r @-)   # what CI runs, locally
 ```
-
-**Choosing 24.** The suite is test-bound, and how test-bound depends on the
-machine: slice 0/24 (28 mutants) took 19m39s on a laptop busy with other
-builds, baseline 31s build + 86s test, while slice 2/48 (14) took 3m04s once it
-was quiet, baseline 17s + 18s. The busy figure was `repairs_a_real_copied_venv…`
-alone taking 80s (it builds a real venv with pip). A slice of ~28 is therefore
-6-20 minutes locally; a hosted runner is uncontended, so 24 was chosen for
-~10 minutes there with the 20-minute timeout as headroom. Re-choose from the
-CI figure.
 
 **Exclusions** (`.cargo/mutants.toml`):
 - `gitignore = true`: build copies skip `fuzz/target` (1.1G) and the fixtures'

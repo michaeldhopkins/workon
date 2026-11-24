@@ -1,27 +1,18 @@
 name: Mutants
 
 # Mutation testing: `cargo mutants` inserts plausible bugs and reports the ones
-# the tests do not notice. Two brief jobs, never a long one and never a schedule:
+# the tests do not notice. One brief job over the mutants overlapping this change
+# (push to main and PRs), never a whole-tree run and never a schedule: deep runs
+# over old code are paused (owner, 2026-11-23).
 #
-# - in-diff: the mutants overlapping this change (push to main and PRs).
-# - slice: one rotating shard of the whole tree (push to main only), so code no
-#   change touches still gets looked at, a little per push.
-#
-# Neither gates anything. The general method is in the `rust-mutation-testing`
-# skill; workon's specifics (slice count and time, exclusions) are in AGENTS.md.
+# It gates nothing. The general method is in the `rust-mutation-testing` skill;
+# workon's specifics (exclusions) are in AGENTS.md.
 on:
   pull_request:
     paths-ignore: ["**.md", "docs/**"]
   push:
     branches: [main]
     paths-ignore: ["**.md", "docs/**"]
-  # Re-run one slice by number, to reproduce a slice that hung or failed.
-  workflow_dispatch:
-    inputs:
-      slice:
-        description: "Slice k to run (0 to SLICES-1)"
-        required: true
-        type: number
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,7 +33,6 @@ env:
 jobs:
   in-diff:
     name: Mutants in changed code
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -208,125 +198,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mutants-in-diff
-          path: mutants.out
-          if-no-files-found: ignore
-
-  # Shard k of N, k advancing with the run number: every N pushes to main the
-  # whole tree has been looked at once. The tree changes between slices, so the
-  # coverage is approximate, which is fine. N and how it was chosen: AGENTS.md.
-  slice:
-    name: Mutants, rotating slice
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      SLICES: 24
-      # Wall-clock limit (MUTANTS_BUDGET, seconds; MUTANTS_WALL is the same time in words) for cargo-mutants itself, under the job's timeout, so
-      # a stuck run still reaches Summarise and the artifact upload. Slices take
-      # 3-4 minutes on a runner; slice 8 was cancelled at the job timeout on
-      # 2026-10-05 with no log or artifact to say which mutant hung.
-      MUTANTS_WALL: 15m
-      MUTANTS_BUDGET: 900
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-mutants
-
-      - name: Install jj
-        run: |
-          set -euo pipefail
-          url="https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          tmp="$(mktemp -d)"
-          curl -fsSL "$url" | tar xz -C "$tmp"
-          mkdir -p "$HOME/.local/bin"
-          install -m755 "$tmp/jj" "$HOME/.local/bin/jj"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/jj" --version
-
-      - name: Install multiplexers
-        run: sh scripts/install-multiplexers.sh
-
-      - name: Mutants
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            k="${{ inputs.slice }}"
-          else
-            k=$(( ${{ github.run_number }} % SLICES ))
-          fi
-          echo "$k" > mutants-slice.txt
-          echo "Slice $k of $SLICES"
-          # Recorded however the run ends (exit 2 on a miss included): the
-          # slice count was chosen from a local measurement, and this is the
-          # figure to re-choose it from.
-          trap 'echo "$SECONDS" > mutants-seconds.txt' EXIT
-          rc=0
-          # stdin closed: a mutant that reaches a prompt must fail, not wait.
-          # scripts/mutants-run.sh stops cargo-mutants at MUTANTS_BUDGET and exits 124.
-          scripts/mutants-run.sh --no-shuffle -vV --jobs 2 --shard "$k/$SLICES" < /dev/null || rc=$?
-          if [ "$rc" -eq 124 ]; then
-            echo "stopped" > mutants-stopped.txt
-            echo "::error::cargo-mutants still running after $MUTANTS_WALL; the newest logs in mutants.out/log are the mutants that hung"
-            ls -t mutants.out/log 2>/dev/null | head -5 || true
-            exit 1
-          fi
-          exit "$rc"
-
-      - name: Summarise
-        if: always()
-        run: |
-          set -euo pipefail
-          k="$(cat mutants-slice.txt 2>/dev/null || echo '?')"
-          secs="$(cat mutants-seconds.txt 2>/dev/null || echo '?')"
-          {
-            echo "## Mutants, slice $k of $SLICES"
-            echo
-            echo "_cargo mutants ran for ${secs}s_"
-            echo
-            if [ -f mutants-stopped.txt ]; then
-              echo "**Stopped after $MUTANTS_WALL: the counts below are partial.**"
-              echo 'The most recently written logs, which include the mutants that hung:'
-              echo
-              echo '```'
-              ls -t mutants.out/log 2>/dev/null | head -5 || true
-              echo '```'
-              echo
-            fi
-            if [ ! -d mutants.out ]; then
-              echo 'No results directory: the run failed before reporting.'
-              echo '**Treat this as no coverage, not as a pass.**'
-              exit 0
-            fi
-            for kind in missed caught unviable timeout; do
-              f="mutants.out/$kind.txt"
-              n=0
-              [ -f "$f" ] && n=$(wc -l < "$f" | tr -d ' ')
-              echo "- **$kind**: $n"
-            done
-            if [ -s mutants.out/missed.txt ]; then
-              echo
-              echo '### Missed in this slice'
-              echo
-              echo '```'
-              cat mutants.out/missed.txt
-              echo '```'
-              echo
-              echo 'Old code, not this push: give each a test or an exclusion'
-              echo 'with its reason, as for any other miss.'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Archive mutants.out
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mutants-slice
           path: mutants.out
           if-no-files-found: ignore
