@@ -1,17 +1,12 @@
 name: Fuzz replay
 
-# The gate half of the fuzzing program. `fuzz.yml`, a burst on each push to main, is
-# the half that explores.
+# The CI replay gate of the fuzzing program. Fuzz bursts run on the changed code
+# before each release, outside CI.
 #
-# Replay every input the bursts have accumulated against the code as it stands. It is
-# deterministic (same corpus, same answer, no "it got lucky on push #47"), it takes
-# minutes, and it answers the question a per-push job should answer: did this change
-# break a path we already explored?
-#
-# Read-only with respect to the corpus cache: `fuzz.yml` owns the canonical corpus, so
-# nothing here writes it back. These restores also keep the cache inside GitHub's 7-day
-# eviction window between bursts. On a cache miss the replay still runs the committed
-# `seed-*` inputs, so a fresh branch is never blocked.
+# Replay every committed `seed-*` input under `fuzz/corpus/<target>` against the
+# code as it stands. It is deterministic (same inputs, same answer, no "it got
+# lucky on push #47"), it takes minutes, and it answers the question a per-push
+# job should answer: did this change break a path we already explored?
 on:
   # A docs-only change cannot change what a target does: nothing fuzzed reads Markdown or
   # docs. No branch rule requires this check, so a skipped run blocks nothing.
@@ -63,19 +58,8 @@ jobs:
       - name: Build fuzz target
         run: cargo +nightly fuzz build ${{ matrix.target }} --target "$TRIPLE"
 
-      # The corpus fuzz.yml saves under `fuzz-corpus-<target>-<run id>-<attempt>`; the
-      # prefix match restores the newest. Caches written on main are readable from PR
-      # branches.
-      - name: Restore corpus
-        uses: actions/cache/restore@v6
-        with:
-          path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-
-          restore-keys: fuzz-corpus-${{ matrix.target }}-
-
-      # `-runs=0` executes each corpus input exactly once and exits: no mutation, no
-      # randomness. The committed `seed-*` inputs are in the tree, so this still gates
-      # something even on a cold cache.
+      # `-runs=0` executes each committed `seed-*` input under `fuzz/corpus/<target>`
+      # exactly once and exits: no mutation, no randomness.
       - name: Replay corpus
         run: |
           set -euo pipefail
@@ -84,7 +68,7 @@ jobs:
           COUNT=$(find fuzz/corpus/${{ matrix.target }} -type f | wc -l)
           echo "Replaying $COUNT corpus inputs"
           if [ "$COUNT" -eq 0 ]; then
-            echo "::notice::no corpus yet for ${{ matrix.target }} (fuzz.yml populates it) — replay skipped"
+            echo "::notice::no corpus yet for ${{ matrix.target }} — replay skipped"
             exit 0
           fi
           "$BIN" -runs=0 -timeout=25 -rss_limit_mb=4096 \
@@ -99,8 +83,7 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
-      # The replay already exits non-zero on a crash; this names the artifact kind and
-      # matches the check in fuzz.yml.
+      # The replay already exits non-zero on a crash; this names the artifact kind.
       - name: Fail on crashes
         if: always()
         run: |
