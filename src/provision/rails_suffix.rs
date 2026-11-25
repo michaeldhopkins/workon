@@ -707,6 +707,46 @@ mod tests {
         assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
     }
 
+    #[test]
+    fn an_ignore_everything_home_with_reincludes_covers_a_default_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo(tmp.path(), "*.log\n/*\n!/.gitignore\n!/.config/\n!/bin/\n");
+        std::fs::create_dir_all(repo.join(".local/share")).unwrap();
+        let dir = repo.join(".local/share/workon");
+
+        let written = install_at(&dir).unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+    }
+
+    #[test]
+    fn an_ignored_parent_directory_covers_a_data_dir_below_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git_repo(tmp.path(), ".local/\n");
+        std::fs::create_dir_all(repo.join(".local/share")).unwrap();
+        let dir = repo.join(".local/share/workon");
+
+        let written = install_at(&dir).unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+    }
+
+    #[test]
+    fn a_jj_repository_with_git_backing_and_no_dot_git_covers_a_default_data_dir() {
+        if !vcs_runner::jj_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("jj-home");
+        std::fs::create_dir_all(&repo).unwrap();
+        vcs_runner::run_jj(&repo, &["git", "init", "--no-colocate"]).unwrap();
+        assert!(!repo.join(".git").exists() && repo.join(".jj").exists());
+        std::fs::write(repo.join(".gitignore"), "/*\n!/.gitignore\n").unwrap();
+        std::fs::create_dir_all(repo.join(".local/share")).unwrap();
+        let dir = repo.join(".local/share/workon");
+
+        let written = install_at(&dir).unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), SCRIPT.as_bytes());
+    }
+
     /// `git check-ignore` also reads `.git/info/exclude` and `core.excludesFile`,
     /// so a path they cover is ignored with no `.gitignore` entry.
     #[test]

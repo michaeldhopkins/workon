@@ -1634,3 +1634,19 @@ fn exec_of_a_workspace_path_that_is_gone_fails_cleanly() {
         .code(1)
         .stderr(predicate::str::contains("does not exist"));
 }
+
+/// A home directory that is a repository ignoring everything (`/*`, with a few
+/// re-includes) already covers the default data directory, which does not exist yet.
+#[test]
+fn create_installs_the_rails_suffix_in_an_ignore_everything_home_repo() {
+    let world = World::new();
+    world.git(&world.home(), &["init", "-q"]);
+    std::fs::write(world.home().join(".gitignore"), "/*\n!/.gitignore\n!/.config/\n!/bin/\n").unwrap();
+    std::fs::create_dir_all(world.home().join(".local/share")).unwrap();
+    let proj = world.project(&rails(&[]));
+    world.stubs.set("bundle", &format!("{SUFFIXED_LISTING}exit 0\n"));
+
+    let out = world.workon(&proj).args(["create", "--json"]).output().unwrap();
+    assert!(out.status.success(), "{out:?}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(world.home().join(".local/share/workon/rails_db_suffix.rb").is_file());
+}
