@@ -10,5 +10,5 @@
 # workflows name `+nightly` themselves, which outranks this file. The declared `rust-version`
 # (the MSRV) is checked by ci.yml's `msrv` job on its own toolchain.
 [toolchain]
-channel = "1.99.0"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
