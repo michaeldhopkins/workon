@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use crate::provision::rails_suffix::{self, SUFFIX_VAR};
+use crate::provision::rails_suffix::{self, NAMES_VAR, SUFFIX_VAR};
 
 /// Env to set on the session, and names to remove so a parent shell cannot leak them in.
 #[derive(Debug)]
@@ -70,7 +70,11 @@ pub(crate) fn assemble(
         let rubyopt = rails_suffix::compose_rubyopt(sources.into_iter().flatten(), script)?;
         env.insert(SUFFIX_VAR.to_string(), suffix.clone());
         env.insert("RUBYOPT".to_string(), rubyopt);
-        return Ok(Prepared { env, clear: Vec::new() });
+        // A shell inside a newer workspace carries its naming mode. This
+        // workspace's databases were made without it, so it must not inherit it.
+        let leaked =
+            !session.contains_key(NAMES_VAR) && !env.contains_key(NAMES_VAR) && std::env::var_os(NAMES_VAR).is_some();
+        return Ok(Prepared { env, clear: if leaked { vec![NAMES_VAR.to_string()] } else { Vec::new() } });
     }
     let mut clear = Vec::new();
     strip_leaked_hook(&mut env, &mut clear, process_rubyopt);
@@ -106,6 +110,21 @@ mod tests {
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(key, value)| ((*key).to_string(), (*value).to_string())).collect()
+    }
+
+    #[test]
+    fn a_session_starts_with_the_naming_mode_its_workspace_stored() {
+        use crate::provision::rails_suffix::NAMES_SERVER;
+        let script = Path::new("/tmp/workon/rails_db_suffix.rb");
+        let created = map(&[(SUFFIX_VAR, "_ws_abc"), (NAMES_VAR, NAMES_SERVER)]);
+        let ready = assemble(&HashMap::new(), &created, None, Some(script)).unwrap();
+        assert_eq!(ready.env.get(NAMES_VAR).map(String::as_str), Some(NAMES_SERVER));
+
+        // A workspace made before the setting existed must not gain it: its
+        // databases carry the tagged names.
+        let older = map(&[(SUFFIX_VAR, "_ws_abc")]);
+        let ready = assemble(&HashMap::new(), &older, None, Some(script)).unwrap();
+        assert!(!ready.env.contains_key(NAMES_VAR));
     }
 
     #[test]

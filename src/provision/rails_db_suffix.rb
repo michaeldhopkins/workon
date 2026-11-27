@@ -208,11 +208,41 @@ module WorkonRailsDbSuffix
       63
     end
 
+    # A workspace created with WORKON_RAILS_DB_NAMES=server follows the server's
+    # own cut for a name the app already ends with the suffix (see server_cut).
+    # Workspaces created before that keep the tagged form their databases have.
+    def server_cut?
+      ENV["WORKON_RAILS_DB_NAMES"] == "server"
+    end
+
+    # The bytes of the suffix that carry the workspace's identity: "_ws_" and the
+    # six hex digits workon generates. A cut name must still hold them to be unique.
+    def identity_of(suffix)
+      suffix.byteslice(0, 10)
+    end
+
+    # A name the app built per checkout ends with the suffix but passes the limit.
+    # Postgres cuts such a name to its first 63 bytes, on a character boundary,
+    # whenever a client creates or opens it. A process that does not load this
+    # hook (a shell outside the workspace session) sends the long name and gets
+    # that cut, so the hook returns the same cut, or the two disagree on the
+    # database. It is used only while the cut keeps the workspace's identity: a
+    # cut that lost it could be shared by workspaces, so the tagged form wins.
+    def server_cut(name, suffix, limit)
+      return nil unless server_cut? && limit == 63 && name.end_with?(suffix)
+
+      cut = utf8_prefix(name, limit)
+      cut.include?(identity_of(suffix)) ? cut : nil
+    end
+
     # Keep the suffix when it fits beside an 8-hex tag of the full name, and
     # shorten on a character boundary. Distinct names stay distinct.
     def suffix_name(name, suffix, limit)
       return name unless name.valid_encoding?
       return name if name.end_with?(suffix) && name.bytesize <= limit
+
+      cut = server_cut(name, suffix, limit)
+      return cut unless cut.nil?
 
       combined = +"#{name}#{suffix}"
       return combined if combined.bytesize <= limit

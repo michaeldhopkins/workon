@@ -18,7 +18,7 @@ use anyhow::Result;
 use vcs_runner::Cmd;
 
 use super::rails_dotenv::{self, DotenvFault};
-use super::rails_suffix::{self, Listing, LIST_DATABASES, SUFFIX_VAR};
+use super::rails_suffix::{self, Listing, LIST_DATABASES, NAMES_SERVER, NAMES_VAR, SUFFIX_VAR};
 use super::rails_yml;
 use super::{run_step, ProvisionCtx, Provisioner, Resource, Setup};
 
@@ -68,12 +68,7 @@ impl Provisioner for Rails {
             }
         }
 
-        Ok(Setup {
-            resources,
-            session_env: vec![(SUFFIX_VAR.to_string(), suffix), ("RUBYOPT".to_string(), rubyopt)],
-            failed_steps,
-            ..Setup::default()
-        })
+        Ok(Setup { resources, session_env: session_env(suffix, Some(rubyopt)), failed_steps, ..Setup::default() })
     }
 }
 
@@ -256,7 +251,7 @@ fn unproven_dotenv(ctx: &ProvisionCtx<'_>, fault: &DotenvFault) -> Setup {
     let suffix = rails_suffix::db_suffix(ctx.ws_id);
     match hook_rubyopt(ctx, &suffix) {
         Hook::Ready(rubyopt) => Setup {
-            session_env: vec![(SUFFIX_VAR.to_string(), suffix), ("RUBYOPT".to_string(), rubyopt)],
+            session_env: session_env(suffix, Some(rubyopt)),
             failed_steps: vec!["read rails dotenv".to_string()],
             ..Setup::default()
         },
@@ -272,7 +267,7 @@ fn unproven_dotenv(ctx: &ProvisionCtx<'_>, fault: &DotenvFault) -> Setup {
 fn uninstalled(suffix: String) -> Setup {
     Setup {
         failed_steps: vec!["install rails db suffix".to_string()],
-        session_env: vec![(SUFFIX_VAR.to_string(), suffix)],
+        session_env: session_env(suffix, None),
         ..Setup::default()
     }
 }
@@ -319,7 +314,16 @@ fn rails_cmd(ctx: &ProvisionCtx<'_>, suffix: &str, rubyopt: &str, strip_urls: bo
             }
         }
     }
-    cmd.env(SUFFIX_VAR, suffix).env("RUBYOPT", rubyopt)
+    cmd.env(SUFFIX_VAR, suffix).env(NAMES_VAR, NAMES_SERVER).env("RUBYOPT", rubyopt)
+}
+
+/// What a new workspace stores: the suffix, how long names are cut, and (when the
+/// hook is installed) the `RUBYOPT` that loads it.
+fn session_env(suffix: String, rubyopt: Option<String>) -> Vec<(String, String)> {
+    let mut env = vec![(SUFFIX_VAR.to_string(), suffix)];
+    env.extend(rubyopt.map(|value| ("RUBYOPT".to_string(), value)));
+    env.push((NAMES_VAR.to_string(), NAMES_SERVER.to_string()));
+    env
 }
 
 fn database_url_var(key: &str) -> bool {
@@ -542,6 +546,11 @@ mod tests {
         let script = data.join(rails_suffix::SCRIPT_NAME).canonicalize().unwrap();
         assert!(script.is_file(), "the script lands in the data dir");
         assert!(setup.session_env[1].1.contains(&format!("-r{}", script.display())));
+        assert_eq!(
+            setup.session_env[2],
+            (NAMES_VAR.to_string(), NAMES_SERVER.to_string()),
+            "a new workspace stores how the hook names a per-checkout name past the limit"
+        );
         assert!(!tmp.path().join(rails_suffix::SCRIPT_NAME).exists());
         assert!(!tmp.path().join(".env.test.local").exists());
     }
@@ -559,7 +568,7 @@ mod tests {
         assert_eq!(setup.failed_steps, ["install rails db suffix"]);
         assert_eq!(
             setup.session_env,
-            vec![(SUFFIX_VAR.to_string(), "_ws_1".to_string())],
+            vec![(SUFFIX_VAR.to_string(), "_ws_1".to_string()), (NAMES_VAR.to_string(), NAMES_SERVER.to_string())],
             "the suffix is recorded so attach refuses to start without a hook"
         );
         assert!(setup.env.is_empty());

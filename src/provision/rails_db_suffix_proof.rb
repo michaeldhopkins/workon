@@ -170,6 +170,62 @@ raise "utf-8 name is invalid: #{utf_db.inspect}" unless utf_db.valid_encoding?
 raise "utf-8 name is #{utf_db.bytesize} bytes" if utf_db.bytesize > 63
 expect_suffixed("utf-8", utf_db)
 
+# An app whose database.yml already ends the name with the workspace suffix,
+# past Postgres's 63 bytes. A process outside the session never loads the hook,
+# sends the long name, and the server cuts it to 63 bytes. The hook must name
+# the database the same way, or workon creates one and the app opens another.
+def server_cut(name)
+  cut = +""
+  name.each_char { |char| break if cut.bytesize + char.bytesize > 63; cut << char }
+  cut
+end
+
+def opened_by(suffix, names, adapter = "postgresql")
+  ENV["WORKON_RAILS_DB_SUFFIX"] = suffix
+  hash = { "development" => names.to_h { |key, name| [key, { "adapter" => adapter, "database" => name }] } }
+  configs_for(hash).select { |config| config.env_name == "development" }.to_h { |config| [config.name, config.database.to_s] }
+end
+
+per_checkout_suffix = "_ws_a4af64_quarterly_reports_summary"
+per_checkout = "mylittleapp_development_mylittleapp#{per_checkout_suffix}"
+raise "the fixture name is not past the limit" unless per_checkout.bytesize > 63
+
+ENV["WORKON_RAILS_DB_NAMES"] = "server"
+created = opened_by(per_checkout_suffix, "primary" => per_checkout).fetch("primary")
+unless created == server_cut(per_checkout)
+  raise "workon would create #{created.inspect} but the server opens #{server_cut(per_checkout).inspect}"
+end
+
+# Another workspace of the same app gets a database of its own.
+other_suffix = "_ws_b1c2d3_quarterly_reports_summary"
+other = opened_by(other_suffix, "primary" => "mylittleapp_development_mylittleapp#{other_suffix}").fetch("primary")
+raise "two workspaces share #{created}" if other == created
+
+# A UTF-8 name is cut on a character boundary, as the server cuts it.
+accented = "café_development_cafe#{per_checkout_suffix}"
+accented_db = opened_by(per_checkout_suffix, "primary" => accented).fetch("primary")
+raise "accented name differs from the server's cut" unless accented_db == server_cut(accented) && accented_db.valid_encoding?
+
+# A name whose cut would lose the workspace's identity keeps the tagged form,
+# which no workspace shares and which still ends with the suffix.
+heavy = ("x" * 70) + per_checkout_suffix
+heavy_db = opened_by(per_checkout_suffix, "primary" => heavy).fetch("primary")
+raise "an identity-less cut #{heavy_db.inspect}" unless heavy_db.end_with?(per_checkout_suffix) && heavy_db.bytesize <= 63
+
+# A name that does not already end with the suffix is suffixed as before.
+fixed = opened_by(per_checkout_suffix, "primary" => "mylittleapp_development").fetch("primary")
+expect_same("fixed name", fixed, "mylittleapp_development#{per_checkout_suffix}")
+
+# MySQL has no server-side cut (it refuses a name over 64 bytes), so it is untouched.
+mysql_long = "m" * 40 + per_checkout_suffix
+mysql_db = opened_by(per_checkout_suffix, { "primary" => mysql_long }, "mysql2").fetch("primary")
+raise "mysql name is #{mysql_db.bytesize} bytes" if mysql_db.bytesize > 64
+
+# A workspace created before the setting keeps the tagged form its databases have.
+ENV.delete("WORKON_RAILS_DB_NAMES")
+legacy = opened_by(per_checkout_suffix, "primary" => per_checkout).fetch("primary")
+raise "a legacy workspace changed to #{legacy.inspect}" if legacy == server_cut(per_checkout) || !legacy.end_with?(per_checkout_suffix)
+
 ENV["WORKON_RAILS_DB_SUFFIX"] = "_"
 bare, = database_of({ "development" => { "adapter" => "postgresql", "database" => "app_dev" } }, "development")
 expect_same("bare underscore", bare, "app_dev")

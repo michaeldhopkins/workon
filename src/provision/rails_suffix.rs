@@ -14,6 +14,13 @@ use super::{DbEngine, Resource};
 pub(crate) const SCRIPT_NAME: &str = "rails_db_suffix.rb";
 pub(crate) const SUFFIX_VAR: &str = "WORKON_RAILS_DB_SUFFIX";
 
+/// Set to `server` in every workspace created from this version on, and stored in
+/// `.workon.json` beside the suffix. It makes the hook name a per-checkout name
+/// that passes the limit the way Postgres cuts it. A workspace without it keeps
+/// the tagged names its databases already have.
+pub(crate) const NAMES_VAR: &str = "WORKON_RAILS_DB_NAMES";
+pub(crate) const NAMES_SERVER: &str = "server";
+
 const SCRIPT: &str = include_str!("rails_db_suffix.rb");
 
 /// `rails runner` prints one row per development and test database. Boot noise
@@ -264,6 +271,17 @@ pub(crate) fn parse_db_listing(stdout: &str) -> Vec<Resource> {
     resources
 }
 
+/// Bytes of the suffix that name the workspace (`_ws_` and six hex digits). The
+/// hook cuts a long per-checkout name like Postgres and the cut keeps them.
+const IDENTITY_BYTES: usize = 10;
+
+/// A workspace database ends with the suffix, or is a per-checkout name the hook
+/// cut to the server's limit, which still carries the workspace's identity. A
+/// suffix too short to hold an identity matches by its end alone.
+fn is_workspace_name(name: &str, suffix: &str) -> bool {
+    name.ends_with(suffix) || suffix.get(..IDENTITY_BYTES).is_some_and(|identity| name.contains(identity))
+}
+
 /// Names that do not end with `suffix` are the primary checkout's databases.
 /// They are dropped from the list, and `false` says the hook missed a row.
 pub(crate) fn isolated_resources(listed: Vec<Resource>, suffix: &str) -> (Vec<Resource>, bool) {
@@ -271,7 +289,7 @@ pub(crate) fn isolated_resources(listed: Vec<Resource>, suffix: &str) -> (Vec<Re
         return (Vec::new(), false);
     }
     let isolated: Vec<Resource> =
-        listed.iter().filter(|resource| resource.db_name().ends_with(suffix)).cloned().collect();
+        listed.iter().filter(|resource| is_workspace_name(resource.db_name(), suffix)).cloned().collect();
     let all_isolated = isolated.len() == listed.len();
     (isolated, all_isolated)
 }
@@ -900,6 +918,26 @@ mod tests {
         let (isolated, all) = isolated_resources(listed, "_ws_1");
         assert!(!all);
         assert_eq!(isolated, vec![Resource::PostgresDb { name: "app_development_ws_1".into() }]);
+    }
+
+    /// The reported failure: the app's name ends with the suffix and passes 63
+    /// bytes, so the hook returns the server's cut, which no longer ends with it.
+    /// That cut is still this workspace's database, and the primary's is not.
+    #[test]
+    fn a_name_cut_to_the_server_limit_is_still_a_workspace_database() {
+        let suffix = "_ws_a4af64_quarterly_reports_summary";
+        let cut = "mylittleapp_development_mylittleapp_ws_a4af64_quarterly_reports";
+        assert_eq!(cut.len(), 63);
+        let listed = vec![
+            Resource::PostgresDb { name: cut.into() },
+            Resource::PostgresDb { name: "mylittleapp_development_mylittleapp".into() },
+        ];
+        let (isolated, all) = isolated_resources(listed, suffix);
+        assert!(!all);
+        assert_eq!(isolated, vec![Resource::PostgresDb { name: cut.into() }]);
+        let other =
+            Resource::PostgresDb { name: "mylittleapp_development_mylittleapp_ws_b1c2d3_quarterly_reports".into() };
+        assert!(isolated_resources(vec![other], suffix).0.is_empty(), "another workspace's cut is not this one's");
     }
 
     #[test]
