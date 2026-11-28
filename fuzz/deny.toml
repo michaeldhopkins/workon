@@ -1,0 +1,23 @@
+# Policy for the standalone fuzz workspace, run as `cargo deny check` from fuzz/.
+# Without this file cargo-deny reads ../deny.toml, which rejects libfuzzer-sys.
+# Keep it the same as ../deny.toml apart from the exception below.
+
+[advisories]
+version = 2
+
+[bans]
+multiple-versions = "warn"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "BSD-2-Clause",
+]
+
+# libfuzzer-sys bundles LLVM's libFuzzer, which is NCSA-licensed. It is only in
+# the fuzz build, never in workon itself.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
